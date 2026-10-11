@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 from datetime import UTC, datetime
 import errno
 import os
@@ -450,6 +451,83 @@ def test_acquire_pdf_uses_windows_fallback_with_korean_space_paths(
 
     assert record.input_kind == "local"
     assert (run_dir / "source.pdf").read_bytes() == PDF
+
+
+@pytest.fixture
+def windows_anchor_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[object, ...]], list[int]]:
+    opened: list[tuple[object, ...]] = []
+    closed: list[int] = []
+
+    def create_file(*args: object) -> int:
+        opened.append(args)
+        return 73
+
+    def close_handle(handle: int) -> bool:
+        closed.append(handle)
+        return True
+
+    kernel32 = SimpleNamespace(CreateFileW=create_file, CloseHandle=close_handle)
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+    return opened, closed
+
+
+def test_windows_run_anchor_requests_only_directory_list_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_anchor_api: tuple[list[tuple[object, ...]], list[int]],
+) -> None:
+    opened, closed = windows_anchor_api
+    monkeypatch.setattr(
+        acquire_module._WindowsDirectoryPathAnchor,
+        "current_path",
+        lambda _anchor: tmp_path,
+    )
+
+    anchor = acquire_module._open_windows_run_anchor(tmp_path)
+    try:
+        assert anchor.handle == 73
+        assert len(opened) == 1
+        recorded_args = opened[0]
+        assert recorded_args[0] == str(tmp_path.absolute())
+        assert recorded_args[1:] == (
+            0x00000001,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        assert closed == []
+    finally:
+        anchor.close()
+    assert closed == [73]
+
+
+def test_windows_run_anchor_closes_handle_when_path_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_anchor_api: tuple[list[tuple[object, ...]], list[int]],
+) -> None:
+    opened, closed = windows_anchor_api
+    failure = PdfAcquireError("injected current-path validation failure")
+
+    def fail_current_path(_anchor: object) -> Path:
+        raise failure
+
+    monkeypatch.setattr(
+        acquire_module._WindowsDirectoryPathAnchor, "current_path", fail_current_path
+    )
+
+    with pytest.raises(PdfAcquireError) as raised:
+        acquire_module._open_windows_run_anchor(tmp_path)
+
+    assert raised.value is failure
+    assert len(opened) == 1
+    assert closed == [73]
 
 
 def test_windows_fallback_maps_unsupported_link_to_pdf_acquire_error(

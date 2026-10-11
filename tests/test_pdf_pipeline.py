@@ -1216,6 +1216,27 @@ def test_final_snapshot_uses_windows_held_handle_for_child_enumeration(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows directory handles")
+def test_windows_root_anchor_enumerates_exact_unicode_children(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "root 한국어"
+    directory.mkdir()
+    (directory / "alpha.txt").write_bytes(b"alpha")
+    (directory / "한글.txt").write_bytes(b"korean")
+    (directory / "하위 폴더").mkdir()
+    anchor = pdf_assemble_module._open_directory_anchor(directory, "root")
+    try:
+        assert pdf_assemble_module._anchored_directory_names(anchor) == sorted(
+            ["alpha.txt", "한글.txt", "하위 폴더"]
+        )
+        assert pdf_assemble_module._anchored_directory_names(anchor) == sorted(
+            ["alpha.txt", "한글.txt", "하위 폴더"]
+        )
+    finally:
+        anchor.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory handles")
 def test_windows_enumerates_exact_children_from_the_held_directory_handle(
     tmp_path: Path,
 ) -> None:

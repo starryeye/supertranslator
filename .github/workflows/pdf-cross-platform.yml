@@ -43,8 +43,13 @@ jobs:
       - run: >-
           python -m pytest tests/test_pdf_pipeline.py tests/test_plugin_layout.py
           tests/test_poppler_bootstrap.py
+          tests/test_pdf_acquire.py::test_windows_run_anchor_requests_only_directory_list_access
+          tests/test_pdf_acquire.py::test_windows_run_anchor_closes_handle_when_path_validation_fails
+          tests/test_pdf_pipeline.py::test_windows_root_anchor_enumerates_exact_unicode_children
           tests/test_pdf_assemble.py::test_windows_native_relative_rename_moves_to_held_destination
           tests/test_pdf_assemble.py::test_windows_native_relative_rename_never_clobbers_existing_destination
+          tests/test_pdf_qa.py::test_prepare_figure_free_master_review_races_fail_closed
+          tests/test_pdf_qa.py::test_prepare_figure_free_review_unchanged_finalizes_exact_artifacts
           tests/test_pdf_qa.py::test_windows_publishes_nonempty_qa_directory_after_releasing_descendant_handles
           tests/test_pdf_qa.py::test_windows_nonempty_qa_directory_publication_never_clobbers_destination
           tests/test_pdf_pipeline.py::test_windows_finalize_durably_publishes_exact_reviewed_output

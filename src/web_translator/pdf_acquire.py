@@ -837,7 +837,7 @@ def _open_windows_run_anchor(path: Path) -> _WindowsDirectoryPathAnchor:
         create_file.restype = wintypes.HANDLE
         raw_handle = create_file(
             str(path.absolute()),
-            0,
+            0x00000001,
             0x00000001 | 0x00000002 | 0x00000004,
             None,
             3,
