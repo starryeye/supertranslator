@@ -2440,7 +2440,7 @@ def _validate_latin_density(
 ) -> str:
     """Enforce Korean prose density after explicit, evidenced exclusions."""
     try:
-        reviewed_names = parse_pdf_preserved_names(preserved_names or {})
+        reviewed_names = parse_pdf_preserved_names({} if preserved_names is None else preserved_names)
     except PdfSemanticReviewError as error:
         raise PdfQAFailure(str(error)) from error
     seen_terms: set[str] = set()
@@ -2449,6 +2449,13 @@ def _validate_latin_density(
     measured = 0
     for block in document.blocks:
         text = translations_by_block.get(block.id)
+        # Joined units have one logical rendering target; the other physical
+        # members deliberately have no separate normalized text.
+        if text is None:
+            continue
+        for record in reviewed_names.get(block.segment_id or "", []):
+            if preserved_name_pattern(record["text"]).search(text) is None:
+                raise PdfQAFailure("preserved name did not survive PDF normalization exactly")
         if text is None or block.semantic_role == "reference-entry":
             continue
         if block.kind == "caption" and _FIGURE_LABEL.search(block.source_text):
@@ -2468,7 +2475,11 @@ def _validate_latin_density(
                     exclusions.append(f"protected-{token.kind}")
                     start = found + len(token.value)
         for record in reviewed_names.get(block.segment_id or "", []):
-            _mask_matches(characters, preserved_name_pattern(record["text"]), "reviewed-name", exclusions)
+            # All matches use the unchanged visible text: shorter approvals and
+            # existing protected values must not hide overlapping longer names.
+            for match in preserved_name_pattern(record["text"]).finditer(text):
+                _mask_span(characters, match.start(), match.end())
+                exclusions.append("reviewed-name")
         if block.semantic_role in _TOC_ROLES:
             reference = _TOC_SOURCE_REFERENCE.fullmatch(block.source_text)
             if reference is not None:
@@ -2637,14 +2648,15 @@ def _validate_contracts(
     layout: PdfAssemblyLayout,
     output_dir: Path,
 ) -> list[tuple[Any, Segment, str]]:
-    del review
     try:
         if document.schema_version == "1.2":
             validate_pdf_unit_layout(document, layout)
             normalized = [(item.source_blocks[0], item.segment, item.text)
-                          for item in assembly.normalize_pdf_units(document, segments, translations, glossary)]
+                          for item in assembly.normalize_pdf_units(document, segments, translations, glossary,
+                              preserved_names=review.get("preserved_names", {}))]
         else:
-            normalized = assembly._normalize_pdf_translations(document, segments, translations, glossary)
+            normalized = assembly._normalize_pdf_translations(document, segments, translations, glossary,
+                preserved_names=review.get("preserved_names", {}))
         assembly._validate_rich_relationships(document)
     except PdfAssemblyError as error:
         raise PdfQAFailure(f"PDF contract QA failed: {error}") from error

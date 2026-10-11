@@ -625,6 +625,9 @@ def make_render_unit_run(root, *, case="joined"):
              else ("7. A paragraph" if case == "list" else "A paragraph", "continues."))
     if case == "links":
         texts = ("First Alpha continues", "second Beta ends.")
+    if case == "preserved-names":
+        texts = ("Orion Cache Engine and Vega Cache Engine repeat Orion Cache Engine.",
+                 "Cache appears outside names and Cache appears later.")
     if colliding_labels:
         texts = (f"First {colliding_labels[0]} and Delta continue", f"second {colliding_labels[1]} ends.")
     document = make_unit_document(texts, operation="space")
@@ -706,6 +709,9 @@ def make_render_unit_run(root, *, case="joined"):
     body_text = "문단 전체를 번역한 검증 문장"
     if case == "links":
         body_text += " Alpha 내부 참조와 Beta 외부 참조입니다."
+    if case == "preserved-names":
+        body_text = ("Orion Cache Engine와 Vega Cache Engine, Orion Cache Engine는 이름입니다. "
+                     "Cache는 이름 밖의 용어이고 Cache는 나중 용어입니다.")
     if colliding_labels:
         body_text += (" Alpha와 Delta 참조입니다." if case.startswith("equal-links")
                       else " Alpha Beta Gamma와 Delta 참조입니다.")

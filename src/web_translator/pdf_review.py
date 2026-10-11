@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import unicodedata
 from typing import Any
 
 from web_translator.pdf_models import PdfContractError, PdfDocument
@@ -388,7 +390,19 @@ def validate_pdf_semantic_review_snapshot(
 
 def preserved_name_pattern(text: str) -> re.Pattern[str]:
     """Keep exact name spelling while allowing attached Korean particles."""
-    return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(text)}(?![A-Za-z0-9_])")
+    boundary = _preserved_name_boundary()
+    return re.compile(rf"(?<!{boundary}){re.escape(text)}(?!{boundary})")
+
+
+@lru_cache(maxsize=1)
+def _preserved_name_boundary() -> str:
+    """Refuse adjoining Unicode word/mark spelling, permitting Hangul particles."""
+    adjoining = "".join(chr(value) for value in range(128, 0x110000)
+        if unicodedata.category(chr(value)).startswith("M"))
+    # Unicode \w includes Latin modifier/compatibility letters as well as ASCII
+    # letters, digits and underscore. Exclude Hangul, not its exact source text.
+    word = r"[^\W\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff\uffa0-\uffdc]"
+    return rf"(?:{word}|[{re.escape(adjoining)}])"
 
 
 def parse_pdf_preserved_names(value: Any) -> dict[str, list[dict[str, str]]]:

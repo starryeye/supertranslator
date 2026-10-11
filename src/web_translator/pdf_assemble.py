@@ -283,9 +283,11 @@ def assemble_pdf(
             evidence_files["review.json"] = _open_anchored_input_file(run_anchor, "review.json", "PDF master review")
             figure_review_bytes = _read_opened_bytes(evidence_files["review.json"], run_dir / "review.json", "PDF master review")
             review_value = _master_review_from_bytes(figure_review_bytes)
-        if (any(block.kind == "figure" for block in document.blocks)
+        needs_figure_review = (any(block.kind == "figure" for block in document.blocks)
                 or FIGURE_TEXT_INPUT_NAME in _anchored_directory_names(run_anchor)
-                or "figure_text_review" in review_value):
+                or "figure_text_review" in review_value)
+        if (needs_figure_review or ("preserved_names" in review_value
+                                   and review_value["preserved_names"] != {})):
             from web_translator.pdf_review import hold_pdf_semantic_inputs, validate_pdf_semantic_review_snapshot
             if semantic_snapshot is None:
                 semantic_snapshot = binding_stack.enter_context(hold_pdf_semantic_inputs(run_anchor))
@@ -301,10 +303,11 @@ def assemble_pdf(
             _semantic_review_from_value(review_value, set(zone_values), None)
             if review_value.get("unresolved_required"):
                 raise PdfAssemblyError("semantic review has unresolved required findings")
-            figure_inputs = binding_stack.enter_context(hold_pdf_figure_inputs(run_anchor))
-            validate_current_pdf_figure_review(figure_inputs,
-                inventory_bytes=semantic_snapshot.payloads[FIGURE_TEXT_INPUT_NAME],
-                review_value=review_value["figure_text_review"])
+            if needs_figure_review:
+                figure_inputs = binding_stack.enter_context(hold_pdf_figure_inputs(run_anchor))
+                validate_current_pdf_figure_review(figure_inputs,
+                    inventory_bytes=semantic_snapshot.payloads[FIGURE_TEXT_INPUT_NAME],
+                    review_value=review_value["figure_text_review"])
         if document.schema_version == "1.2":
             from web_translator.pdf_unit_bindings import _binding_from_payloads, _hold_pdf_unit_inputs
 
@@ -340,11 +343,14 @@ def assemble_pdf(
                 raise PdfAssemblyError(
                     "held PDF glossary disagrees with assembly arguments"
                 )
-        render_units = (normalize_pdf_units(document, segments, consumed_translations, consumed_glossary)
+        preserved_names = review_value.get("preserved_names", {})
+        render_units = (normalize_pdf_units(document, segments, consumed_translations, consumed_glossary,
+                                           preserved_names=preserved_names)
                         if document.schema_version == "1.2" else [])
         ordered = ([(item.source_blocks[0], item.segment, item.text) for item in render_units]
                    if document.schema_version == "1.2" else
-                   _normalize_pdf_translations(document, segments, consumed_translations, consumed_glossary))
+                   _normalize_pdf_translations(document, segments, consumed_translations, consumed_glossary,
+                                               preserved_names=preserved_names))
         toc_resolutions = _resolve_toc_targets(document)
         identity_links = _protected_note_links(document, render_units)
         document = replace(
@@ -354,7 +360,8 @@ def assemble_pdf(
                 {member.id: item.text for item in render_units for member in item.source_blocks}
                 if render_units else ordered), strict=True)],
         )
-        unit_markup, unit_links = _unit_markups(document, render_units, consumed_translations, consumed_glossary)
+        unit_markup, unit_links = _unit_markups(document, render_units, consumed_translations, consumed_glossary,
+                                               preserved_names=preserved_names)
         document = replace(document, links=list(unit_links))
         _validate_rich_relationships(document)
         media_payloads: dict[str, bytes] = {}
@@ -458,6 +465,7 @@ def assemble_pdf(
             binding_inputs.verify()
         if figure_inputs is not None:
             figure_inputs.verify()
+        if semantic_snapshot is not None and "review.json" in evidence_files:
             if _read_opened_bytes(evidence_files["review.json"], run_dir / "review.json", "PDF master review") != figure_review_bytes:
                 raise PdfAssemblyError("PDF master review changed content during assembly")
         if semantic_snapshot is not None:
@@ -489,8 +497,10 @@ def assemble_pdf(
             binding_inputs.verify()
         if figure_inputs is not None:
             figure_inputs.verify()
+        if semantic_snapshot is not None:
             _verify_semantic_snapshot(semantic_snapshot, run_anchor)
             _verify_anchored_evidence(run_anchor, evidence_files)
+        if semantic_snapshot is not None and "review.json" in evidence_files:
             if _read_opened_bytes(evidence_files["review.json"], run_dir / "review.json", "PDF master review") != figure_review_bytes:
                 raise PdfAssemblyError("PDF master review changed content during assembly")
         binding_stack.close()
@@ -720,6 +730,7 @@ def _normalize_pdf_translations(
     segments: Sequence[Segment],
     translations: Mapping[str, Translation],
     glossary: Mapping[str, str],
+    *, preserved_names: Mapping[str, Any] | None = None,
 ) -> list[tuple[PdfBlock, Segment, str]]:
     if not isinstance(translations, Mapping):
         raise PdfAssemblyError("translations must be a mapping")
@@ -801,18 +812,8 @@ def _normalize_pdf_translations(
             "translations must exactly cover PDF targets (" + "; ".join(details) + ")"
         )
 
-    ordered_records = [translation_map[segment.id] for _block, segment in ordered_pairs]
-    try:
-        normalized = normalize_terminology(
-            ordered_records,
-            glossary,
-            policy="korean-first",
-            protected_by_segment={
-                segment.id: segment.protected for _block, segment in ordered_pairs
-            },
-        )
-    except TerminologyError as error:
-        raise PdfAssemblyError(f"terminology normalization failed: {error}") from error
+    normalized = _normalized_unit_records([segment for _block, segment in ordered_pairs],
+        translation_map, glossary, preserved_names=preserved_names)
 
     restored: list[tuple[PdfBlock, Segment, str]] = []
     for (block, segment), record in zip(ordered_pairs, normalized, strict=True):
@@ -828,6 +829,7 @@ def _normalize_pdf_translations(
 
 def _normalized_unit_records(
     segments: Sequence[Segment], translations: Mapping[str, Translation], glossary: Mapping[str, str],
+    *, preserved_names: Mapping[str, Any] | None = None,
 ) -> list[Translation]:
     if not isinstance(translations, Mapping):
         raise PdfAssemblyError("translations must be a mapping")
@@ -836,16 +838,100 @@ def _normalized_unit_records(
         raise PdfAssemblyError("translation keys must match Translation record IDs")
     if set(translations) != {segment.id for segment in segments}:
         raise PdfAssemblyError("translations must exactly cover PDF targets")
+    from web_translator.pdf_review import (
+        parse_pdf_preserved_names, preserved_name_pattern, PdfSemanticReviewError,
+    )
     try:
-        return normalize_terminology([translations[segment.id] for segment in segments], glossary,
+        names = parse_pdf_preserved_names({} if preserved_names is None else preserved_names)
+        if set(names) - {segment.id for segment in segments}:
+            raise PdfAssemblyError("preserved name refers to an unknown translation target")
+        masked, restorations, expected_counts = [], {}, {}
+        for segment in segments:
+            record = translations[segment.id]
+            approvals = names.get(segment.id, [])
+            if not approvals:
+                masked.append(record)
+                continue
+            source = restore_tokens(segment.source_text, segment.protected)
+            visible = restore_tokens(record.text, segment.protected)
+            spans, counts = [], {}
+            for approval in approvals:
+                pattern = preserved_name_pattern(approval["text"])
+                matches = list(pattern.finditer(visible))
+                if pattern.search(source) is None or not matches:
+                    raise PdfAssemblyError("preserved name is not exact in source and translation")
+                spans.extend((match.start(), match.end()) for match in matches)
+                counts[approval["text"]] = len(matches)
+            masked_text, originals = _mask_pdf_name_spans(record.text, segment, spans, glossary)
+            masked.append(replace(record, text=masked_text))
+            restorations[segment.id] = originals
+            expected_counts[segment.id] = counts
+        normalized = normalize_terminology(masked, glossary,
             policy="korean-first", protected_by_segment={s.id: s.protected for s in segments})
+        result = []
+        for segment, record in zip(segments, normalized, strict=True):
+            originals = restorations.get(segment.id, {})
+            if originals:
+                # One simultaneous replacement prevents nested original token values
+                # from being interpreted as our temporary opaque placeholders.
+                pattern = re.compile("|".join(re.escape(token) for token in originals))
+                record = replace(record, text=pattern.sub(lambda match: originals[match[0]], record.text))
+                visible = restore_tokens(record.text, segment.protected)
+                for name, count in expected_counts[segment.id].items():
+                    if len(list(preserved_name_pattern(name).finditer(visible))) < count:
+                        raise PdfAssemblyError("preserved name did not survive PDF normalization exactly")
+            result.append(record)
+        return result
+    except (PdfSemanticReviewError, ProtectionError) as error:
+        raise PdfAssemblyError(str(error)) from error
     except TerminologyError as error:
         raise PdfAssemblyError(f"terminology normalization failed: {error}") from error
+
+
+def _mask_pdf_name_spans(
+    text: str, segment: Segment, spans: Sequence[tuple[int, int]], glossary: Mapping[str, str],
+) -> tuple[str, dict[str, str]]:
+    """Project approved visible spans to raw text, retaining original token identity."""
+    token_map = {token.token: token.value for token in segment.protected}
+    positions: list[tuple[int, int]] = []
+    cursor = 0
+    for match in re.finditer(r"⟦WT:\d{6}⟧", text):
+        positions.extend((index, index + 1) for index in range(cursor, match.start()))
+        positions.extend([(match.start(), match.end())] * len(token_map[match[0]]))
+        cursor = match.end()
+    positions.extend((index, index + 1) for index in range(cursor, len(text)))
+    raw_spans = sorted((positions[start][0], positions[end - 1][1]) for start, end in spans)
+    merged: list[tuple[int, int]] = []
+    for start, end in raw_spans:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    occupied = set(re.findall(r"⟦WT:\d{6}⟧", " ".join([
+        text, segment.source_text, *token_map, *token_map.values(),
+        *glossary.keys(), *glossary.values()])))
+    parts, originals = [], {}
+    cursor, index = 0, 0
+    for start, end in merged:
+        token = f"⟦WT:{index:06d}⟧"
+        while token in occupied:
+            index += 1
+            token = f"⟦WT:{index:06d}⟧"
+        if index > 999999:
+            raise PdfAssemblyError("no collision-free PDF name placeholder available")
+        occupied.add(token)
+        index += 1
+        originals[token] = text[start:end]
+        parts.extend((text[cursor:start], token))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts), originals
 
 
 def normalize_pdf_units(
     document: PdfDocument, segments: Sequence[Segment],
     translations: Mapping[str, Translation], glossary: Mapping[str, str],
+    *, preserved_names: Mapping[str, Any] | None = None,
 ) -> list[PdfRenderUnit]:
     """Normalize one target per declared unit, keeping physical provenance immutable."""
     from web_translator.pdf_units import validate_unit_membership
@@ -861,7 +947,7 @@ def normalize_pdf_units(
     if [unit.segment_id for unit in document.translation_units] != [s.id for s in targets]:
         raise PdfAssemblyError("PDF units and target segments must match exactly in document order")
     blocks = {block.id: block for block in document.blocks}
-    normalized = _normalized_unit_records(targets, translations, glossary)
+    normalized = _normalized_unit_records(targets, translations, glossary, preserved_names=preserved_names)
     result = []
     for unit, segment, record in zip(document.translation_units, targets, normalized, strict=True):
         if segment.locator != unit.source_block_ids[0] or segment.semantic_type != unit.kind:
@@ -895,12 +981,14 @@ def _protected_note_links(document: PdfDocument, units: Sequence[PdfRenderUnit])
 def _unit_markups(
     document: PdfDocument, units: Sequence[PdfRenderUnit],
     translations: Mapping[str, Translation], glossary: Mapping[str, str],
+    *, preserved_names: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, str], tuple[PdfLinkEvidence, ...]]:
     """Resolve unit-wide link evidence before emitting identity-preserving markup."""
     from web_translator.pdf_units import project_protected_occurrences
     if not units:
         return {}, tuple(document.links)
-    records = _normalized_unit_records([item.segment for item in units], translations, glossary)
+    records = _normalized_unit_records([item.segment for item in units], translations, glossary,
+                                       preserved_names=preserved_names)
     blocks = {block.id: block for block in document.blocks}
     identity_links = _protected_note_links(document, units)
     result = {}
