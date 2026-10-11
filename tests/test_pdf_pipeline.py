@@ -634,6 +634,97 @@ def test_semantic_oracle_rejects_any_source_absent_latin_span(
         )
 
 
+def _assert_fixture_bytes_equal(
+    expected_root: Path, actual_root: Path, relatives: list[Path]
+) -> None:
+    mismatches = []
+    for relative in relatives:
+        expected = (expected_root / relative).read_bytes()
+        actual = (actual_root / relative).read_bytes()
+        if expected == actual:
+            continue
+        first_offset = next(
+            (offset for offset, (left, right) in enumerate(zip(expected, actual))
+             if left != right),
+            min(len(expected), len(actual)),
+        )
+        start = max(0, first_offset - 8)
+        stop = first_offset + 9
+        mismatches.append(
+            f"{relative.as_posix()}: "
+            f"expected_len={len(expected)} actual_len={len(actual)} "
+            f"expected_sha256={hashlib.sha256(expected).hexdigest()} "
+            f"actual_sha256={hashlib.sha256(actual).hexdigest()} "
+            f"first_offset={first_offset} "
+            f"expected_hex={expected[start:stop].hex()} "
+            f"actual_hex={actual[start:stop].hex()}"
+        )
+    if mismatches:
+        raise AssertionError("Fixture byte mismatches:\n" + "\n".join(mismatches))
+
+
+# Test-helper mutation caught: hiding a mismatch or reporting the wrong byte evidence.
+def test_fixture_byte_comparison_reports_exact_mismatch(tmp_path: Path) -> None:
+    expected_root = tmp_path / "expected"
+    actual_root = tmp_path / "actual"
+    expected_root.mkdir()
+    actual_root.mkdir()
+    expected_files = {
+        "same.txt": b"same",
+        "changed.pdf": b"abc",
+        "tail.pdf": b"ab",
+    }
+    actual_files = {
+        "same.txt": b"same",
+        "changed.pdf": b"axc",
+        "tail.pdf": b"abc",
+    }
+    for name, content in expected_files.items():
+        (expected_root / name).write_bytes(content)
+    for name, content in actual_files.items():
+        (actual_root / name).write_bytes(content)
+    relatives = [Path(name) for name in expected_files]
+
+    with pytest.raises(AssertionError) as error:
+        _assert_fixture_bytes_equal(expected_root, actual_root, relatives)
+    message = str(error.value)
+    assert "changed.pdf" in message and "tail.pdf" in message
+    assert "same.txt" not in message
+    assert "first_offset=1" in message and "first_offset=2" in message
+    assert "expected_len=2" in message and "actual_len=3" in message
+    assert hashlib.sha256(b"abc").hexdigest() in message
+    assert hashlib.sha256(b"axc").hexdigest() in message
+    expected_diagnostics = {
+        "changed.pdf": (
+            "expected_len=3", "actual_len=3",
+            f"expected_sha256={hashlib.sha256(b'abc').hexdigest()}",
+            f"actual_sha256={hashlib.sha256(b'axc').hexdigest()}",
+            "first_offset=1", "expected_hex=616263", "actual_hex=617863",
+        ),
+        "tail.pdf": (
+            "expected_len=2", "actual_len=3",
+            f"expected_sha256={hashlib.sha256(b'ab').hexdigest()}",
+            f"actual_sha256={hashlib.sha256(b'abc').hexdigest()}",
+            "first_offset=2", "expected_hex=6162", "actual_hex=616263",
+        ),
+    }
+    for name, diagnostics in expected_diagnostics.items():
+        line = next(line for line in message.splitlines() if name in line)
+        assert all(diagnostic in line for diagnostic in diagnostics)
+
+
+# Test-helper mutation caught: rejecting equal fixture bytes.
+def test_fixture_byte_comparison_accepts_identical_files(tmp_path: Path) -> None:
+    expected_root = tmp_path / "expected"
+    actual_root = tmp_path / "actual"
+    expected_root.mkdir()
+    actual_root.mkdir()
+    (expected_root / "same.txt").write_bytes(b"same")
+    (actual_root / "same.txt").write_bytes(b"same")
+
+    _assert_fixture_bytes_equal(expected_root, actual_root, [Path("same.txt")])
+
+
 # Production mutation caught: nondeterministic or incomplete committed acceptance inputs.
 def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
     tmp_path: Path,
@@ -665,11 +756,7 @@ def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
         if path.is_file()
     )
     assert regenerated_files == committed_files
-    assert all(
-        (regenerated / relative).read_bytes()
-        == (PDF_FIXTURE_ROOT / relative).read_bytes()
-        for relative in committed_files
-    )
+    _assert_fixture_bytes_equal(PDF_FIXTURE_ROOT, regenerated, committed_files)
 
     repository_root = PDF_FIXTURE_ROOT.parents[2]
     windows_checkout = tmp_path / "windows-checkout"
@@ -693,13 +780,7 @@ def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
         text=True,
     )
     windows_fixture_root = windows_checkout / "tests" / "fixtures" / "pdf"
-    windows_mismatches = [
-        str(relative)
-        for relative in committed_files
-        if (regenerated / relative).read_bytes()
-        != (windows_fixture_root / relative).read_bytes()
-    ]
-    assert windows_mismatches == []
+    _assert_fixture_bytes_equal(windows_fixture_root, regenerated, committed_files)
 
 
 @pytest.mark.parametrize(
