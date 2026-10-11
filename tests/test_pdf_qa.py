@@ -79,6 +79,112 @@ def make_native_unit_qa_run(tmp_path, *, case="joined"):
     return PdfQARun(run, output), document, layout
 
 
+def _assembled_figure_free_review_case(tmp_path: Path, shape: str) -> tuple[Path, Path]:
+    if shape == "plain":
+        run, _document, _layout = make_native_unit_qa_run(tmp_path)
+        return run.run_dir, run.output_dir
+    if shape == "name-only":
+        from tests.test_pdf_name_preservation import approved_run
+
+        run_dir, _document, _segments, translations, glossary, _review = approved_run(tmp_path)
+        output_dir = tmp_path / "output"
+        assemble_pdf(run_dir, translations, glossary, output_dir)
+        return run_dir, output_dir
+    from tests.test_pdf_figure_review import publication_case
+
+    assert shape == "optional-empty"
+    run, translations = publication_case(tmp_path, case="figure-free", evidence=True)
+    assemble_pdf(run.run_dir, translations, {}, run.output_dir)
+    return run.run_dir, run.output_dir
+
+
+# Production mutation caught: skipping master-review lifetime checks without figures.
+@pytest.mark.parametrize("shape", ["plain", "name-only", "optional-empty"])
+@pytest.mark.parametrize("mutation", ["content", "identity"])
+@pytest.mark.parametrize("hook", ["render", "pages-publish", "json-publish"])
+@pytest.mark.parametrize("prior", [False, True])
+def test_prepare_figure_free_master_review_races_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    mutation: str,
+    hook: str,
+    prior: bool,
+) -> None:
+    run_dir, output_dir = _assembled_figure_free_review_case(tmp_path, shape)
+    if prior:
+        prepare_pdf_qa(run_dir, output_dir)
+    review_path = run_dir / "review.json"
+    original_review = review_path.read_bytes()
+    original_identity = (review_path.stat().st_dev, review_path.stat().st_ino)
+    staged_before = (run_dir / "staged-output/translated.pdf").read_bytes()
+    prior_record = (run_dir / "pdf-qa.json").read_bytes() if prior else None
+    prior_pages = {
+        path.relative_to(run_dir / "qa-pages"): path.read_bytes() if path.is_file() else None
+        for path in (run_dir / "qa-pages").rglob("*")
+    } if prior else {}
+    fired = False
+    saved_review = run_dir / ".test-held-master-review.json"
+
+    def mutate_review() -> None:
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        if mutation == "identity":
+            review_path.rename(saved_review)
+        review_path.write_bytes(original_review + (b" " if mutation == "content" else b""))
+        current_identity = (review_path.stat().st_dev, review_path.stat().st_ino)
+        assert (current_identity == original_identity) is (mutation == "content")
+
+    if hook == "render":
+        target, name = pdf_qa_module, "render_pdf_pages"
+    elif hook == "pages-publish":
+        target, name = pdf_qa_module, "_publish_qa_artifact_directory"
+    else:
+        target, name = pdf_qa_module.assembly, "_publish_new_file"
+    original = getattr(target, name)
+
+    def run_then_mutate(*args: object, **kwargs: object) -> object:
+        result = original(*args, **kwargs)
+        if hook != "json-publish" or args[3] == "pdf-qa.json":
+            mutate_review()
+        return result
+
+    monkeypatch.setattr(target, name, run_then_mutate)
+    with pytest.raises(PdfQAFailure):
+        prepare_pdf_qa(run_dir, output_dir)
+    assert fired
+    assert review_path.read_bytes() == original_review + (b" " if mutation == "content" else b"")
+    if mutation == "identity":
+        assert saved_review.read_bytes() == original_review
+    assert (run_dir / "staged-output/translated.pdf").read_bytes() == staged_before
+    assert not output_dir.exists()
+    if prior:
+        assert (run_dir / "pdf-qa.json").read_bytes() == prior_record
+        assert {
+            path.relative_to(run_dir / "qa-pages"): path.read_bytes() if path.is_file() else None
+            for path in (run_dir / "qa-pages").rglob("*")
+        } == prior_pages
+    else:
+        assert not (run_dir / "pdf-qa.json").exists()
+        assert not (run_dir / "qa-pages").exists()
+
+
+# Production mutation caught: refusing an unchanged figure-free master review.
+@pytest.mark.parametrize("shape", ["plain", "name-only", "optional-empty"])
+def test_prepare_figure_free_review_unchanged_finalizes_exact_artifacts(
+    tmp_path: Path, shape: str,
+) -> None:
+    run_dir, output_dir = _assembled_figure_free_review_case(tmp_path, shape)
+    prepare_pdf_qa(run_dir, output_dir)
+    _write_passing_layout_review(run_dir)
+    finalize_pdf_output(run_dir, output_dir)
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "manifest.json", "review-report.md", "translated.pdf",
+    ]
+
+
 @pytest.mark.parametrize("damage", ["missing-member", "foreign-member", "duplicate", "missing-part", "reordered-parts", "wrong-owner", "orphan-note", "anchor"])
 def test_unit_layout_rejects_lost_members_and_logical_ownership(tmp_path, damage):
     from dataclasses import replace

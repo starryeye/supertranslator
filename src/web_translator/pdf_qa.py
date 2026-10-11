@@ -1696,9 +1696,8 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
 
 def _verify_prepare_figure_snapshot(run_anchor: Any, opened: Mapping[str, Any],
                                    figure_snapshot: Any | None, review_bytes: bytes | None) -> None:
-    if figure_snapshot is None:
-        return
-    figure_snapshot.verify()
+    if figure_snapshot is not None:
+        figure_snapshot.verify()
     assembly._verify_anchored_evidence(run_anchor, {"review.json": opened["review.json"]})
     if assembly._read_opened_bytes(opened["review.json"], run_anchor.path / "review.json", "PDF master review") != review_bytes:
         raise PdfQAFailure("PDF master review changed content during QA preparation")
