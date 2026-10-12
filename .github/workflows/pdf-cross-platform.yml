@@ -55,3 +55,13 @@ jobs:
           tests/test_pdf_qa.py::test_windows_nonempty_qa_directory_publication_never_clobbers_destination
           tests/test_pdf_pipeline.py::test_windows_finalize_durably_publishes_exact_reviewed_output
           tests/test_pdf_pipeline.py::test_windows_finalize_failure_cleanup_preserves_error_and_retries_immediately -q
+      - name: Retain synthetic figure inventory evidence
+        if: always()
+        run: python -m tests.pdf_fixture_probe --output-dir "${{ runner.temp }}/pdf-fixture-probe"
+      - name: Upload synthetic figure inventory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-fixture-probe-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pdf-fixture-probe
+          if-no-files-found: error

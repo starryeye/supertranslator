@@ -725,6 +725,139 @@ def test_fixture_byte_comparison_accepts_identical_files(tmp_path: Path) -> None
     _assert_fixture_bytes_equal(expected_root, actual_root, [Path("same.txt")])
 
 
+# Probe mutation caught: losing/changing producer evidence or clobbering prior capture.
+def test_figure_fixture_probe_retains_exact_inventory_and_artwork(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from copy import deepcopy
+    from importlib.metadata import version
+    from io import BytesIO
+    import sys
+    import zlib
+    from PIL import Image
+    import web_translator.pdf_figure_review as figure_review
+    from tests.pdf_fixture_probe import capture_figure_fixture_inventory
+
+    committed_before = {
+        path.relative_to(PDF_FIXTURE_ROOT): path.read_bytes()
+        for path in PDF_FIXTURE_ROOT.rglob("*") if path.is_file()
+    }
+    assert len(committed_before) == 33
+    original_builder = figure_review.build_pdf_figure_text_input
+    original_canonical = figure_review.canonical_figure_text_input_bytes
+    observed = []
+    consumed_inventories = []
+
+    def observe_real_builder(document, *, document_bytes, source_pdf_bytes, media_payloads):
+        inventory = original_builder(
+            document, document_bytes=document_bytes, source_pdf_bytes=source_pdf_bytes,
+            media_payloads=media_payloads,
+        )
+        observed.append({
+            "inventory": inventory, "before": deepcopy(inventory),
+            "document": document_bytes, "source": source_pdf_bytes,
+            "media": dict(media_payloads),
+        })
+        return inventory
+
+    def observe_canonical_consumer(inventory):
+        consumed_inventories.append(inventory)
+        return original_canonical(inventory)
+
+    monkeypatch.setattr(figure_review, "build_pdf_figure_text_input", observe_real_builder)
+    monkeypatch.setattr(figure_review, "canonical_figure_text_input_bytes", observe_canonical_consumer)
+    output_dir = tmp_path / "figure-probe"
+    assert not output_dir.exists()
+    summary = capture_figure_fixture_inventory(output_dir)
+    assert len(observed) == 1
+    actual = observed[0]
+    assert figure_review.build_pdf_figure_text_input is observe_real_builder
+    assert actual["inventory"] == actual["before"]
+    assert summary["inventory"]["value"] is actual["inventory"]
+    # Both retention and the real review producer consume the original object.
+    assert len(consumed_inventories) == 2
+    assert all(value is actual["inventory"] for value in consumed_inventories)
+    summary_bytes = (output_dir / "summary.json").read_bytes()
+    assert b"\r" not in summary_bytes
+    assert json.loads(summary_bytes.decode("utf-8")) == summary
+
+    records = [summary[name] for name in ("source", "document", "inventory")]
+    records += summary["media"] + list(summary["review"][name] for name in ("expected", "actual"))
+    for record in records:
+        payload = (output_dir / record["path"]).read_bytes()
+        assert record["bytes_len"] == len(payload)
+        assert record["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert (output_dir / summary["source"]["path"]).read_bytes() == actual["source"]
+    document_bytes = (output_dir / summary["document"]["path"]).read_bytes()
+    assert document_bytes == actual["document"]
+    assert summary["document"]["crlf_count"] == document_bytes.count(b"\r\n")
+    inventory_bytes = (output_dir / summary["inventory"]["path"]).read_bytes()
+    assert inventory_bytes == original_canonical(actual["before"])
+    inventory = json.loads(inventory_bytes)
+    assert inventory["source_sha256"] == summary["source"]["sha256"]
+    assert inventory["document_sha256"] == summary["document"]["sha256"]
+    assert len(summary["media"]) == len(inventory["figures"]) == 2
+    for media, figure in zip(summary["media"], inventory["figures"], strict=True):
+        payload = (output_dir / media["path"]).read_bytes()
+        assert payload == actual["media"][figure["block_id"]]
+        assert media["block_id"] == figure["block_id"]
+        assert media["sha256"] == figure["media_sha256"]
+        assert media["bbox"] == figure["bbox"]
+        assert media["characters"] == figure["characters"]
+        assert media["page_number"] == figure["page_number"]
+        assert ":" not in media["path"]
+        with Image.open(BytesIO(payload)) as image:
+            image.load()
+            assert media["mode"] == image.mode
+            assert media["size"] == list(image.size) == [440, 220]
+            assert media["pixels_sha256"] == hashlib.sha256(image.tobytes()).hexdigest()
+    expected_review = (PDF_FIXTURE_ROOT / "figures-captions-v1/review.json").read_bytes()
+    generated_review = (output_dir / summary["review"]["actual"]["path"]).read_bytes()
+    assert (output_dir / summary["review"]["expected"]["path"]).read_bytes() == expected_review
+    assert summary["review"]["strict_equal"] == (generated_review == expected_review)
+    assert json.loads(generated_review)["figure_text_review"]["inventory_sha256"] == summary["inventory"]["sha256"]
+    assert summary["review"]["expected_inventory_sha256"] == json.loads(expected_review)["figure_text_review"]["inventory_sha256"]
+    generated = output_dir / "generated/figures-captions-v1"
+    comparisons = summary["generated_file_comparisons"]
+    assert {record["path"] for record in comparisons} == {
+        path.relative_to(generated).as_posix() for path in generated.rglob("*") if path.is_file()
+    }
+    for record in comparisons:
+        expected = (PDF_FIXTURE_ROOT / "figures-captions-v1" / record["path"]).read_bytes()
+        payload = (generated / record["path"]).read_bytes()
+        assert record["expected_sha256"] == hashlib.sha256(expected).hexdigest()
+        assert record["actual_sha256"] == hashlib.sha256(payload).hexdigest()
+        assert record["strict_equal"] == (expected == payload)
+    for name, installed_version in summary["dependencies"].items():
+        assert installed_version == version(name)
+    assert set(summary["dependencies"]) == {"pypdf", "reportlab", "pdfplumber", "Pillow", "pdfminer.six", "fonttools"}
+    assert set(summary["poppler"]) == {"pdfinfo", "pdftoppm"}
+    tools = pdf_media_module.find_poppler()
+    for name, executable in (("pdfinfo", tools.pdfinfo), ("pdftoppm", tools.pdftoppm)):
+        actual_version = subprocess.run(
+            [str(executable), "-v"], capture_output=True, encoding="utf-8", check=True,
+        ).stderr.strip()
+        assert summary["poppler"][name] == actual_version
+    assert summary["python"] == sys.version
+    assert summary["zlib_version"] == zlib.ZLIB_VERSION
+    assert summary["zlib_runtime_version"] == zlib.ZLIB_RUNTIME_VERSION
+    retained_before = {
+        path.relative_to(output_dir): path.read_bytes()
+        for path in output_dir.rglob("*") if path.is_file()
+    }
+    with pytest.raises(FileExistsError):
+        capture_figure_fixture_inventory(output_dir)
+    assert len(observed) == 1
+    assert retained_before == {
+        path.relative_to(output_dir): path.read_bytes()
+        for path in output_dir.rglob("*") if path.is_file()
+    }
+    assert committed_before == {
+        path.relative_to(PDF_FIXTURE_ROOT): path.read_bytes()
+        for path in PDF_FIXTURE_ROOT.rglob("*") if path.is_file()
+    }
+
+
 # Production mutation caught: nondeterministic or incomplete committed acceptance inputs.
 def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
     tmp_path: Path,
