@@ -41,7 +41,8 @@ def approved_run(tmp_path, *, notes=False):
     _write_json(run / "glossary.json", glossary)
     (run / "translations").mkdir()
     (run / "translations/zone-001.jsonl").write_text("".join(
-        json.dumps(record.to_dict(), ensure_ascii=False) + "\n" for record in translations.values()))
+        json.dumps(record.to_dict(), ensure_ascii=False) + "\n" for record in translations.values()),
+        encoding="utf-8", newline="\n")
     _write_review(run)
     review = json.loads((run / "review.json").read_bytes())
     review["preserved_names"] = {segments[0].id: [

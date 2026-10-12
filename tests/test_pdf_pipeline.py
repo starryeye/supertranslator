@@ -201,7 +201,7 @@ def test_unit_final_report_retains_ambiguous_link_destinations(tmp_path):
     warnings = manifest["qa"]["warnings"]
     for destination in ("https://example.org/1", "https://example.org/2"):
         assert any(destination in warning and "translated-visible-label-not-unambiguous" in warning for warning in warnings)
-        assert destination in (run.output_dir / "review-report.md").read_text()
+        assert destination in (run.output_dir / "review-report.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("artifact", ["document.json", "source.json", "assignments/.pdf-unit-binding.json"])
@@ -252,7 +252,7 @@ def test_publication_fixture_publishes_exact_artifacts_with_semantics(tmp_path: 
     assert sorted(path.name for path in output_dir.iterdir()) == [
         "manifest.json", "review-report.md", "translated.pdf",
     ]
-    manifest = json.loads((output_dir / "manifest.json").read_text())
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     roles = manifest["extraction"]["semantic_role_counts"]
     assert roles["toc-entry"] == 3
     assert roles["reference-entry"] == 3
@@ -260,7 +260,7 @@ def test_publication_fixture_publishes_exact_artifacts_with_semantics(tmp_path: 
                  "part-title", "chapter-label", "chapter-title", "callout-title", "callout-body"):
         assert roles[role] >= 1
     assert manifest["translation"]["terminology"]["policy_id"] == "korean-first-technical-terms"
-    document = json.loads((run_dir / "document.json").read_text())
+    document = json.loads((run_dir / "document.json").read_text(encoding="utf-8"))
     ordinary = [block for block in document["blocks"] if any(
         phrase in block["source_text"] for phrase in (
             "Replication preserves the observations.",
@@ -270,7 +270,7 @@ def test_publication_fixture_publishes_exact_artifacts_with_semantics(tmp_path: 
         )
     )]
     assert ordinary and all(block["kind"] == "paragraph" and not block["style"]["bold"] for block in ordinary)
-    layout = json.loads((run_dir / "layout.json").read_text())
+    layout = json.loads((run_dir / "layout.json").read_text(encoding="utf-8"))
     assert len([b for b in document["blocks"] if b["kind"] == "figure"]) == 2
     assert len([b for b in document["blocks"] if b["kind"] == "caption"]) == 1
     assert layout["footnote_continuations"]

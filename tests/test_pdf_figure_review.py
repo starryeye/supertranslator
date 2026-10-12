@@ -45,12 +45,13 @@ def publication_case(root, *, case="diagram", evidence=True):
     write_segments(run / "segments.jsonl", [segment])
     (run / "zones").mkdir()
     for zone in build_zones([segment]):
-        (run / "zones" / f"{zone.id}.json").write_text(json.dumps(_zone_payload(zone)))
+        (run / "zones" / f"{zone.id}.json").write_text(json.dumps(_zone_payload(zone)), encoding="utf-8", newline="\n")
     rebind_native_fixture(run)
-    (run / "glossary.json").write_text("{}\n")
+    (run / "glossary.json").write_text("{}\n", encoding="utf-8", newline="\n")
     translation = Translation("seg-000001", "독립적인 본문은 원본 그림 밖에서 선택 가능한 한국어로 보존됩니다.", "TEST ONLY", {})
     (run / "translations").mkdir()
-    (run / "translations/zone-001.jsonl").write_text(json.dumps(translation.to_dict(), ensure_ascii=False) + "\n")
+    (run / "translations/zone-001.jsonl").write_text(json.dumps(translation.to_dict(), ensure_ascii=False) + "\n",
+        encoding="utf-8", newline="\n")
     if evidence or case != "figure-free":
         api().write_pdf_figure_review_input(run)
     _write_review(run)
@@ -71,7 +72,7 @@ def publication_case(root, *, case="diagram", evidence=True):
                 "verdict": "required-fix" if case in {"numeric-prose", "colon-prose", "indent-20", "indent-36"} else "pass",
                 "evidence": "TEST ONLY page 1: artwork inspected against the independent body above; numeric/colon/indented paragraph must be translated, not preserved.",
                 "labels": labels}}}
-        master_path.write_text(json.dumps(master, ensure_ascii=False) + "\n")
+        master_path.write_text(json.dumps(master, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     return PdfQARun(run, output), {translation.segment_id: translation}
 
 
