@@ -94,3 +94,17 @@ Controller default: tag the reviewed named work branch; no merge into upstream `
 ## Calls left to the builder
 
 Private guard naming, minimal regression-test organization and capture of Windows mismatch diagnostics are implementation details. Reuse existing canonical fixtures and held-handle APIs; avoid reorganizing large modules or rebuilding all existing fixture machinery. The controller owns actual visual acceptance, frozen evidence reconciliation and commit/push/tag/catalog publication; implementation subagents must not mutate the prior real-book evidence or publish a release.
+
+## Approved Windows remediation addendum (2026-10-12)
+
+The user explicitly approved fixing the newly evidenced Windows UTF-8 test I/O and QA cleanup/restoration defects, with separate regressions and independent reviews. This extends the running effort; it does not weaken any earlier success or evidence contract.
+
+At reviewed commit `2d5c736dba25d9a48dcf96bcf4f5495e9467b044`, [native CI](https://github.com/starryeye/web-translator/actions/runs/38163907823) has macOS 147 passes/10 Windows-only skips and Windows 117 passes/two skips/38 failures. Root enumeration now succeeds. Twenty-eight failures arise from implicit cp1252 reads/writes in test helpers/assertions; eight plain QA race failures expose initial cleanup and repeated-preparation failure; two failures concern the figure fixture's inventory digest. Local probes establish the exact differing file/field, not the native inventory component causing it.
+
+- Make the affected test fixtures and assertions explicitly use UTF-8; retain normal Windows locale in CI. Do not hide failures with a global UTF-8 override, tolerate invalid bytes or skip cases.
+- Repair Windows QA moves/cleanup/restoration within the existing held-root, relative-name NT operations. Read-only root/enumeration handles remain read-only. If a mutation requires additional permission, obtain only a short-lived, identity-bound handle for that owned child and close it on every path. No administrator rights, generic write/full access, path-based destructive fallback, replacement clobbering or ownership heuristic is permitted.
+- Preserve exact prior QA record/page bytes on failed repeated preparation; initial failure leaves no public QA artifacts. Keep staged PDF recoverable, foreign replacement data intact and final output absent. Handle-release windows, if necessary, require original identity and exact-byte/hash verification after reopening; they cannot silently accept a new snapshot.
+- Continue the already authorized fixture diagnosis by retaining actual native canonical inventory, exact document bytes, two crop PNGs, generated review and renderer/encoding versions before temporary cleanup. Only synthetic fixtures may be uploaded as CI diagnostic artifacts; never user books, translations or secrets.
+- Do not force/rebind the committed review hash, normalize byte equality, replace expected fixtures, change digest/schema, update dependency/Poppler versions or change production extraction/media behavior based on a hypothesis. A need for any such expansion remains a separate approval decision after component evidence is available.
+
+Builder choices: minimal private mutation-handle and descendant-lifetime organization, UTF-8 regression organization, and native diagnostic packaging. The existing release/marketplace gates and no-cleanup/no-main-merge constraints remain unchanged.
