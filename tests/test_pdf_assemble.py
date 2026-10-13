@@ -19,6 +19,9 @@ import pdfplumber
 from PIL import Image
 from pypdf import PdfReader
 import pytest
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont as ReportLabTTFont
+from reportlab.pdfgen import canvas
 
 import scripts.vendor_pdf_fonts as font_vendor
 import web_translator.pdf_assemble as pdf_assemble_module
@@ -30,7 +33,7 @@ from web_translator.models import (
     write_segments,
 )
 from web_translator.pdf_assemble import PdfAssemblyError, assemble_pdf
-from web_translator.pdf_flowables import read_pdf_layout
+from web_translator.pdf_flowables import PdfPageSize, read_pdf_layout
 from web_translator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
@@ -764,6 +767,278 @@ def _heading_font_sizes(path: Path, labels: list[str]) -> list[float]:
     for page in PdfReader(path).pages:
         page.extract_text(visitor_text=visit)
     return [found[label] for label in labels]
+
+
+def _assert_pdf_text_style(path: Path, label: str, size: float, *, bold: bool) -> None:
+    """Inspect the selected glyphs, rather than a declared or unused PDF font."""
+    needle = "".join(label.split())
+    matches = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            chars = [char for char in page.chars if not char["text"].isspace()]
+            haystack = "".join(char["text"] for char in chars)
+            start = 0
+            while (index := haystack.find(needle, start)) >= 0:
+                matches.append(chars[index:index + len(needle)])
+                start = index + 1
+    assert len(matches) == 1, f"expected one unambiguous glyph span for {label!r}, got {len(matches)}"
+    contracts = _embedded_font_contracts(path)
+    for char in matches[0]:
+        assert float(char["size"]) == pytest.approx(size, abs=0.035)
+        face = str(char["fontname"])
+        assert any(name.lstrip("/") in face and embedded for name, (embedded, _unicode) in contracts.items())
+        assert ("Bold" in face) == bold, f"wrong used face for {char['text']!r}: {face}"
+
+
+def test_pdf_text_style_oracle_checks_actual_selected_glyphs(tmp_path: Path) -> None:
+    font_root = files("web_translator").joinpath("font_assets")
+    pdfmetrics.registerFont(ReportLabTTFont("Oracle-Regular", str(font_root.joinpath("NotoSansKR-Regular.ttf"))))
+    pdfmetrics.registerFont(ReportLabTTFont("Oracle-Bold", str(font_root.joinpath("NotoSansKR-Bold.ttf"))))
+    sample = tmp_path / "font-oracle.pdf"
+    page = canvas.Canvas(str(sample))
+    page.setFont("Oracle-Regular", 12.1)
+    page.drawString(50, 740, "일반 글꼴도 PDF에 포함됩니다")
+    page.setFont("Oracle-Bold", 16)
+    page.drawString(50, 700, "굵은 글꼴의 실제 글리프")
+    page.save()
+    _assert_pdf_text_style(sample, "굵은 글꼴의 실제 글리프", 16, bold=True)
+    with pytest.raises(AssertionError):
+        _assert_pdf_text_style(sample, "굵은 글꼴의 실제 글리프", 12.1, bold=True)
+    with pytest.raises(AssertionError):
+        _assert_pdf_text_style(sample, "굵은 글꼴의 실제 글리프", 16, bold=False)
+
+
+def test_source_emphasis_size_preserves_ratios_jitter_and_floor() -> None:
+    scaled = pdf_assemble_module._source_scaled_font_size
+    assert scaled(18.0, 10.0) == pytest.approx(19.8)
+    assert scaled(11.0, 10.0) == pytest.approx(12.1)
+    assert scaled(10.0, 10.0) == pytest.approx(11.0)
+    assert scaled(5.0, 10.0) == 9.0
+    assert scaled(11.000000000000028, 10.0) == scaled(11.0, 10.0)
+    assert scaled(27.0, 15.0) == scaled(18.0, 10.0)
+
+
+def _source_reference_document(rows: list[tuple[str, str, float, bool, str]]) -> PdfDocument:
+    blocks = [
+        PdfBlock(
+            f"pdf:page-0001:block-{index:04d}", 1, index - 1, kind,
+            (72.0, 50.0 + index * 30, 540.0, 68.0 + index * 30),
+            PdfBlockStyle(size, bold, "left", 0.0, 6.0), source,
+            semantic_role=role,
+        )
+        for index, (kind, role, size, bold, source) in enumerate(rows, start=1)
+    ]
+    return PdfDocument("1.0", "a" * 64, 1, 100, [], [PdfPage(1, 612, 792, 0)], blocks)
+
+
+@pytest.mark.parametrize(("rows", "expected"), [
+    ([("paragraph", "body", 10, False, "regular text"), ("paragraph", "body", 20, True, "bold text"), ("list-item", "body", 30, False, "long list text")], 10),
+    ([("paragraph", "body", 12, True, "bold text"), ("list-item", "body", 10, False, "much longer ordinary list text")], 12),
+    ([("list-item", "body", 9, False, "list body")], 9),
+    ([("heading", "body", 18, True, "title only")], 11),
+    ([("paragraph", "body", 10, False, "longer ordinary sample"), ("paragraph", "body", 11, False, "tiny")], 10),
+    ([("paragraph", "body", 11, False, "equal"), ("paragraph", "body", 10, False, "equal")], 10),
+    ([("paragraph", "body", 11.000000000000028, False, "sample"), ("paragraph", "body", 11, False, "text")], 11),
+    ([("paragraph", "body", 0.0004, False, "tiny")], 0.0004),
+    ([("paragraph", "body", 10, False, "base"), ("heading", "body", 80, True, "H" * 200), ("caption", "body", 60, False, "C" * 200), ("paragraph", "epigraph", 50, False, "E" * 200), ("table-cell", "body", 40, False, "T" * 200), ("footnote", "body", 30, False, "N" * 200), ("header", "body", 20, False, "F" * 200)], 10),
+])
+def test_source_body_reference_preserves_fallback_order_and_physical_counts(rows, expected) -> None:
+    document = _source_reference_document(rows)
+    assert pdf_assemble_module._ordinary_source_body_size(document) == expected
+
+
+def test_source_body_reference_counts_joined_members_only_once() -> None:
+    from tests.pdf_unit_fixtures import make_unit_document
+
+    joined = make_unit_document(("aaaaa", "bbbbb"))
+    separate = replace(
+        joined.blocks[0], id="pdf:page-0003:block-0001", page_number=3,
+        order=2, source_text="cccccccccccc",
+        style=replace(joined.blocks[0].style, font_size=11.0),
+    )
+    document = replace(
+        joined, pages=[*joined.pages, PdfPage(3, 612, 792, 0)],
+        blocks=[*joined.blocks, separate],
+    )
+    assert len(document.translation_units[0].source_block_ids) == 2
+    assert pdf_assemble_module._ordinary_source_body_size(document) == 11.0
+
+
+@pytest.mark.parametrize(("source", "reference"), [
+    (0, 10), (-1, 10), (float("nan"), 10), (float("inf"), 10),
+    (10, 0), (10, -1), (10, float("nan")), (10, float("inf")),
+    (1e308, 1e-308),
+])
+def test_source_emphasis_rejects_invalid_or_nonfinite_derived_size(source, reference) -> None:
+    with pytest.raises(PdfAssemblyError):
+        pdf_assemble_module._source_scaled_font_size(source, reference)
+
+
+@pytest.mark.parametrize("kind", ["heading", "paragraph", "list-item"])
+def test_source_emphasis_rejects_finite_font_with_nonfinite_leading(kind: str) -> None:
+    # 1.6e308 / 10 * 11 = 1.76e308 is finite; either leading ratio overflows.
+    assert math.isfinite(1.76e308)
+    block = PdfBlock(
+        "pdf:page-0001:block-0001", 1, 0, kind, (72.0, 72.0, 540.0, 96.0),
+        PdfBlockStyle(1.6e308, False, "left", 0.0, 8.0), "Extreme source text",
+    )
+    with pytest.raises(PdfAssemblyError, match="leading"):
+        pdf_assemble_module._style_for_block(
+            block, heading_sizes=[], list_level=0, source_body_size=10.0,
+        )
+
+
+def test_source_emphasis_rejects_nonfinite_list_bullet_geometry() -> None:
+    block = PdfBlock(
+        "pdf:page-0001:block-0001", 1, 0, "list-item", (72.0, 72.0, 540.0, 96.0),
+        PdfBlockStyle(10.0, False, "left", 0.0, 8.0), "• Ordinary item",
+    )
+    with pytest.raises(PdfAssemblyError, match="bullet geometry"):
+        pdf_assemble_module._style_for_block(
+            block, heading_sizes=[], list_level=10**307, source_body_size=10.0,
+        )
+
+
+def test_source_emphasis_nonfinite_leading_never_publishes_native_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, translations, glossary = _assembly_run(tmp_path)
+    document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
+    blocks = [
+        replace(block, style=replace(block.style, font_size=size))
+        for block, size in zip(document.blocks, (1.6e308, 10.0, 11.0), strict=True)
+    ]
+    (run / "document.json").write_text(
+        json.dumps(replace_fixture_document(document, blocks=blocks).to_dict()) + "\n",
+        encoding="utf-8",
+    )
+    rebind_native_fixture(run)
+    (run / "review.json").write_text(json.dumps({
+        "semantic_input_sha256": "a" * 64, "retries": {},
+        "section_findings": {}, "unresolved_required": [],
+    }) + "\n", encoding="utf-8")
+    immutable = {name: (run / name).read_bytes() for name in ("source.json", "document.json", "review.json")}
+    final = tmp_path / "infinite-leading-final"
+    real_style = pdf_assemble_module._style_for_block
+
+    def observe_style(*args, **kwargs):
+        result = real_style(*args, **kwargs)
+        if not math.isfinite(result[1].leading):
+            raise AssertionError("nonfinite leading escaped source-style validation")
+        return result
+
+    monkeypatch.setattr(pdf_assemble_module, "_style_for_block", observe_style)
+    with pytest.raises(PdfAssemblyError, match="derived source leading"):
+        assemble_pdf(run, translations, glossary, final)
+    assert {name: (run / name).read_bytes() for name in immutable} == immutable
+    assert not final.exists()
+    assert not (run / "staged-output").exists()
+
+
+def test_source_emphasis_context_reaches_both_composition_paths(tmp_path: Path) -> None:
+    run, translations, glossary = _assembly_run(tmp_path)
+    document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
+    blocks = [
+        replace(block, style=replace(block.style, font_size=size))
+        for block, size in zip(document.blocks, (18.0, 10.0, 11.0), strict=True)
+    ]
+    document = replace_fixture_document(document, blocks=blocks)
+    (run / "document.json").write_text(json.dumps(document.to_dict()) + "\n", encoding="utf-8")
+    rebind_native_fixture(run)
+    source = PdfSourceRecord.from_dict(json.loads((run / "source.json").read_bytes()))
+    segments = {segment.id: segment for segment in read_segments(run / "segments.jsonl")}
+    ordered = [
+        (block, segments[block.segment_id], label)
+        for block, label in zip(blocks, ("안내 제목", "한국어 본문", "첫째 목록"), strict=True)
+    ]
+    basic = tmp_path / "basic.pdf"
+    with basic.open("wb") as stream:
+        pdf_assemble_module._build_basic_document(
+            document, ordered, source, stream, PdfPageSize("SOURCE", 612, 792),
+        )
+    rich = assemble_pdf(run, translations, glossary, tmp_path / "rich-final")
+    for path, labels in (
+        (basic, ("안내 제목", "한국어 본문", "첫째 목록")),
+        (rich, ("안내", "한국어 본문", "첫째")),
+    ):
+        _assert_pdf_text_style(path, labels[0], 19.8, bold=True)
+        _assert_pdf_text_style(path, labels[1], 11.0, bold=False)
+        _assert_pdf_text_style(path, labels[2], 12.1, bold=False)
+
+
+def test_source_emphasis_actual_output_respects_weight_equal_size_and_floor(tmp_path: Path) -> None:
+    run, _, _ = _assembly_run(tmp_path)
+    source = PdfSourceRecord.from_dict(json.loads((run / "source.json").read_bytes()))
+    document = _source_reference_document([
+        ("heading", "body", 11.0, False, "Ambiguous heading"),
+        ("paragraph", "body", 10.0, False, "Dominant regular source paragraph text"),
+        ("paragraph", "body", 10.0, True, "Bold ordinary paragraph"),
+        ("heading", "body", 10.0, True, "Equal-size bold heading"),
+        ("paragraph", "body", 5.0, False, "Small"),
+    ])
+    labels = ("모호한 제목", "기준 본문", "굵은 본문", "같은 크기 제목", "작은 글")
+    ordered = [
+        (block, Segment(f"seg-{index:06d}", block.id, block.kind, [], block.source_text, [], [], True), label)
+        for index, (block, label) in enumerate(zip(document.blocks, labels, strict=True), start=1)
+    ]
+    output = tmp_path / "ordinary.pdf"
+    with output.open("wb") as stream:
+        pdf_assemble_module._build_basic_document(
+            document, ordered, source, stream, PdfPageSize("SOURCE", 612, 792),
+        )
+    for label, size, bold in zip(labels, (12.1, 11.0, 11.0, 11.0, 9.0), (False, False, True, True, False), strict=True):
+        _assert_pdf_text_style(output, label, size, bold=bold)
+
+
+def test_source_emphasis_preserves_specialized_styles_and_structure() -> None:
+    document = _source_reference_document([
+        ("paragraph", "body", 10.0, False, "ordinary source"),
+        ("paragraph", "reference-entry", 30.0, True, "reference source"),
+        ("caption", "body", 30.0, True, "caption source"),
+        ("table-cell", "body", 30.0, True, "table source"),
+        ("footnote", "body", 30.0, True, "note source"),
+    ])
+    ordinary, reference, *specialized = document.blocks
+    assert pdf_assemble_module._ordinary_source_body_size(document) == 10.0
+    size, style = pdf_assemble_module._style_for_block(
+        reference, heading_sizes=[], list_level=0, source_body_size=10.0,
+    )
+    assert size == 11.0
+    assert style.fontName == pdf_assemble_module.REGULAR_FONT_NAME
+    assert style.leading == 16
+    for block in specialized:
+        size, style = pdf_assemble_module._style_for_block(
+            block, heading_sizes=[], list_level=0, source_body_size=10.0,
+        )
+        assert size == 11.0
+        assert style.fontName == pdf_assemble_module.REGULAR_FONT_NAME
+        assert style.leading == 15.0
+    assert [block.id for block in document.blocks] == [ordinary.id, reference.id, *(block.id for block in specialized)]
+
+
+def test_source_emphasis_unrenderable_text_never_publishes_success(tmp_path: Path) -> None:
+    run, translations, glossary = _assembly_run(tmp_path)
+    document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
+    blocks = [
+        replace(block, style=replace(block.style, font_size=size))
+        for block, size in zip(document.blocks, (1e308, 1e-308, 10.0), strict=True)
+    ]
+    (run / "document.json").write_text(
+        json.dumps(replace_fixture_document(document, blocks=blocks).to_dict()) + "\n",
+        encoding="utf-8",
+    )
+    rebind_native_fixture(run)
+    (run / "review.json").write_text(json.dumps({
+        "semantic_input_sha256": "a" * 64, "retries": {},
+        "section_findings": {}, "unresolved_required": [],
+    }) + "\n", encoding="utf-8")
+    immutable = {name: (run / name).read_bytes() for name in ("source.json", "document.json", "review.json")}
+    final = tmp_path / "unrenderable-final"
+    with pytest.raises(PdfAssemblyError, match="font size|source size|finite"):
+        assemble_pdf(run, translations, glossary, final)
+    assert {name: (run / name).read_bytes() for name in immutable} == immutable
+    assert not final.exists()
+    assert not (run / "staged-output").exists()
 
 
 def _publication_assembly_run(tmp_path: Path, rows: list[tuple[int, str, str]]) -> Path:
@@ -1869,7 +2144,7 @@ def test_assemble_pdf_embeds_regular_and_bold_with_tounicode_without_headings(
     assert all(font_file_2 and to_unicode for font_file_2, to_unicode in contracts.values())
 
 
-def test_assemble_pdf_normalizes_heading_levels_from_document_evidence(
+def test_assemble_pdf_preserves_source_heading_emphasis_without_body_reference(
     tmp_path: Path,
 ) -> None:
     run_dir, _translations, glossary = _assembly_run(tmp_path)
@@ -1918,7 +2193,17 @@ def test_assemble_pdf_normalizes_heading_levels_from_document_evidence(
     write_native_singleton_fixture(run_dir)
     staged = assemble_pdf(run_dir, translations, glossary, tmp_path / "final")
 
-    assert _heading_font_sizes(staged, labels) == [18.0, 16.0, 16.0, 18.0]
+    for label, size in zip(labels, source_sizes, strict=True):
+        _assert_pdf_text_style(staged, label, size, bold=True)
+    assert [(block.kind, block.id) for block in blocks] == [
+        ("heading", f"pdf:page-0001:block-{index:04d}") for index in range(1, 5)
+    ]
+    assert [segment.heading_path for segment in read_segments(run_dir / "segments.jsonl")] == heading_paths
+    layout = read_pdf_layout(run_dir / "layout.json")
+    assert [item.block_id for item in layout.flowables] == [block.id for block in blocks]
+    assert {name for name, _page in layout.anchor_pages} >= {
+        pdf_assemble_module._anchor_name(block.id) for block in blocks
+    }
 
 
 def test_assemble_pdf_preserves_list_marker_family_and_relative_nesting(

@@ -11,6 +11,7 @@ import hashlib
 from importlib.resources import as_file, files
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1416,6 +1417,7 @@ def _build_basic_document(
         },
         reverse=True,
     )
+    source_body_size = _ordinary_source_body_size(document)
     list_levels = _relative_list_levels(ordered)
     try:
         with ExitStack() as stack:
@@ -1429,6 +1431,7 @@ def _build_basic_document(
                     block,
                     heading_sizes=heading_sizes,
                     list_level=list_levels.get(block.id, 0),
+                    source_body_size=source_body_size,
                 )
                 paragraph = Paragraph(
                     _linked_markup(
@@ -2125,6 +2128,7 @@ def _build_rich_document(
         },
         reverse=True,
     )
+    source_body_size = _ordinary_source_body_size(document)
     list_levels = _relative_list_levels(ordered)
     tables = _table_blocks(document)
     table_header_rows = _table_header_rows(document)
@@ -2185,6 +2189,7 @@ def _build_rich_document(
                 block,
                 heading_sizes=heading_sizes,
                 list_level=list_levels.get(block.id, 0),
+                source_body_size=source_body_size,
             )
         if toc_resolutions and block.id in toc_resolutions:
             entry_indent = min((item.style.indentation for item in document.blocks if item.semantic_role == "toc-entry"), default=0)
@@ -2923,23 +2928,77 @@ def _provenance_metadata(source: PdfSourceRecord) -> str:
     return f"Selectable Korean PDF translation; Source: {source.final_source}; Generated: {generated}"
 
 
+def _stable_source_font_size(value: float) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise PdfAssemblyError("source font size must be finite and positive")
+    stable = round(value, 3)
+    return stable if stable > 0 else value
+
+
+def _ordinary_source_body_size(document: PdfDocument) -> float:
+    def vote(blocks: Sequence[PdfBlock]) -> float | None:
+        weights: Counter[float] = Counter()
+        for block in blocks:
+            count = sum(not character.isspace() for character in block.source_text)
+            if count:
+                weights[_stable_source_font_size(block.style.font_size)] += count
+        if not weights:
+            return None
+        return min(weights, key=lambda size: (-weights[size], size))
+
+    paragraphs = [
+        block for block in document.blocks
+        if block.semantic_role == "body" and block.kind == "paragraph" and block.source_text.strip()
+    ]
+    lists = [
+        block for block in document.blocks
+        if block.semantic_role == "body" and block.kind == "list-item" and block.source_text.strip()
+    ]
+    for candidates in (
+        [block for block in paragraphs if not block.style.bold], paragraphs, lists,
+    ):
+        reference = vote(candidates)
+        if reference is not None:
+            return reference
+    return BODY_FONT_SIZE
+
+
+def _source_scaled_font_size(source_size: float, source_body_size: float) -> float:
+    source = _stable_source_font_size(source_size)
+    reference = _stable_source_font_size(source_body_size)
+    ratio = source / reference
+    effective = ratio * BODY_FONT_SIZE
+    if not math.isfinite(effective) or effective <= 0:
+        raise PdfAssemblyError("derived source font size must be finite and positive")
+    return max(MINIMUM_FONT_SIZE, effective)
+
+
 def _style_for_block(
     block: PdfBlock,
     *,
     heading_sizes: Sequence[int],
     list_level: int,
+    source_body_size: float = BODY_FONT_SIZE,
 ) -> tuple[float, ParagraphStyle]:
     if block.semantic_role == "reference-entry":
         return BODY_FONT_SIZE, _reference_style(block)
     if block.kind == "heading":
         alignment = _ALIGNMENTS[block.style.alignment]
         level = _normalized_heading_level(block, heading_sizes)
-        font_size = {1: 18.0, 2: 16.0, 3: 14.0, 4: 12.5, 5: 11.5, 6: 11.0}[level]
+        font_size = (_source_scaled_font_size(block.style.font_size, source_body_size)
+                     if block.semantic_role == "body" else
+                     {1: 18.0, 2: 16.0, 3: 14.0, 4: 12.5, 5: 11.5, 6: 11.0}[level])
+        font_name = (BOLD_FONT_NAME if block.style.bold else REGULAR_FONT_NAME)
+        if block.semantic_role != "body":
+            font_name = BOLD_FONT_NAME
+        leading = font_size * 1.25
+        if block.semantic_role == "body" and (not math.isfinite(leading) or leading <= 0):
+            raise PdfAssemblyError("derived source leading must be finite and positive")
         return font_size, ParagraphStyle(
             f"WT-Heading-{level}",
-            fontName=BOLD_FONT_NAME,
+            fontName=font_name,
             fontSize=font_size,
-            leading=font_size * 1.25,
+            leading=leading,
             alignment=alignment,
             spaceBefore=8.0 if block.order else 0.0,
             spaceAfter=max(6.0, min(18.0, block.style.space_after)),
@@ -2949,14 +3008,24 @@ def _style_for_block(
     bullet_indent = 0.0
     if block.kind == "list-item":
         left_indent = (max(0, list_level) + 1) * 18.0
-        bullet_indent = left_indent - BODY_FONT_SIZE * 0.6
+    ordinary_body = block.semantic_role == "body" and block.kind in {"paragraph", "list-item"}
+    font_size = (_source_scaled_font_size(block.style.font_size, source_body_size)
+                 if ordinary_body else BODY_FONT_SIZE)
+    font_name = (BOLD_FONT_NAME if block.style.bold else REGULAR_FONT_NAME) if ordinary_body else REGULAR_FONT_NAME
+    if block.kind == "list-item":
+        bullet_indent = left_indent - font_size * 0.6
+        if ordinary_body and (not math.isfinite(left_indent) or not math.isfinite(bullet_indent)):
+            raise PdfAssemblyError("derived source bullet geometry must be finite")
+    leading = font_size * (15.0 / 11.0) if ordinary_body else 15.0
+    if ordinary_body and (not math.isfinite(leading) or leading <= 0):
+        raise PdfAssemblyError("derived source leading must be finite and positive")
     style = ParagraphStyle(
         f"WT-{block.kind}-{block.order}",
-        fontName=REGULAR_FONT_NAME,
-        bulletFontName=REGULAR_FONT_NAME,
-        bulletFontSize=BODY_FONT_SIZE,
-        fontSize=BODY_FONT_SIZE,
-        leading=15.0,
+        fontName=font_name,
+        bulletFontName=font_name,
+        bulletFontSize=font_size,
+        fontSize=font_size,
+        leading=leading,
         alignment=_ALIGNMENTS["left"],
         leftIndent=left_indent,
         firstLineIndent=0.0,
@@ -2964,7 +3033,7 @@ def _style_for_block(
         bulletAnchor="end",
         spaceAfter=max(4.0, min(14.0, block.style.space_after)),
     )
-    return BODY_FONT_SIZE, style
+    return font_size, style
 
 
 def _normalized_heading_level(

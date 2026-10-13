@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from pypdf import PdfReader
+from reportlab.pdfgen.canvas import Canvas
 
 import web_translator.pdf_assemble as pdf_assemble_module
 import web_translator.pdf_qa as pdf_qa_module
@@ -24,6 +25,7 @@ from web_translator.cli import main
 from tests import pdf_fixtures
 from tests.pdf_fixtures import make_many_pages_pdf, make_oversized_pdf
 from tests.test_pdf_extract import _column_pdf, _ruled_table_pdf
+from tests.test_pdf_assemble import _assert_pdf_text_style
 from web_translator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
 from web_translator.pdf_media import PdfMediaError
 from web_translator.pdf_report import (
@@ -250,6 +252,90 @@ def _pdf_cli_paths(tmp_path: Path, run_id: str = "run") -> tuple[Path, Path]:
     run_dir.mkdir(parents=True, exist_ok=True)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     return run_dir, output_dir
+
+
+def _make_source_emphasis_pdf(path: Path, *, font_family: str, scale: float) -> None:
+    bold_face = {"Helvetica": "Helvetica-Bold", "Times-Roman": "Times-Bold"}[font_family]
+    page = Canvas(str(path), pagesize=(612, 792), invariant=1)
+    lines = (
+        ("Evidence And Method", bold_face, 18.0, 740),
+        ("A measured line calls for caution.", font_family, 11.0, 686),
+        ("Ordinary records preserve source order.", font_family, 10.0, 632),
+        ("Every line remains available for review.", font_family, 10.0, 590),
+        ("The record is compared without omissions.", font_family, 10.0, 548),
+        ("Readers can inspect all statements.", font_family, 10.0, 506),
+    )
+    for label, face, size, baseline in lines:
+        page.setFont(face, size * scale)
+        page.drawString(72, baseline, label)
+    page.save()
+
+
+@pytest.mark.parametrize(("font_family", "scale"), [("Helvetica", 1.0), ("Times-Roman", 1.5)])
+def test_source_emphasis_variants_preserve_actual_size_ratios_and_weight(
+    tmp_path: Path, font_family: str, scale: float,
+) -> None:
+    from tests.test_pdf_qa import _write_review, _write_passing_layout_review
+    from web_translator.models import read_segments
+
+    source = tmp_path / "independent-source.pdf"
+    _make_source_emphasis_pdf(source, font_family=font_family, scale=scale)
+    run, output = _pdf_cli_paths(tmp_path)
+
+    def command(*args: str) -> None:
+        assert main([*args, "--run-dir", str(run)]) == 0
+
+    command("pdf-acquire", str(source))
+    command("pdf-extract")
+    document = json.loads((run / "document.json").read_bytes())
+    by_text = {block["source_text"]: block for block in document["blocks"]}
+    expected_source = {
+        "Evidence And Method": (18.0 * scale, True),
+        "A measured line calls for caution.": (11.0 * scale, False),
+        "Ordinary records preserve source order.": (10.0 * scale, False),
+    }
+    for label, (size, bold) in expected_source.items():
+        assert by_text[label]["style"]["font_size"] == pytest.approx(size, abs=0.001)
+        assert by_text[label]["style"]["bold"] is bold
+    command("plan-zones")
+    (run / "glossary.json").write_text("{}\n", encoding="utf-8")
+    (run / "document-summary.txt").write_text("TEST ONLY independent emphasis fixture", encoding="utf-8")
+    command("prepare-assignments")
+    literal = {
+        "Evidence And Method": "증거와 방법",
+        "A measured line calls for caution.": "측정된 문장은 신중한 해석을 요구합니다.",
+        "Ordinary records preserve source order.": "일반 기록은 원본 순서를 보존합니다.",
+        "Every line remains available for review.": "모든 문장은 검토할 수 있습니다.",
+        "The record is compared without omissions.": "기록은 누락 없이 비교됩니다.",
+        "Readers can inspect all statements.": "독자는 모든 진술을 확인할 수 있습니다.",
+    }
+    targets = [segment for segment in read_segments(run / "segments.jsonl") if segment.target]
+    assert {segment.source_text for segment in targets} == set(literal)
+    (run / "translations").mkdir()
+    (run / "translations/zone-001.jsonl").write_text(
+        "".join(json.dumps({"segment_id": segment.id, "text": literal[segment.source_text], "notes": "TEST ONLY", "glossary_observations": {}}, ensure_ascii=False) + "\n" for segment in targets),
+        encoding="utf-8",
+    )
+    command("validate-translations")
+    command("pdf-review-input")
+    _write_review(run)
+    immutable = {name: (run / name).read_bytes() for name in (
+        "source.pdf", "document.json", "segments.jsonl", "assignments/.pdf-unit-binding.json", "review.json",
+    )}
+    command("pdf-assemble", "--output-dir", str(output))
+    assert {name: (run / name).read_bytes() for name in immutable} == immutable
+    command("pdf-qa", "prepare", "--output-dir", str(output))
+    _write_passing_layout_review(run)
+    command("pdf-qa", "finalize", "--output-dir", str(output))
+    assert sorted(path.name for path in output.iterdir()) == ["manifest.json", "review-report.md", "translated.pdf"]
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert {unit["unit_id"]: unit["source_block_ids"] for unit in manifest["translation_units"]} == {
+        unit["id"]: unit["source_block_ids"] for unit in document["translation_units"]
+    }
+    final = output / "translated.pdf"
+    _assert_pdf_text_style(final, "증거와 방법", 19.8, bold=True)
+    _assert_pdf_text_style(final, "측정된 문장은 신중한", 12.1, bold=False)
+    _assert_pdf_text_style(final, "일반 기록은 원본", 11.0, bold=False)
 
 
 def test_publication_fixture_publishes_exact_artifacts_with_semantics(tmp_path: Path) -> None:
@@ -1169,7 +1255,21 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
         newline="\n",
     )
     assert main(["validate-translations", "--run-dir", str(run_dir)]) == 0
+    if fixture_name == "figures-captions-v1":
+        source_styles = {
+            block["source_text"]: (block["style"]["font_size"], block["style"]["bold"])
+            for block in document["blocks"]
+        }
+        assert source_styles["Raster and vector evidence must remain paired with the correct explanatory caption."] == (11.0, False)
+        assert source_styles["Figures and Captions"] == (18.0, True)
+        assert source_styles["The raster panel verifies image preservation and the vector plot verifies path rendering. Each caption follows its figure directly so extraction retains an unambiguous pair. Review checks sharp rendering, readable labels, and the absence of clipping or overlap."] == (10.0, False)
+        immutable = {
+            name: (run_dir / name).read_bytes()
+            for name in ("source.pdf", "document.json", "segments.jsonl", "assignments/.pdf-unit-binding.json", "review.json")
+        }
     assert main(["pdf-assemble", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
+    if fixture_name == "figures-captions-v1":
+        assert {name: (run_dir / name).read_bytes() for name in immutable} == immutable
     assert main(["pdf-qa", "prepare", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
 
     qa = json.loads((run_dir / "pdf-qa.json").read_text(encoding="utf-8"))
@@ -1186,6 +1286,11 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
     assert main(["pdf-qa", "finalize", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
 
     assert sorted(path.name for path in output_dir.iterdir()) == expected["final_artifacts"]
+    if fixture_name == "figures-captions-v1":
+        pdf = output_dir / "translated.pdf"
+        _assert_pdf_text_style(pdf, "래스터 및 벡터 증거는", 12.1, bold=False)
+        _assert_pdf_text_style(pdf, "그림과 캡션", 19.8, bold=True)
+        _assert_pdf_text_style(pdf, "래스터 패널은 이미지", 11.0, bold=False)
     assert not (run_dir / "staged-output").exists()
     translated_text = "\n".join(
         page.extract_text() or "" for page in PdfReader(output_dir / "translated.pdf").pages
@@ -1205,6 +1310,10 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
     ]
     _assert_committed_fixture_semantics(fixture_name, segments, records)
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    if fixture_name == "figures-captions-v1":
+        assert {unit["unit_id"]: unit["source_block_ids"] for unit in manifest["translation_units"]} == {
+            unit["id"]: unit["source_block_ids"] for unit in document["translation_units"]
+        }
     assert manifest["source"]["page_count"] == expected["page_count"]
     assert manifest["output"]["figure_count"] == expected["figure_count"]
     assert manifest["qa"]["automated"]["contact_sheet_pages"] == qa["contact_sheet_pages"]
