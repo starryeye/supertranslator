@@ -526,7 +526,7 @@ def finalize_pdf_output(run_dir: Path, output_dir: Path) -> Path:
             output_dir.name,
             final_identities,
             final_hashes,
-            **({"verify_inputs": verify_figure_publication_inputs} if figure_snapshot is not None else {}),
+            verify_inputs=verify_figure_publication_inputs,
         )
         completed = True
         return output_dir

@@ -33,7 +33,12 @@ from web_translator.pdf_report import (
     build_pdf_manifest,
     render_pdf_review_report,
 )
-from tests.test_pdf_qa import PdfQARun, _write_passing_layout_review, assembled_pdf_run
+from tests.test_pdf_qa import (
+    PdfQARun,
+    _assembled_figure_free_review_case,
+    _write_passing_layout_review,
+    assembled_pdf_run,
+)
 
 
 PDF_FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "pdf"
@@ -1945,6 +1950,117 @@ def test_finalize_rechecks_exact_transaction_after_directory_publication(
 
     assert not prepared_pdf_run.output_dir.exists()
     assert (prepared_pdf_run.run_dir / "staged-output").is_dir()
+
+
+# Production mutation caught: omitting held-input verification after a figure-free rename.
+@pytest.mark.parametrize(
+    ("shape", "mutation"),
+    [
+        (shape, mutation)
+        for shape in ("plain", "name-only", "optional-empty")
+        for mutation in ("review-content", "review-identity", "report-content")
+    ] + [("plain", "semantic-content")],
+)
+def test_figure_free_finalize_rejects_postrename_input_change_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    mutation: str,
+) -> None:
+    run_dir, output_dir = _assembled_figure_free_review_case(tmp_path, shape)
+    prepare_pdf_qa(run_dir, output_dir)
+    _write_passing_layout_review(run_dir)
+    staging = run_dir / "staged-output"
+    staged_pdf = staging / "translated.pdf"
+    staged_bytes = staged_pdf.read_bytes()
+    staged_identity = (staged_pdf.stat().st_dev, staged_pdf.stat().st_ino)
+    staging_identity = (staging.stat().st_dev, staging.stat().st_ino)
+    qa_bytes = (run_dir / "pdf-qa.json").read_bytes()
+    qa_pages = {
+        path.relative_to(run_dir / "qa-pages"): path.read_bytes()
+        for path in (run_dir / "qa-pages").rglob("*") if path.is_file()
+    }
+    relative = {
+        "review-content": "review.json",
+        "review-identity": "review.json",
+        "report-content": "pdf-layout-review.json",
+        "semantic-content": "translations/zone-001.jsonl",
+    }[mutation]
+    held_path = run_dir / relative
+    held_bytes = held_path.read_bytes()
+    held_identity = (held_path.stat().st_dev, held_path.stat().st_ino)
+    displaced_review = run_dir / ".test-original-review.json"
+    foreign_review = run_dir / ".test-foreign-review.json"
+    real_verify = pdf_qa_module._verify_final_artifact_snapshot
+    artifact_checks = 0
+    observed_postrename = False
+
+    def verify_then_mutate(*args: object, **kwargs: object) -> None:
+        nonlocal artifact_checks, observed_postrename
+        real_verify(*args, **kwargs)  # type: ignore[arg-type]
+        artifact_checks += 1
+        if artifact_checks != 2:
+            return
+        observed_postrename = output_dir.is_dir() and not staging.exists()
+        if mutation == "review-identity":
+            held_path.rename(displaced_review)
+            held_path.write_bytes(held_bytes)
+        else:
+            held_path.write_bytes(held_bytes + b" ")
+
+    monkeypatch.setattr(pdf_qa_module, "_verify_final_artifact_snapshot", verify_then_mutate)
+    with pytest.raises(PdfQAFailure, match="changed|content"):
+        finalize_pdf_output(run_dir, output_dir)
+
+    assert artifact_checks == 2
+    assert observed_postrename
+    assert not output_dir.exists()
+    assert (staging.stat().st_dev, staging.stat().st_ino) == staging_identity
+    assert (staged_pdf.stat().st_dev, staged_pdf.stat().st_ino) == staged_identity
+    assert staged_pdf.read_bytes() == staged_bytes
+    assert sorted(path.name for path in staging.iterdir()) == [
+        "manifest.json", "review-report.md", "translated.pdf",
+    ]
+    assert (run_dir / "pdf-qa.json").read_bytes() == qa_bytes
+    assert {
+        path.relative_to(run_dir / "qa-pages"): path.read_bytes()
+        for path in (run_dir / "qa-pages").rglob("*") if path.is_file()
+    } == qa_pages
+    if mutation == "review-identity":
+        replacement_identity = (held_path.stat().st_dev, held_path.stat().st_ino)
+        assert replacement_identity != held_identity
+        assert held_path.read_bytes() == held_bytes
+        assert displaced_review.read_bytes() == held_bytes
+        held_path.rename(foreign_review)
+        displaced_review.rename(held_path)
+        assert foreign_review.read_bytes() == held_bytes
+        assert (foreign_review.stat().st_dev, foreign_review.stat().st_ino) == replacement_identity
+    else:
+        assert (held_path.stat().st_dev, held_path.stat().st_ino) == held_identity
+        assert held_path.read_bytes() == held_bytes + b" "
+        held_path.write_bytes(held_bytes)
+
+    # The failed publication safely retained its generated reports in staging.
+    # Discard only those test-owned attempt outputs before the immediate retry.
+    report_bytes = {
+        name: (staging / name).read_bytes()
+        for name in ("manifest.json", "review-report.md")
+    }
+    (staging / "manifest.json").unlink()
+    (staging / "review-report.md").unlink()
+    monkeypatch.setattr(pdf_qa_module, "_verify_final_artifact_snapshot", real_verify)
+    assert finalize_pdf_output(run_dir, output_dir) == output_dir
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "manifest.json", "review-report.md", "translated.pdf",
+    ]
+    assert (output_dir / "translated.pdf").read_bytes() == staged_bytes
+    assert {name: (output_dir / name).read_bytes() for name in report_bytes} == report_bytes
+    assert json.loads((output_dir / "manifest.json").read_bytes())["output"]["sha256"] == hashlib.sha256(staged_bytes).hexdigest()
+    assert "Status: **PASS**" in (output_dir / "review-report.md").read_text(encoding="utf-8")
+    assert (run_dir / "pdf-qa.json").read_bytes() == qa_bytes
+    if mutation == "review-identity":
+        assert foreign_review.read_bytes() == held_bytes
+        assert (foreign_review.stat().st_dev, foreign_review.stat().st_ino) == replacement_identity
 
 
 # Production mutation caught: leaving a partial public directory when final rename fails.
