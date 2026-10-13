@@ -709,6 +709,157 @@ def test_assembly_handles_nested_content_and_attribute_locations_in_order(
     assert paragraph.img["src"] == "flow.png"
 
 
+@pytest.mark.parametrize("parent_text", [False, True], ids=["link-only", "mixed-cell"])
+def test_assembly_preserves_link_body_title_and_href_inside_table_cell(
+    tmp_path: Path, parent_text: bool
+) -> None:
+    body = '<a href="https://example.com/spec" title="Agent authentication">agent-spec</a>'
+    if parent_text:
+        body = f"Read {body} now."
+    source = write_source(tmp_path, f"<table><tr><td>{body}</td></tr></table>")
+    extracted = extract_segments(source, source.parent / "segments.jsonl")
+    if parent_text:
+        assert [item.semantic_type for item in extracted] == [
+            "table_cell:row:000001",
+            "located:link",
+        ]
+    else:
+        assert [item.semantic_type for item in extracted] == ["located:link"]
+    assert sum("agent-spec" in item.source_text for item in extracted) == 1
+    assert sum("Agent authentication" in item.source_text for item in extracted) == 1
+    source_cell = BeautifulSoup(source.read_text("utf-8"), "lxml").td
+    assert source_cell.get_text() == ("Read agent-spec now." if parent_text else "agent-spec")
+    assert source_cell.a["title"] == "Agent authentication"
+
+    identity_output = assemble_page(
+        source,
+        {item.id: item for item in extracted},
+        {item.id: translation(item.id, item.source_text) for item in extracted},
+        {},
+        tmp_path / "identity-out",
+        "https://example.com/",
+    )
+    identity_page = BeautifulSoup(identity_output.read_text("utf-8"), "lxml")
+    identity_cell = identity_page.td
+    assert identity_cell.get_text() == (
+        "Read agent-spec now." if parent_text else "agent-spec"
+    )
+    assert identity_cell.a.get_text() == "agent-spec"
+    assert identity_cell.a["title"] == "Agent authentication"
+    assert identity_cell.a["href"] == "https://example.com/spec"
+    assert not identity_page.select("[data-wt-segment]")
+
+    translations = {
+        item.id: translation(
+            item.id,
+            item.source_text
+            .replace("Read ", "읽기 ")
+            .replace(" now.", " 지금.")
+            .replace("Agent authentication", "에이전트 인증")
+            .replace("agent-spec", "인증 명세"),
+        )
+        for item in extracted
+    }
+    output = assemble_page(
+        source,
+        {item.id: item for item in extracted},
+        translations,
+        {},
+        tmp_path / "out",
+        "https://example.com/",
+    )
+
+    cell = BeautifulSoup(output.read_text("utf-8"), "lxml").td
+    assert cell.get_text() == ("읽기 인증 명세 지금." if parent_text else "인증 명세")
+    assert cell.a["title"] == "에이전트 인증"
+    assert cell.a["href"] == "https://example.com/spec"
+    assert cell.get_text().count("인증 명세") == 1
+    assert "agent-spec" not in cell.get_text()
+    assert "data-wt-segment" not in cell.a.attrs
+
+
+def test_assembly_preserves_multilevel_attribute_bodies_and_exclusions(
+    tmp_path: Path,
+) -> None:
+    source = write_source(
+        tmp_path,
+        '<p>Start <a href="https://example.com/spec" title="Outer title">'
+        'outer <span title="Inner title">inner body</span> end '
+        '<code>secret_code</code><span translate="no" title="Hidden title">'
+        'hidden body</span></a> finish.</p>',
+    )
+    extracted = extract_segments(source, source.parent / "segments.jsonl")
+    assert [item.semantic_type for item in extracted] == [
+        "paragraph",
+        "located:link",
+        "located:prose",
+    ]
+    source_paragraph = BeautifulSoup(source.read_text("utf-8"), "lxml").p
+    assert source_paragraph.get_text() == "Start outer inner body end secret_codehidden body finish."
+    assert source_paragraph.a["title"] == "Outer title"
+    assert source_paragraph.span["title"] == "Inner title"
+
+    identity_output = assemble_page(
+        source,
+        {item.id: item for item in extracted},
+        {item.id: translation(item.id, item.source_text) for item in extracted},
+        {},
+        tmp_path / "identity-out",
+        "https://example.com/",
+    )
+    identity_page = BeautifulSoup(identity_output.read_text("utf-8"), "lxml")
+    identity_paragraph = identity_page.p
+    assert identity_paragraph.get_text() == (
+        "Start outer inner body end secret_codehidden body finish."
+    )
+    assert identity_paragraph.a.get_text() == (
+        "outer inner body end secret_codehidden body"
+    )
+    assert identity_paragraph.a["title"] == "Outer title"
+    assert identity_paragraph.a["href"] == "https://example.com/spec"
+    assert identity_paragraph.a.span["title"] == "Inner title"
+    assert identity_paragraph.a.span.get_text() == "inner body"
+    assert identity_paragraph.a.code.get_text() == "secret_code"
+    identity_hidden = identity_paragraph.select_one('[translate="no"]')
+    assert identity_hidden.get_text() == "hidden body"
+    assert identity_hidden["title"] == "Hidden title"
+    assert not identity_page.select("[data-wt-segment]")
+
+    translations = {
+        item.id: translation(
+            item.id,
+            item.source_text
+            .replace("Start ", "시작 ")
+            .replace(" finish.", " 완료.")
+            .replace("Outer title", "바깥 제목")
+            .replace("outer ", "바깥 ")
+            .replace("Inner title", "안쪽 제목")
+            .replace("inner body", "안쪽 본문")
+            .replace(" end ", " 끝 "),
+        )
+        for item in extracted
+    }
+    output = assemble_page(
+        source,
+        {item.id: item for item in extracted},
+        translations,
+        {},
+        tmp_path / "out",
+        "https://example.com/",
+    )
+
+    paragraph = BeautifulSoup(output.read_text("utf-8"), "lxml").p
+    assert paragraph.get_text() == "시작 바깥 안쪽 본문 끝 secret_codehidden body 완료."
+    assert paragraph.a["title"] == "바깥 제목"
+    assert paragraph.a.span["title"] == "안쪽 제목"
+    assert paragraph.a["href"] == "https://example.com/spec"
+    assert paragraph.a.code.get_text() == "secret_code"
+    hidden = paragraph.select_one('[translate="no"]')
+    assert hidden.get_text() == "hidden body"
+    assert hidden["title"] == "Hidden title"
+    assert not paragraph.select("[data-wt-segment]")
+
+
 def test_assembly_rejects_changed_attribute_location_tokens_and_bad_locator(
     tmp_path: Path,
 ) -> None:

@@ -121,8 +121,8 @@ def extract_segments(source_html: Path, segments_path: Path) -> list[Segment]:
             "source HTML uses reserved web-translator location marker; extraction aborted"
         )
 
-    content_owners = _content_owners(soup)
     attribute_names = _attribute_targets(soup)
+    content_owners = _content_owners(soup, set(attribute_names))
     target_elements = content_owners | set(attribute_names)
     row_numbers = {
         id(row): index
@@ -240,7 +240,7 @@ def _previous_extraction(
     return segments
 
 
-def _content_owners(soup: BeautifulSoup) -> set[int]:
+def _content_owners(soup: BeautifulSoup, attribute_targets: set[int]) -> set[int]:
     owners: set[int] = set()
     for node in soup.find_all(string=True):
         if not isinstance(node, NavigableString) or isinstance(node, Comment):
@@ -251,13 +251,13 @@ def _content_owners(soup: BeautifulSoup) -> set[int]:
         protected, _ = protect_fragment(str(node))
         if not _has_translatable_text(protected):
             continue
-        owner = _text_owner(parent)
+        owner = _text_owner(parent, attribute_targets)
         if owner is not None:
             owners.add(id(owner))
     return owners
 
 
-def _text_owner(parent: Tag) -> Tag | None:
+def _text_owner(parent: Tag, attribute_targets: set[int]) -> Tag | None:
     ancestors = [
         node
         for node in (parent, *parent.parents)
@@ -266,6 +266,11 @@ def _text_owner(parent: Tag) -> Tag | None:
     for names in (_BLOCK_TAGS, _STANDALONE_TEXT_TAGS, _FLOW_CONTAINER_TAGS):
         owner = next((node for node in ancestors if node.name.lower() in names), None)
         if owner is not None:
+            for descendant in ancestors:
+                if descendant is owner:
+                    break
+                if id(descendant) in attribute_targets:
+                    return descendant
             return owner
     return parent
 

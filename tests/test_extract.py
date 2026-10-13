@@ -873,3 +873,92 @@ def test_table_cells_record_typed_row_atomicity(
         "table_header:row:000002",
         "table_cell:row:000002",
     ]
+
+
+def test_attribute_marked_link_owns_its_body_without_empty_table_cell(
+    tmp_path: Path,
+) -> None:
+    source = write_html(
+        tmp_path,
+        '<table><tr><td><a href="https://example.com/spec" '
+        'title="Agent authentication">agent-spec</a></td></tr></table>',
+    )
+
+    manifest = tmp_path / "segments.jsonl"
+    segments = extract_segments(source, manifest)
+
+    assert len(segments) == 1
+    assert segments[0].semantic_type == "located:link"
+    assert segments[0].source_text.count("Agent authentication") == 1
+    assert segments[0].source_text.count("agent-spec") == 1
+    assert "https://example.com/spec" not in segments[0].source_text
+    marked = BeautifulSoup(source.read_text("utf-8"), "lxml")
+    assert marked.td.get("data-wt-segment") is None
+    assert marked.a["data-wt-segment"] == segments[0].id
+    assert marked.a["href"] == "https://example.com/spec"
+    source_bytes = source.read_bytes()
+    manifest_bytes = manifest.read_bytes()
+    assert extract_segments(source, manifest) == segments
+    assert source.read_bytes() == source_bytes
+    assert manifest.read_bytes() == manifest_bytes
+
+
+def test_mixed_table_cell_and_link_have_disjoint_nonempty_targets(
+    tmp_path: Path,
+) -> None:
+    source = write_html(
+        tmp_path,
+        '<table><tr><td>Read <a href="https://example.com/spec" '
+        'title="Agent authentication">agent-spec</a> now.</td></tr></table>',
+    )
+
+    segments = extract_segments(source, tmp_path / "segments.jsonl")
+
+    assert [item.semantic_type for item in segments] == [
+        "table_cell:row:000001",
+        "located:link",
+    ]
+    assert "Read " in segments[0].source_text
+    assert " now." in segments[0].source_text
+    assert "agent-spec" not in segments[0].source_text
+    assert "Agent authentication" not in segments[0].source_text
+    assert segments[1].source_text.count("agent-spec") == 1
+    assert segments[1].source_text.count("Agent authentication") == 1
+    assert sum("agent-spec" in item.source_text for item in segments) == 1
+    assert all(re.sub(r"⟦WT:\d{6}⟧", "", item.source_text).strip() for item in segments)
+
+
+def test_multilevel_attribute_owners_and_exclusions_keep_body_coverage(
+    tmp_path: Path,
+) -> None:
+    source = write_html(
+        tmp_path,
+        '<p>Start <a title="Outer title" href="https://example.com/spec">'
+        'outer <span title="Inner title">inner body</span> end '
+        '<code>secret_code</code><span translate="no" title="Hidden title">'
+        'hidden body</span></a> finish.</p>',
+    )
+
+    segments = extract_segments(source, tmp_path / "segments.jsonl")
+
+    assert [item.semantic_type for item in segments] == [
+        "paragraph",
+        "located:link",
+        "located:prose",
+    ]
+    assert "Start " in segments[0].source_text
+    assert " finish." in segments[0].source_text
+    for phrase in ("outer ", " end ", "Outer title"):
+        assert sum(phrase in item.source_text for item in segments) == 1
+    for phrase in ("inner body", "Inner title"):
+        assert sum(phrase in item.source_text for item in segments) == 1
+    assert "hidden body" not in "".join(item.source_text for item in segments)
+    assert "Hidden title" not in "".join(item.source_text for item in segments)
+    assert "secret_code" not in "".join(item.source_text for item in segments)
+    assert any(
+        token.kind == "code" and "secret_code" in token.value
+        for item in segments for token in item.protected
+    )
+    marked = BeautifulSoup(source.read_text("utf-8"), "lxml")
+    assert marked.a["href"] == "https://example.com/spec"
+    assert not marked.select_one('[translate="no"]').has_attr("data-wt-segment")
