@@ -2771,8 +2771,141 @@ def test_remove_qa_pages_quarantines_exact_directory_on_unexpected_posix_delete_
     assert list(quarantines[0].iterdir()) == []
 
 
+@pytest.mark.parametrize("operation", ["move", "delete"])
+@pytest.mark.parametrize("outcome", ["success", "error", "replaced", "handle-mismatch"])
+def test_windows_qa_directory_mutation_verifies_identity_and_closes_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str,
+) -> None:
+    # Catch mutation with an enumeration handle or unverified replacement child.
+    class WindowsOSProxy:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    source_path = tmp_path / "source"
+    destination_path = tmp_path / "destination"
+    pages_path = source_path / "pages"
+    pages_path.mkdir(parents=True)
+    destination_path.mkdir()
+    original = pages_path.stat()
+    expected_identity = (original.st_dev, original.st_ino)
+    anchor_type = pdf_qa_module.assembly._DirectoryAnchor
+
+    def anchor(path, handle):
+        metadata = path.stat()
+        return anchor_type(path, "test", (metadata.st_dev, metadata.st_ino), None,
+                           SimpleNamespace(handle=handle, current_path=lambda: path))
+
+    source = anchor(source_path, 101)
+    destination = anchor(destination_path, 202)
+    pages = anchor(pages_path, 303)
+    opened, closed, mutations = [], [], []
+
+    def nt_open(root, name, **parameters):
+        assert (root, name) == (101, "pages")
+        assert parameters == dict(desired_access=0x00110081, create_disposition=1,
+                                  create_options=0x00200021, file_attributes=0)
+        opened.append(404)
+        if outcome == "replaced":
+            pages_path.rename(source_path / "original-pages")
+            pages_path.mkdir()
+            (pages_path / "foreign.bin").write_bytes(b"foreign replacement bytes")
+        return 404
+
+    def identity(handle, *, require_regular):
+        assert handle == 404 and require_regular is False
+        return (0, 0) if outcome == "handle-mismatch" else expected_identity
+
+    def mutate(handle, destination_handle=None, name=None):
+        assert handle == 404
+        mutations.append(handle)
+        if outcome == "error":
+            raise OSError("injected mutation error")
+        if operation == "move":
+            assert destination_handle == 202
+            pages_path.rename(destination_path / name)
+        else:
+            pages_path.rmdir()
+
+    monkeypatch.setattr(pdf_qa_module, "os", WindowsOSProxy())
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_nt_create_relative", nt_open)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_file_identity", identity)
+    monkeypatch.setattr(pdf_qa_module.assembly.pdf_acquire_module, "_close_windows_handle", closed.append)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_rename_open_file", mutate)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_delete_open_file", mutate)
+    if operation == "move":
+        if outcome == "success":
+            pdf_qa_module._move_directory(source, "pages", pages, destination, "moved")
+        else:
+            with pytest.raises(PdfQAFailure):
+                pdf_qa_module._move_directory(source, "pages", pages, destination, "moved")
+    else:
+        pdf_qa_module._remove_qa_pages(source, "pages", pages, quarantine_parent=None)
+    assert opened == closed == [404]
+    assert mutations == ([] if outcome in {"replaced", "handle-mismatch"} else [404])
+    if outcome == "replaced":
+        assert (pages_path / "foreign.bin").read_bytes() == b"foreign replacement bytes"
+        assert (source_path / "original-pages").stat().st_ino == expected_identity[1]
+    elif outcome != "success":
+        assert pages_path.stat().st_ino == expected_identity[1]
+    else:
+        assert not pages_path.exists()
+
+
+@pytest.mark.parametrize("mutation", ["none", "content", "identity"])
+def test_prior_qa_descendant_release_retains_original_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    run = tmp_path / "run"
+    pages = run / "qa-pages"
+    staging = run / "staging"
+    pages.mkdir(parents=True)
+    staging.mkdir()
+    (pages / "page-001.png").write_bytes(b"original page bytes")
+    (run / "pdf-qa.json").write_bytes(b"original record bytes")
+    run_anchor = pdf_qa_module.assembly._open_directory_anchor(run, "run")
+    staging_anchor = pdf_qa_module.assembly._open_directory_anchor(staging, "staging")
+    prior = pdf_qa_module._open_prior_evidence(run_anchor)
+    assert prior is not None
+    original_move = pdf_qa_module._move_directory
+    original_identity = prior.page_files["page-001.png"].identity
+
+    def move(*args):
+        assert all(item.stream.closed for item in prior.page_files.values())
+        original_move(*args)
+        target = staging / "prior-qa-pages" / "page-001.png"
+        if mutation == "content":
+            target.write_bytes(b"changed page bytes")
+        elif mutation == "identity":
+            target.rename(target.with_suffix(".original"))
+            target.write_bytes(b"original page bytes")
+
+    monkeypatch.setattr(pdf_qa_module, "_WINDOWS_RENAME_REQUIRES_CLOSED_DESCENDANTS", True)
+    monkeypatch.setattr(pdf_qa_module, "_move_directory", move)
+    try:
+        if mutation == "none":
+            pdf_qa_module._move_prior_evidence_to_staging(run_anchor, staging_anchor, prior)
+            assert prior.page_files["page-001.png"].identity == original_identity
+            assert not prior.page_files["page-001.png"].stream.closed
+            pdf_qa_module._restore_prior_evidence(run_anchor, staging_anchor, prior)
+            assert (pages / "page-001.png").read_bytes() == b"original page bytes"
+            assert (run / "pdf-qa.json").read_bytes() == b"original record bytes"
+        else:
+            with pytest.raises(PdfQAFailure, match="changed|exactly match"):
+                pdf_qa_module._move_prior_evidence_to_staging(run_anchor, staging_anchor, prior)
+    finally:
+        for item in prior.page_files.values():
+            pdf_qa_module.assembly._close_opened_file(item)
+        pdf_qa_module.assembly._close_opened_file(prior.record)
+        prior.pages.close()
+        staging_anchor.close()
+        run_anchor.close()
+
+
+@pytest.mark.parametrize("caller", ["remove", "discard-prior"])
 def test_remove_qa_pages_uses_windows_held_handle_to_remove_empty_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: str,
 ) -> None:
     class WindowsOSProxy:
         name = "nt"
@@ -2814,10 +2947,23 @@ def test_remove_qa_pages_uses_windows_held_handle_to_remove_empty_directory(
     )
     deleted: list[int] = []
     moved: list[tuple[int, int, str]] = []
+    opened, closed = [], []
+
+    def nt_open(root, name, **parameters):
+        assert (root, name) == (202, "qa-pages" if caller == "remove" else "prior-qa-pages")
+        assert parameters["desired_access"] == 0x00110081
+        opened.append(404)
+        return 404
+
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_nt_create_relative", nt_open)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_file_identity",
+                        lambda handle, *, require_regular: pages_anchor.identity)
+    monkeypatch.setattr(pdf_qa_module.assembly.pdf_acquire_module,
+                        "_close_windows_handle", closed.append)
 
     def windows_delete(handle: int) -> None:
         deleted.append(handle)
-        pages_path.rmdir()
+        pages_path_anchor.path.rmdir()
 
     monkeypatch.setattr(
         pdf_qa_module.assembly, "_windows_delete_open_file", windows_delete
@@ -2830,18 +2976,25 @@ def test_remove_qa_pages_uses_windows_held_handle_to_remove_empty_directory(
     monkeypatch.setattr(pdf_qa_module, "os", WindowsOSProxy())
 
     try:
-        pdf_qa_module._remove_qa_pages(
-            staging_anchor,
-            "qa-pages",
-            pages_anchor,
-            quarantine_parent=run_anchor,
-        )
+        if caller == "remove":
+            pdf_qa_module._remove_qa_pages(
+                staging_anchor, "qa-pages", pages_anchor, quarantine_parent=run_anchor,
+            )
+        else:
+            # Prior descendants have already been removed at this boundary.
+            pages_path.rename(staging_path / "prior-qa-pages")
+            pages_path_anchor.path = staging_path / "prior-qa-pages"
+            pages_anchor.path = pages_path_anchor.path
+            pdf_qa_module._discard_prior_evidence(staging_anchor, SimpleNamespace(
+                pages=pages_anchor, page_files={}, record_moved=False, pages_moved=True,
+            ))
     finally:
         pages_anchor.close()
         staging_anchor.close()
         run_anchor.close()
 
-    assert deleted == [303]
+    assert deleted == [404]
+    assert opened == closed == [404]
     assert moved == []
     assert not pages_path.exists()
     assert pages_path_anchor.close_count == 1
@@ -2904,6 +3057,24 @@ def test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors(
 
     deleted: list[int] = []
     moved: list[tuple[int, int, str]] = []
+    opened, closed = [], []
+
+    def nt_open(root, name, **parameters):
+        assert (root, name) == (202, "qa-pages")
+        assert parameters["desired_access"] == 0x00110081
+        handle = 404 + len(opened)
+        opened.append(handle)
+        return handle
+
+    def windows_delete(handle):
+        deleted.append(handle)
+        raise OSError("nonempty directory")
+
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_nt_create_relative", nt_open)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_windows_file_identity",
+                        lambda handle, *, require_regular: pages_anchor.identity)
+    monkeypatch.setattr(pdf_qa_module.assembly.pdf_acquire_module,
+                        "_close_windows_handle", closed.append)
 
     def windows_rename(
         source_handle: int,
@@ -2916,7 +3087,7 @@ def test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors(
     monkeypatch.setattr(
         pdf_qa_module.assembly,
         "_windows_delete_open_file",
-        deleted.append,
+        windows_delete,
     )
     monkeypatch.setattr(
         pdf_qa_module.assembly,
@@ -2937,15 +3108,62 @@ def test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors(
         staging_anchor.close()
         run_anchor.close()
 
-    assert deleted == [303]
+    assert deleted == [404]
+    assert opened == closed == [404, 405]
     assert len(moved) == 1
-    assert moved[0][:2] == (303, 101)
+    assert moved[0][:2] == (405, 101)
     assert moved[0][2].startswith(".pdf-qa-raced-")
     quarantine = run_path / moved[0][2]
     assert (quarantine / "page-999.png").read_bytes() == racer_bytes
     assert pages_path_anchor.close_count == 1
     assert staging_path_anchor.close_count == 1
     assert run_path_anchor.close_count == 1
+
+
+@pytest.mark.parametrize("relocation", ["pages", "record"])
+def test_prepare_pdf_qa_restores_prior_evidence_after_interrupted_relocation(
+    assembled_pdf_run: PdfQARun,
+    monkeypatch: pytest.MonkeyPatch,
+    relocation: str,
+) -> None:
+    prepare_pdf_qa(assembled_pdf_run.run_dir, assembled_pdf_run.output_dir)
+    run = assembled_pdf_run.run_dir
+    pages = run / "qa-pages"
+    record = run / "pdf-qa.json"
+    page_bytes = {path.name: path.read_bytes() for path in pages.iterdir()}
+    page_identities = {path.name: (path.stat().st_dev, path.stat().st_ino)
+                       for path in pages.iterdir()}
+    pages_identity = (pages.stat().st_dev, pages.stat().st_ino)
+    record_identity = (record.stat().st_dev, record.stat().st_ino)
+    record_bytes = record.read_bytes()
+    staged_bytes = (run / "staged-output" / "translated.pdf").read_bytes()
+    primary = KeyboardInterrupt("after real prior relocation")
+    helper_name = "_move_directory" if relocation == "pages" else "_move_file"
+    real_move = getattr(pdf_qa_module, helper_name)
+    fired = False
+
+    def interrupted_move(*args):
+        nonlocal fired
+        real_move(*args)
+        expected_destination = "prior-qa-pages" if relocation == "pages" else "prior-pdf-qa.json"
+        if args[-1] == expected_destination and not fired:
+            fired = True
+            raise primary
+
+    monkeypatch.setattr(pdf_qa_module, helper_name, interrupted_move)
+    monkeypatch.setattr(pdf_qa_module, "_WINDOWS_RENAME_REQUIRES_CLOSED_DESCENDANTS", True)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        prepare_pdf_qa(run, assembled_pdf_run.output_dir)
+    assert caught.value is primary
+    assert fired
+    assert (pages.stat().st_dev, pages.stat().st_ino) == pages_identity
+    assert (record.stat().st_dev, record.stat().st_ino) == record_identity
+    assert record.read_bytes() == record_bytes
+    assert {path.name: path.read_bytes() for path in pages.iterdir()} == page_bytes
+    assert {path.name: (path.stat().st_dev, path.stat().st_ino)
+            for path in pages.iterdir()} == page_identities
+    assert (run / "staged-output" / "translated.pdf").read_bytes() == staged_bytes
+    assert not assembled_pdf_run.output_dir.exists()
 
 
 def test_prepare_pdf_qa_regenerates_safe_prior_evidence_and_preserves_unrelated_files(

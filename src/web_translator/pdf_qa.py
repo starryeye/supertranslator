@@ -1285,6 +1285,8 @@ class _PriorEvidence:
     pages: assembly._DirectoryAnchor
     record: assembly._OpenedFile
     page_files: dict[str, assembly._OpenedFile]
+    page_hashes: dict[str, str]
+    record_hash: str
     pages_moved: bool = False
     record_moved: bool = False
 
@@ -1805,7 +1807,25 @@ def _open_prior_evidence(
         assembly._verify_anchored_evidence(
             run_anchor, {"pdf-qa.json": record}
         )
-        return _PriorEvidence(pages=pages, record=record, page_files=files)
+        page_hashes = {
+            name: hashlib.sha256(
+                assembly._read_opened_bytes(
+                    item, pages.path / name, "prior rendered PDF QA artifact"
+                )
+            ).hexdigest()
+            for name, item in files.items()
+        }
+        record_hash = hashlib.sha256(
+            assembly._read_opened_bytes(
+                record, run_anchor.path / "pdf-qa.json", "prior PDF QA record"
+            )
+        ).hexdigest()
+        assembly._verify_anchored_evidence(pages, files)
+        assembly._verify_anchored_evidence(run_anchor, {"pdf-qa.json": record})
+        return _PriorEvidence(
+            pages=pages, record=record, page_files=files,
+            page_hashes=page_hashes, record_hash=record_hash,
+        )
     except BaseException:
         for item in files.values():
             assembly._close_opened_file(item)
@@ -3308,22 +3328,146 @@ def _move_prior_evidence_to_staging(
     staging_anchor: assembly._DirectoryAnchor,
     prior: _PriorEvidence,
 ) -> None:
-    _move_directory(
-        run_anchor,
-        "qa-pages",
-        prior.pages,
-        staging_anchor,
-        "prior-qa-pages",
+    _move_prior_pages(
+        run_anchor, "qa-pages", staging_anchor, "prior-qa-pages", prior, moved=True
     )
-    prior.pages_moved = True
-    _move_file(
-        run_anchor,
-        "pdf-qa.json",
-        prior.record.identity,
-        staging_anchor,
-        "prior-pdf-qa.json",
+    _move_prior_record(
+        run_anchor, "pdf-qa.json", staging_anchor, "prior-pdf-qa.json", prior,
+        moved=True,
     )
-    prior.record_moved = True
+
+
+def _verify_prior_record(
+    parent: assembly._DirectoryAnchor,
+    name: str,
+    prior: _PriorEvidence,
+) -> None:
+    assembly._verify_anchored_evidence(parent, {name: prior.record})
+    payload = assembly._read_opened_bytes(
+        prior.record, parent.path / name, "prior PDF QA record"
+    )
+    if hashlib.sha256(payload).hexdigest() != prior.record_hash:
+        raise PdfQAFailure("prior PDF QA record changed content")
+    assembly._verify_anchored_evidence(parent, {name: prior.record})
+
+
+def _move_prior_record(
+    source_parent: assembly._DirectoryAnchor,
+    source_name: str,
+    destination_parent: assembly._DirectoryAnchor,
+    destination_name: str,
+    prior: _PriorEvidence,
+    *,
+    moved: bool,
+) -> None:
+    _verify_prior_record(source_parent, source_name, prior)
+    try:
+        _move_file(source_parent, source_name, prior.record.identity,
+                   destination_parent, destination_name)
+    except BaseException:
+        # A syscall may have relocated the original before a postcheck or
+        # interrupt raised. Only the two known relative names are considered.
+        try:
+            assembly._require_anchored_name_absent(source_parent, source_name)
+            _verify_prior_record(destination_parent, destination_name, prior)
+        except BaseException:
+            pass
+        else:
+            prior.record_moved = moved
+        raise
+    prior.record_moved = moved
+    _verify_prior_record(destination_parent, destination_name, prior)
+
+
+def _move_prior_pages(
+    source_parent: assembly._DirectoryAnchor,
+    source_name: str,
+    destination_parent: assembly._DirectoryAnchor,
+    destination_name: str,
+    prior: _PriorEvidence,
+    *,
+    moved: bool,
+) -> None:
+    identities = {name: item.identity for name, item in prior.page_files.items()}
+    _verify_qa_artifact_snapshot(
+        prior.pages, prior.page_files, identities, prior.page_hashes
+    )
+    release = _WINDOWS_RENAME_REQUIRES_CLOSED_DESCENDANTS
+    if release:
+        for item in prior.page_files.values():
+            assembly._close_opened_file(item)
+    reopened: dict[str, assembly._OpenedFile] = {}
+    reopened_pages: assembly._DirectoryAnchor | None = None
+    relocated = False
+    primary_error: BaseException | None = None
+    try:
+        _move_directory(
+            source_parent, source_name, prior.pages,
+            destination_parent, destination_name,
+        )
+        relocated = True
+        prior.pages_moved = moved
+    except BaseException as error:
+        primary_error = error
+        try:
+            assembly._require_anchored_name_absent(source_parent, source_name)
+            _require_anchored_directory_identity(
+                destination_parent, destination_name, prior.pages.identity,
+                "relocated prior PDF QA directory",
+            )
+        except BaseException:
+            pass
+        else:
+            relocated = True
+            prior.pages_moved = moved
+        raise
+    finally:
+        # A failed move must not leave a closed snapshot that rollback cannot
+        # verify. Reopen only the original held directory and original files.
+        verified_reopen = False
+        try:
+            reopened_pages = assembly._open_existing_child_directory(
+                destination_parent if relocated else source_parent,
+                destination_name if relocated else source_name,
+                "prior rendered PDF QA pages",
+            )
+            if reopened_pages.identity != prior.pages.identity:
+                raise PdfQAFailure("prior PDF QA directory changed identity")
+            if release:
+                for name in identities:
+                    reopened[name] = assembly._open_anchored_input_file(
+                        reopened_pages, name, "prior rendered PDF QA artifact"
+                    )
+            _verify_qa_artifact_snapshot(
+                reopened_pages, reopened if release else prior.page_files,
+                identities, prior.page_hashes,
+            )
+            verified_reopen = True
+        except BaseException as error:
+            for item in reopened.values():
+                assembly._close_opened_file(item)
+            if reopened_pages is not None:
+                reopened_pages.close()
+            if primary_error is not None:
+                # Do not mask the move's primary failure with a verification
+                # failure. Partial/replacement evidence remains private.
+                pass
+            elif isinstance(error, PdfAssemblyError):
+                raise PdfQAFailure(
+                    f"prior PDF QA evidence changed during move: {error}"
+                ) from error
+            else:
+                raise
+        # Swap anchors/files only after verifying the original snapshot.
+        if verified_reopen:
+            prior.pages.close()
+            prior.pages = reopened_pages
+            if release:
+                prior.page_files.clear()
+                prior.page_files.update(reopened)
+    _verify_qa_artifact_snapshot(
+        prior.pages, prior.page_files, identities, prior.page_hashes
+    )
 
 
 def _restore_prior_evidence(
@@ -3334,27 +3478,23 @@ def _restore_prior_evidence(
     if prior.record_moved:
         try:
             assembly._require_anchored_name_absent(run_anchor, "pdf-qa.json")
-            _move_file(
-                staging_anchor,
-                "prior-pdf-qa.json",
-                prior.record.identity,
-                run_anchor,
-                "pdf-qa.json",
+            _move_prior_record(
+                staging_anchor, "prior-pdf-qa.json", run_anchor, "pdf-qa.json", prior,
+                moved=False,
             )
-            prior.record_moved = False
         except (PdfAssemblyError, PdfQAFailure):
             pass
     if prior.pages_moved:
         try:
             assembly._require_anchored_name_absent(run_anchor, "qa-pages")
-            _move_directory(
+            _move_prior_pages(
                 staging_anchor,
                 "prior-qa-pages",
-                prior.pages,
                 run_anchor,
                 "qa-pages",
+                prior,
+                moved=False,
             )
-            prior.pages_moved = False
         except (PdfAssemblyError, PdfQAFailure):
             pass
 
@@ -3364,6 +3504,7 @@ def _discard_prior_evidence(
     prior: _PriorEvidence,
 ) -> None:
     if prior.record_moved:
+        assembly._close_opened_file(prior.record)
         assembly._remove_owned_file(
             staging_anchor,
             "prior-pdf-qa.json",
@@ -3372,15 +3513,19 @@ def _discard_prior_evidence(
         prior.record_moved = False
     if prior.pages_moved:
         for name, item in prior.page_files.items():
+            assembly._close_opened_file(item)
             assembly._remove_owned_file(
                 prior.pages, name, assembly._PublishedFile(item.identity)
             )
-        assembly._remove_owned_directory(
-            staging_anchor,
-            "prior-qa-pages",
-            prior.pages.identity,
-            child=prior.pages,
-        )
+        if os.name == "nt":
+            _remove_qa_pages(
+                staging_anchor, "prior-qa-pages", prior.pages, quarantine_parent=None
+            )
+        else:
+            assembly._remove_owned_directory(
+                staging_anchor, "prior-qa-pages", prior.pages.identity,
+                child=prior.pages,
+            )
         prior.pages_moved = False
 
 
@@ -3434,7 +3579,11 @@ def _move_directory(
     destination_parent: assembly._DirectoryAnchor,
     destination_name: str,
 ) -> None:
+    handle: int | None = None
     try:
+        _require_anchored_directory_identity(
+            source_parent, source_name, source.identity, "prior PDF QA directory"
+        )
         if source_parent.descriptor is not None and destination_parent.descriptor is not None:
             os.rename(
                 source_name,
@@ -3443,8 +3592,11 @@ def _move_directory(
                 dst_dir_fd=destination_parent.descriptor,
             )
         elif os.name == "nt":
+            handle = _open_windows_qa_mutation_directory(
+                source_parent, source_name, source.identity
+            )
             assembly._windows_rename_open_file(
-                assembly._windows_anchor_handle(source),
+                handle,
                 assembly._windows_anchor_handle(destination_parent),
                 destination_name,
             )
@@ -3463,6 +3615,32 @@ def _move_directory(
         ) from error
     except (NotImplementedError, OSError) as error:
         raise PdfQAFailure(f"cannot move prior PDF QA directory: {error}") from error
+    finally:
+        if handle is not None:
+            assembly.pdf_acquire_module._close_windows_handle(handle)
+
+
+def _open_windows_qa_mutation_directory(
+    parent: assembly._DirectoryAnchor,
+    name: str,
+    identity: tuple[int, int],
+) -> int:
+    _require_anchored_directory_identity(
+        parent, name, identity, "PDF QA mutation directory"
+    )
+    handle = assembly._windows_open_relative_mutation_directory(
+        assembly._windows_anchor_handle(parent), name
+    )
+    try:
+        if assembly._windows_file_identity(handle, require_regular=False) != identity:
+            raise PdfQAFailure("PDF QA mutation directory changed identity")
+        _require_anchored_directory_identity(
+            parent, name, identity, "PDF QA mutation directory"
+        )
+        return handle
+    except BaseException:
+        assembly.pdf_acquire_module._close_windows_handle(handle)
+        raise
 
 
 def _publish_new_directory(
@@ -3835,12 +4013,10 @@ def _quarantine_raced_directory(
                 public_name,
                 "raced published PDF QA directory",
             )
-            assembly._windows_rename_open_file(
-                assembly._windows_anchor_handle(raced_anchor),
-                assembly._windows_anchor_handle(staging_parent),
-                quarantine_name,
+            _move_directory(
+                public_parent, public_name, raced_anchor, staging_parent, quarantine_name
             )
-    except (PdfAssemblyError, NotImplementedError, OSError):
+    except (PdfAssemblyError, PdfQAFailure, NotImplementedError, OSError):
         return
     finally:
         if raced_anchor is not None:
@@ -3887,9 +4063,14 @@ def _remove_qa_pages(
             "failed PDF QA render directory",
         )
         try:
-            assembly._windows_delete_open_file(
-                assembly._windows_anchor_handle(pages_anchor)
+            handle = _open_windows_qa_mutation_directory(
+                run_anchor, name, pages_anchor.identity
             )
+            try:
+                assembly._windows_delete_open_file(handle)
+                return
+            finally:
+                assembly.pdf_acquire_module._close_windows_handle(handle)
         except (OSError, PdfAssemblyError):
             pass
         try:

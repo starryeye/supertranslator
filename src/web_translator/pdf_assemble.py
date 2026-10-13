@@ -3270,6 +3270,7 @@ def _open_anchored_input_file(
     descriptor: int | None = None
     windows_handle: int | None = None
     stream: BinaryIO | None = None
+    succeeded = False
     try:
         if directory.descriptor is not None:
             descriptor = os.open(
@@ -3313,6 +3314,7 @@ def _open_anchored_input_file(
         opened = _OpenedFile(stream, identity)
         directory.verify_visible()
         _verify_anchored_input_identity(directory, name, identity)
+        succeeded = True
         return opened
     except PdfAssemblyError:
         raise
@@ -3321,7 +3323,7 @@ def _open_anchored_input_file(
             f"cannot open {context} {directory.path / name}: {error}"
         ) from error
     finally:
-        if sys.exc_info()[0] is not None:
+        if not succeeded:
             if stream is not None:
                 try:
                     stream.close()
@@ -3402,6 +3404,7 @@ def _open_existing_child_directory(
     descriptor: int | None = None
     path_anchor: object | None = None
     windows_handle: int | None = None
+    succeeded = False
     try:
         if parent.descriptor is not None:
             descriptor = os.open(
@@ -3447,6 +3450,7 @@ def _open_existing_child_directory(
         )
         parent.verify_visible()
         child.verify_visible()
+        succeeded = True
         return child
     except PdfAssemblyError:
         raise
@@ -3455,7 +3459,7 @@ def _open_existing_child_directory(
             f"cannot open anchored {label} directory {parent.path / name}: {error}"
         ) from error
     finally:
-        if sys.exc_info()[0] is not None:
+        if not succeeded:
             if descriptor is not None:
                 try:
                     os.close(descriptor)
@@ -4062,6 +4066,17 @@ def _windows_open_relative_directory(root_handle: int, name: str) -> int:
         root_handle,
         name,
         desired_access=0x00000001 | 0x00000080 | 0x00100000,
+        create_disposition=1,
+        create_options=0x00000001 | 0x00000020 | 0x00200000,
+        file_attributes=0,
+    )
+
+
+def _windows_open_relative_mutation_directory(root_handle: int, name: str) -> int:
+    return _windows_nt_create_relative(
+        root_handle,
+        name,
+        desired_access=0x00010000 | 0x00000001 | 0x00000080 | 0x00100000,
         create_disposition=1,
         create_options=0x00000001 | 0x00000020 | 0x00200000,
         file_attributes=0,

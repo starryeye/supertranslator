@@ -3658,6 +3658,55 @@ def test_windows_anchored_input_closes_native_handle_if_stream_conversion_interr
     assert closed == [919]
 
 
+def test_windows_relative_mutation_directory_requests_delete_without_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opens = []
+
+    def nt_open(root, name, **parameters):
+        opens.append((root, name, parameters))
+        return 919
+
+    monkeypatch.setattr(pdf_assemble_module, "_windows_nt_create_relative", nt_open)
+    assert pdf_assemble_module._windows_open_relative_directory(41, "pages") == 919
+    assert pdf_assemble_module._windows_open_relative_mutation_directory(41, "pages") == 919
+    assert opens == [
+        (41, "pages", dict(desired_access=0x00100081, create_disposition=1,
+                           create_options=0x00200021, file_attributes=0)),
+        (41, "pages", dict(desired_access=0x00110081, create_disposition=1,
+                           create_options=0x00200021, file_attributes=0)),
+    ]
+
+
+@pytest.mark.parametrize("acquisition", ["directory", "file"])
+def test_anchored_acquisition_keeps_successful_handle_during_outer_exception(
+    tmp_path: Path, acquisition: str,
+) -> None:
+    child_path = tmp_path / "child"
+    child_path.mkdir()
+    (tmp_path / "document.json").write_bytes(b"original evidence bytes")
+    parent = pdf_assemble_module._open_directory_anchor(tmp_path, "run")
+    child = None
+    opened = None
+    try:
+        try:
+            raise KeyboardInterrupt("outer primary error")
+        except KeyboardInterrupt:
+            if acquisition == "directory":
+                child = pdf_assemble_module._open_existing_child_directory(parent, "child", "child")
+                assert pdf_assemble_module._anchored_directory_names(child) == []
+                child.verify_visible()
+            else:
+                opened = pdf_assemble_module._open_anchored_input_file(parent, "document.json", "document")
+                assert not opened.stream.closed
+                assert opened.stream.read() == b"original evidence bytes"
+    finally:
+        pdf_assemble_module._close_opened_file(opened)
+        if child is not None:
+            child.close()
+        parent.close()
+
+
 def test_windows_child_creation_closes_handle_if_anchor_construction_interrupts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

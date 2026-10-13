@@ -49,6 +49,15 @@ jobs:
           tests/test_pdf_pipeline.py::test_windows_root_anchor_enumerates_exact_unicode_children
           tests/test_pdf_assemble.py::test_windows_native_relative_rename_moves_to_held_destination
           tests/test_pdf_assemble.py::test_windows_native_relative_rename_never_clobbers_existing_destination
+          tests/test_pdf_assemble.py::test_windows_relative_mutation_directory_requests_delete_without_write
+          tests/test_pdf_assemble.py::test_anchored_acquisition_keeps_successful_handle_during_outer_exception
+          tests/test_pdf_qa.py::test_windows_qa_directory_mutation_verifies_identity_and_closes_handle
+          tests/test_pdf_qa.py::test_prior_qa_descendant_release_retains_original_snapshot
+          tests/test_pdf_qa.py::test_remove_qa_pages_uses_windows_held_handle_to_remove_empty_directory
+          tests/test_pdf_qa.py::test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors
+          tests/test_pdf_qa.py::test_prepare_pdf_qa_regenerates_safe_prior_evidence_and_preserves_unrelated_files
+          tests/test_pdf_qa.py::test_prepare_pdf_qa_cleans_post_publication_base_exception_by_identity
+          tests/test_pdf_qa.py::test_prepare_pdf_qa_restores_prior_evidence_after_interrupted_relocation
           tests/test_pdf_qa.py::test_prepare_figure_free_master_review_races_fail_closed
           tests/test_pdf_qa.py::test_prepare_figure_free_review_unchanged_finalizes_exact_artifacts
           tests/test_pdf_qa.py::test_windows_publishes_nonempty_qa_directory_after_releasing_descendant_handles
