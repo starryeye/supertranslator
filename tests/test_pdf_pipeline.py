@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -34,6 +35,12 @@ from tests.test_pdf_qa import PdfQARun, _write_passing_layout_review, assembled_
 
 
 PDF_FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "pdf"
+
+# Independent literal decisions for the original two empty synthetic artworks.
+_TEST_FIGURE_DECISIONS = {
+    "pdf:page-0001:block-0007": "TEST ONLY page 1: inspected solid-blue raster status panel with no intrinsic selectable labels; Figure 1 caption remains outside.",
+    "pdf:page-0001:block-0008": "TEST ONLY page 1: inspected red rising vector trend inside a pale-blue frame with no selectable labels; Figure 2 caption and explanatory body remain outside.",
+}
 
 
 @pytest.mark.parametrize("origin", ["1.1", "adapted"])
@@ -663,6 +670,87 @@ def _assert_fixture_bytes_equal(
         raise AssertionError("Fixture byte mismatches:\n" + "\n".join(mismatches))
 
 
+def _assert_fixture_regeneration_contract(
+    reference_root: Path, regenerated_root: Path, probe_root: Path,
+) -> None:
+    """32 immutable files and one fully checked native-artwork-bound review."""
+    from io import BytesIO
+    from PIL import Image
+
+    relatives = sorted(p.relative_to(reference_root) for p in reference_root.rglob("*") if p.is_file())
+    assert len(relatives) == 33
+    assert sorted(p.relative_to(regenerated_root) for p in regenerated_root.rglob("*") if p.is_file()) == relatives
+    assert sorted(p.relative_to(regenerated_root) for p in regenerated_root.rglob("*") if p.is_dir()) == sorted(
+        p.relative_to(reference_root) for p in reference_root.rglob("*") if p.is_dir()
+    )
+    runtime_review = Path("figures-captions-v1/review.json")
+    fixed = [p for p in relatives if p != runtime_review]
+    assert len(fixed) == 32
+    _assert_fixture_bytes_equal(reference_root, regenerated_root, fixed)
+
+    summary = json.loads((probe_root / "summary.json").read_bytes())
+    records = [summary[key] for key in ("source", "document", "inventory")]
+    records += summary["media"] + [summary["review"][key] for key in ("expected", "actual")]
+    for record in records:
+        payload = (probe_root / record["path"]).read_bytes()
+        assert len(payload) == record["bytes_len"]
+        assert hashlib.sha256(payload).hexdigest() == record["sha256"]
+    source_bytes = (probe_root / "producer-inputs/source.pdf").read_bytes()
+    document_bytes = (probe_root / "producer-inputs/document.json").read_bytes()
+    inventory_bytes = (probe_root / "producer-inputs/figure-text-input.json").read_bytes()
+    assert source_bytes == (regenerated_root / "figures-captions-v1/source.pdf").read_bytes()
+    assert summary["source"]["path"] == "producer-inputs/source.pdf"
+    assert summary["document"]["path"] == "producer-inputs/document.json"
+    assert summary["inventory"]["path"] == "producer-inputs/figure-text-input.json"
+    assert summary["document"]["crlf_count"] == document_bytes.count(b"\r\n")
+    source_digest = hashlib.sha256(source_bytes).hexdigest()
+    document = json.loads(document_bytes)
+    assert document["source_sha256"] == source_digest
+    assert document["page_count"] == 1
+    blocks = [b for b in document["blocks"] if b["kind"] == "figure"]
+    literal_figures = [
+        ("pdf:page-0001:block-0007", [54.0, 164.0, 274.0, 274.0]),
+        ("pdf:page-0001:block-0008", [54.0, 368.0, 274.0, 478.0]),
+    ]
+    assert len(blocks) == len(summary["media"]) == 2
+    expected_inventory = {
+        "schema_version": "1.0", "source_sha256": source_digest,
+        "document_sha256": hashlib.sha256(document_bytes).hexdigest(), "figures": [],
+    }
+    for (block_id, bbox), block, media in zip(literal_figures, blocks, summary["media"], strict=True):
+        assert (block["id"], block["page_number"], block["bbox"]) == (block_id, 1, bbox)
+        assert media["path"] == f"producer-inputs/{block_id.replace(':', '-')}.png"
+        media_bytes = (probe_root / media["path"]).read_bytes()
+        figure = {"block_id": block_id, "page_number": 1, "bbox": bbox,
+                  "media_sha256": hashlib.sha256(media_bytes).hexdigest(), "characters": []}
+        expected_inventory["figures"].append(figure)
+        assert (media["block_id"], media["page_number"], media["bbox"], media["characters"]) == (block_id, 1, bbox, [])
+        with Image.open(BytesIO(media_bytes)) as image:
+            image.load()
+            assert media["mode"] == image.mode == "RGB"
+            assert media["size"] == list(image.size) == [440, 220]
+            assert media["pixels_sha256"] == hashlib.sha256(image.tobytes()).hexdigest()
+    # Independent serialization, not the production inventory/review builders.
+    expected_inventory_bytes = (json.dumps(expected_inventory, ensure_ascii=False, sort_keys=True,
+                                           separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    assert inventory_bytes == expected_inventory_bytes
+    assert summary["inventory"]["value"] == expected_inventory
+    reference_review_bytes = (reference_root / runtime_review).read_bytes()
+    assert (probe_root / "expected-review.json").read_bytes() == reference_review_bytes
+    expected_review = json.loads(reference_review_bytes)
+    # Keep every fixed field from the immutable reference, changing only this hash.
+    expected_review["figure_text_review"]["inventory_sha256"] = hashlib.sha256(inventory_bytes).hexdigest()
+    assert expected_review["figure_text_review"]["schema_version"] == "1.0"
+    assert expected_review["figure_text_review"]["figures"] == {
+        block_id: {"verdict": "pass", "evidence": evidence, "labels": []}
+        for block_id, evidence in _TEST_FIGURE_DECISIONS.items()
+    }
+    expected_review_bytes = (json.dumps(expected_review, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    generated_review_bytes = (regenerated_root / runtime_review).read_bytes()
+    assert generated_review_bytes == expected_review_bytes
+    assert (probe_root / "generated" / runtime_review).read_bytes() == generated_review_bytes
+
+
 # Test-helper mutation caught: hiding a mismatch or reporting the wrong byte evidence.
 def test_fixture_byte_comparison_reports_exact_mismatch(tmp_path: Path) -> None:
     expected_root = tmp_path / "expected"
@@ -726,6 +814,109 @@ def test_fixture_byte_comparison_accepts_identical_files(tmp_path: Path) -> None
 
 
 # Probe mutation caught: losing/changing producer evidence or clobbering prior capture.
+def test_test_fixture_figure_review_binds_exact_inventory_without_mutating_master(tmp_path: Path) -> None:
+    from tests.pdf_fixture_probe import capture_figure_fixture_inventory
+
+    summary = capture_figure_fixture_inventory(tmp_path / "capture")
+    inventory_bytes = (tmp_path / "capture" / summary["inventory"]["path"]).read_bytes()
+    master = json.loads((PDF_FIXTURE_ROOT / "figures-captions-v1/review.json").read_bytes())
+    master["semantic_input_sha256"] = "a" * 64
+    master["unrelated"] = {"notes": ["preserve this field"]}
+    before = deepcopy(master)
+    captured_before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    constructor = getattr(pdf_fixtures, "build_test_fixture_figure_review", None)
+    assert callable(constructor), "fresh test figure review constructor is missing"
+    actual = constructor(master, inventory_bytes, figures=dict(_TEST_FIGURE_DECISIONS))
+    expected = deepcopy(before)
+    expected["figure_text_review"] = {
+        "schema_version": "1.0", "inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
+        "figures": {
+            "pdf:page-0001:block-0007": {"verdict": "pass", "evidence": _TEST_FIGURE_DECISIONS["pdf:page-0001:block-0007"], "labels": []},
+            "pdf:page-0001:block-0008": {"verdict": "pass", "evidence": _TEST_FIGURE_DECISIONS["pdf:page-0001:block-0008"], "labels": []},
+        },
+    }
+    assert actual == expected
+    assert actual is not master
+    actual["unrelated"]["notes"].append("returned record changed")
+    actual["section_findings"]["zone-001"][0]["evidence"] = "returned finding changed"
+    assert master == before
+    assert captured_before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("case", ["missing", "extra", "selectable", "noncanonical"])
+def test_test_fixture_figure_review_refuses_unknown_or_selectable_inventory(tmp_path: Path, case: str) -> None:
+    from tests.pdf_fixture_probe import capture_figure_fixture_inventory
+    from web_translator.pdf_figure_review import canonical_figure_text_input_bytes, parse_pdf_figure_text_input
+
+    summary = capture_figure_fixture_inventory(tmp_path / "capture")
+    payload = (tmp_path / "capture" / summary["inventory"]["path"]).read_bytes()
+    decisions = dict(_TEST_FIGURE_DECISIONS)
+    if case == "missing":
+        decisions.pop("pdf:page-0001:block-0008")
+    elif case == "extra":
+        decisions["pdf:page-0001:block-9999"] = "TEST ONLY unknown artwork"
+    elif case == "selectable":
+        inventory = json.loads(payload)
+        inventory["figures"][0]["characters"] = [{"index": 0, "text": "A", "bbox": [60.0, 170.0, 65.0, 180.0]}]
+        assert parse_pdf_figure_text_input(inventory)["figures"][0]["characters"][0]["text"] == "A"
+        payload = canonical_figure_text_input_bytes(inventory)
+    else:
+        payload = json.dumps(json.loads(payload), indent=2).encode("utf-8") + b"\n"
+    master = {"unrelated": {"notes": ["unchanged"]}}
+    before = deepcopy(master)
+    captured_before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    constructor = getattr(pdf_fixtures, "build_test_fixture_figure_review", None)
+    assert callable(constructor), "fresh test figure review constructor is missing"
+    with pytest.raises(ValueError, match={"missing": "exactly cover", "extra": "exactly cover", "selectable": "selectable", "noncanonical": "canonical"}[case]):
+        constructor(master, payload, figures=decisions)
+    assert master == before
+    assert captured_before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+def test_fixture_regeneration_contract_checks_fixed_content_and_runtime_binding(tmp_path: Path) -> None:
+    from tests.pdf_fixture_probe import capture_figure_fixture_inventory
+
+    regenerated, probe = tmp_path / "regenerated", tmp_path / "capture"
+    pdf_fixtures.generate_acceptance_fixtures(regenerated)
+    capture_figure_fixture_inventory(probe)
+    oracle = globals().get("_assert_fixture_regeneration_contract")
+    assert callable(oracle), "independent fixture regeneration oracle is missing"
+    oracle(PDF_FIXTURE_ROOT, regenerated, probe)
+    review_path = regenerated / "figures-captions-v1/review.json"
+    mutations = [
+        (regenerated / "technical-document-v1/document-summary.txt", b"changed fixed file"),
+        (regenerated / "rejections-v1/malformed.pdf", None),
+        (regenerated / "extra.txt", b"extra file"),
+    ]
+    for field in ("evidence", "unknown", "digest"):
+        review = json.loads(review_path.read_bytes())
+        if field == "evidence":
+            review["section_findings"]["zone-001"][0]["evidence"] = "changed fixed review content"
+        elif field == "unknown":
+            review["unknown"] = "must not be ignored"
+        else:
+            review["figure_text_review"]["inventory_sha256"] = "0" * 64
+        mutations.append((review_path, (json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")))
+    for name in ("source.pdf", "document.json", "figure-text-input.json", "pdf-page-0001-block-0007.png", "pdf-page-0001-block-0008.png"):
+        path = probe / "producer-inputs" / name
+        mutations.append((path, path.read_bytes() + b"corrupted raw evidence"))
+    for path, changed in mutations:
+        original = path.read_bytes() if path.exists() else None
+        try:
+            if changed is None:
+                path.unlink()
+            else:
+                path.write_bytes(changed)
+            with pytest.raises(AssertionError):
+                oracle(PDF_FIXTURE_ROOT, regenerated, probe)
+        finally:
+            if original is None:
+                path.unlink()
+            else:
+                path.write_bytes(original)
+    oracle(PDF_FIXTURE_ROOT, regenerated, probe)
+
+
 def test_figure_fixture_probe_retains_exact_inventory_and_artwork(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -775,8 +966,7 @@ def test_figure_fixture_probe_retains_exact_inventory_and_artwork(
     assert actual["inventory"] == actual["before"]
     assert summary["inventory"]["value"] is actual["inventory"]
     # Both retention and the real review producer consume the original object.
-    assert len(consumed_inventories) == 2
-    assert all(value is actual["inventory"] for value in consumed_inventories)
+    assert sum(value is actual["inventory"] for value in consumed_inventories) == 2
     summary_bytes = (output_dir / "summary.json").read_bytes()
     assert b"\r" not in summary_bytes
     assert json.loads(summary_bytes.decode("utf-8")) == summary
@@ -859,7 +1049,7 @@ def test_figure_fixture_probe_retains_exact_inventory_and_artwork(
 
 
 # Production mutation caught: nondeterministic or incomplete committed acceptance inputs.
-def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
+def test_committed_pdf_acceptance_fixtures_regenerate_stable_bytes_and_exact_figure_binding(
     tmp_path: Path,
 ) -> None:
     generator = getattr(pdf_fixtures, "generate_acceptance_fixtures", None)
@@ -889,7 +1079,11 @@ def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
         if path.is_file()
     )
     assert regenerated_files == committed_files
-    _assert_fixture_bytes_equal(PDF_FIXTURE_ROOT, regenerated, committed_files)
+    from tests.pdf_fixture_probe import capture_figure_fixture_inventory
+    probe_root = tmp_path / "separate-figure-capture"
+    assert not probe_root.exists()
+    capture_figure_fixture_inventory(probe_root)
+    _assert_fixture_regeneration_contract(PDF_FIXTURE_ROOT, regenerated, probe_root)
 
     repository_root = PDF_FIXTURE_ROOT.parents[2]
     windows_checkout = tmp_path / "windows-checkout"
@@ -913,7 +1107,7 @@ def test_committed_pdf_acceptance_fixtures_regenerate_byte_for_byte(
         text=True,
     )
     windows_fixture_root = windows_checkout / "tests" / "fixtures" / "pdf"
-    _assert_fixture_bytes_equal(windows_fixture_root, regenerated, committed_files)
+    _assert_fixture_bytes_equal(PDF_FIXTURE_ROOT, windows_fixture_root, committed_files)
 
 
 @pytest.mark.parametrize(
@@ -964,9 +1158,15 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
         (run_dir / "semantic-review-input.json").read_text(encoding="utf-8")
     )
     review["semantic_input_sha256"] = semantic_input["semantic_input_sha256"]
+    if expected["figure_count"]:
+        review = pdf_fixtures.build_test_fixture_figure_review(
+            review, (run_dir / "figure-text-input.json").read_bytes(),
+            figures=dict(_TEST_FIGURE_DECISIONS),
+        )
     (run_dir / "review.json").write_text(
         json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     assert main(["validate-translations", "--run-dir", str(run_dir)]) == 0
     assert main(["pdf-assemble", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
@@ -1008,6 +1208,64 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
     assert manifest["source"]["page_count"] == expected["page_count"]
     assert manifest["output"]["figure_count"] == expected["figure_count"]
     assert manifest["qa"]["automated"]["contact_sheet_pages"] == qa["contact_sheet_pages"]
+
+
+@pytest.mark.parametrize("mutation", ["media", "inventory-digest", "review-digest", "extra-review-field"])
+def test_fresh_fixture_figure_review_rejects_changed_consumed_evidence(
+    tmp_path: Path, mutation: str, capsys,
+) -> None:
+    from web_translator.pdf_figure_review import canonical_figure_text_input_bytes
+
+    fixture = PDF_FIXTURE_ROOT / "figures-captions-v1"
+    run, output = _pdf_cli_paths(tmp_path)
+    assert main(["pdf-acquire", str(fixture / "source.pdf"), "--run-dir", str(run)]) == 0
+    assert main(["pdf-extract", "--run-dir", str(run)]) == 0
+    assert main(["plan-zones", "--run-dir", str(run)]) == 0
+    for name in ("glossary.json", "document-summary.txt"):
+        shutil.copy2(fixture / name, run / name)
+    assert main(["prepare-assignments", "--run-dir", str(run)]) == 0
+    shutil.copytree(fixture / "translations", run / "translations")
+    assert main(["pdf-figure-review-input", "--run-dir", str(run)]) == 0
+    assert main(["pdf-review-input", "--run-dir", str(run)]) == 0
+    review = json.loads((fixture / "review.json").read_bytes())
+    review["semantic_input_sha256"] = json.loads((run / "semantic-review-input.json").read_bytes())["semantic_input_sha256"]
+    inventory_path = run / "figure-text-input.json"
+    review = pdf_fixtures.build_test_fixture_figure_review(
+        review, inventory_path.read_bytes(), figures=dict(_TEST_FIGURE_DECISIONS),
+    )
+    review_path = run / "review.json"
+    review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    assert main(["validate-translations", "--run-dir", str(run)]) == 0
+    approved_review_bytes = review_path.read_bytes()
+    # Evidence changes only AFTER construction. Never call the helper again.
+    if mutation == "media":
+        document = json.loads((run / "document.json").read_bytes())
+        figure = next(b for b in document["blocks"] if b["id"] == "pdf:page-0001:block-0008")
+        media_path = run / figure["media_path"]
+        media_path.write_bytes(media_path.read_bytes() + b"post-approval media change")
+    elif mutation == "inventory-digest":
+        inventory = json.loads(inventory_path.read_bytes())
+        inventory["figures"][1]["media_sha256"] = "0" * 64
+        inventory_path.write_bytes(canonical_figure_text_input_bytes(inventory))
+    else:
+        if mutation == "review-digest":
+            review["figure_text_review"]["inventory_sha256"] = "0" * 64
+        else:
+            review["figure_text_review"]["unknown"] = "must refuse"
+        review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    capsys.readouterr()
+    assert main(["pdf-assemble", "--run-dir", str(run), "--output-dir", str(output)]) != 0
+    error = capsys.readouterr().err.lower()
+    if mutation == "inventory-digest":
+        # Semantic evidence includes the inventory bytes and refuses this first.
+        assert "semantic review digest does not match current reviewed inputs" in error
+    else:
+        assert "figure" in error
+    assert not output.exists()
+    assert not (run / "staged-output").exists()
+    assert not (run / "layout.json").exists()
+    if mutation in {"media", "inventory-digest"}:
+        assert review_path.read_bytes() == approved_review_bytes
 
 
 @pytest.mark.parametrize("filename", ["image-only-scan.pdf", "encrypted.pdf", "malformed.pdf"])

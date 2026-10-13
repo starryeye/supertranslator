@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
 import shutil
 import tempfile
+from typing import Any
 
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
@@ -33,6 +36,41 @@ from web_translator.pdf_models import (
     PdfTableCell,
 )
 from web_translator.pdf_extract import extract_pdf
+
+
+def build_test_fixture_figure_review(
+    review: dict[str, Any], inventory_bytes: bytes, *, figures: dict[str, str],
+) -> dict[str, Any]:
+    """Bind literal TEST ONLY empty-artwork decisions before any consumption.
+
+    Pure construction only: never acquire, rewrite or repair consumed evidence.
+    Selectable artwork always needs a real explicit label review instead.
+    """
+    from web_translator.pdf_figure_review import (
+        canonical_figure_text_input_bytes, validate_pdf_figure_text_review,
+    )
+
+    inventory = json.loads(inventory_bytes)
+    if canonical_figure_text_input_bytes(inventory) != inventory_bytes:
+        raise ValueError("test figure inventory must contain exact canonical bytes")
+    if {figure["block_id"] for figure in inventory["figures"]} != set(figures):
+        raise ValueError("literal test decisions must exactly cover inventory figures")
+    if any(figure["characters"] for figure in inventory["figures"]):
+        raise ValueError("selectable artwork is never automatically approved")
+    if any(not isinstance(evidence, str) or not evidence.startswith("TEST ONLY ") for evidence in figures.values()):
+        raise ValueError("literal figure evidence must be explicitly TEST ONLY")
+    figure_review = {
+        "schema_version": "1.0",
+        "inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
+        "figures": {
+            block_id: {"verdict": "pass", "evidence": evidence, "labels": []}
+            for block_id, evidence in figures.items()
+        },
+    }
+    validate_pdf_figure_text_review(figure_review, inventory_bytes=inventory_bytes)
+    result = deepcopy(review)
+    result["figure_text_review"] = figure_review
+    return result
 
 
 def write_test_empty_artwork_approval(run: Path, *, figures: dict[str, str]) -> None:
@@ -1000,13 +1038,11 @@ def _write_known_fixture_translations(fixture_dir: Path) -> None:
                 "pdf:page-0001:block-0007": "TEST ONLY page 1: inspected solid-blue raster status panel with no intrinsic selectable labels; Figure 1 caption remains outside.",
                 "pdf:page-0001:block-0008": "TEST ONLY page 1: inspected red rising vector trend inside a pale-blue frame with no selectable labels; Figure 2 caption and explanatory body remain outside.",
             }
-            assert {f["block_id"] for f in inventory["figures"]} == set(decisions)
-            assert all(not f["characters"] for f in inventory["figures"])
             review_path = fixture_dir / "review.json"
             review = json.loads(review_path.read_bytes())
-            review["figure_text_review"] = {"schema_version": "1.0",
-                "inventory_sha256": hashlib.sha256(canonical_figure_text_input_bytes(inventory)).hexdigest(),
-                "figures": {key: {"verdict": "pass", "evidence": evidence, "labels": []} for key, evidence in decisions.items()}}
+            review = build_test_fixture_figure_review(
+                review, canonical_figure_text_input_bytes(inventory), figures=decisions,
+            )
             _write_json(review_path, review)
     translations = []
     for record in records:
