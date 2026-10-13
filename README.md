@@ -222,7 +222,7 @@ run the PDF stages in order:
 ```
 
 `pdf-qa prepare` writes automated evidence and numbered contact sheets under the private
-run directory. The master review records exact page/contact-sheet coverage and all eight
+run directory. The master review records exact page/contact-sheet coverage and all thirteen
 visual dimensions before `pdf-qa finalize` checks the evidence and atomically publishes
 the three final artifacts.
 
