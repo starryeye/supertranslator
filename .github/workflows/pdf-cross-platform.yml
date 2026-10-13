@@ -57,6 +57,7 @@ jobs:
           tests/test_pdf_qa.py::test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors
           tests/test_pdf_qa.py::test_prepare_pdf_qa_regenerates_safe_prior_evidence_and_preserves_unrelated_files
           tests/test_pdf_qa.py::test_prepare_pdf_qa_cleans_post_publication_base_exception_by_identity
+          tests/test_pdf_qa.py::test_prepare_pdf_qa_closes_new_record_before_restoring_prior_evidence
           tests/test_pdf_qa.py::test_prepare_pdf_qa_restores_prior_evidence_after_interrupted_relocation
           tests/test_pdf_qa.py::test_prepare_figure_free_master_review_races_fail_closed
           tests/test_pdf_qa.py::test_prepare_figure_free_review_unchanged_finalizes_exact_artifacts

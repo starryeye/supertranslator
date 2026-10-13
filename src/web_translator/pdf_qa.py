@@ -1635,6 +1635,11 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
                 "pdf-qa.json",
                 published_json or json_publication_candidate,
             )
+            # Windows disposition is pending until the new record's final
+            # owned handle closes. Keep the prior record snapshot held while
+            # releasing only the new aliases before its public-name restore.
+            assembly._close_opened_file(qa_json)
+            assembly._close_published_file(published_json)
             if qa_pages_publication_attempted:
                 _remove_qa_pages(
                     run_anchor,

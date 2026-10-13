@@ -3520,27 +3520,159 @@ def test_prepare_pdf_qa_rejects_frame_outside_actual_pdf_page(
         prepare_pdf_qa(assembled_pdf_run.run_dir, assembled_pdf_run.output_dir)
 
 
+@pytest.mark.parametrize("prior", [False, True])
+def test_prepare_pdf_qa_closes_new_record_before_restoring_prior_evidence(
+    assembled_pdf_run: PdfQARun, monkeypatch: pytest.MonkeyPatch, prior: bool,
+) -> None:
+    # Catch moving the final new-record close back below prior restoration.
+    run = assembled_pdf_run.run_dir
+    if prior:
+        prepare_pdf_qa(run, assembled_pdf_run.output_dir)
+    record = run / "pdf-qa.json"
+    prior_bytes = record.read_bytes() if prior else None
+    prior_identity = (record.stat().st_dev, record.stat().st_ino) if prior else None
+    prior_pages = {
+        path.name: ((path.stat().st_dev, path.stat().st_ino), path.read_bytes())
+        for path in (run / "qa-pages").iterdir()
+    } if prior else {}
+    prior_pages_identity = ((run / "qa-pages").stat().st_dev,
+                            (run / "qa-pages").stat().st_ino) if prior else None
+    staged_bytes = (run / "staged-output" / "translated.pdf").read_bytes()
+    keep = run / "foreign-unrelated.bin"
+    keep.write_bytes(b"foreign bytes must survive cleanup")
+    primary = KeyboardInterrupt("after owned new QA publication")
+    published = None
+    new_record = None
+    fired = False
+    release_observations = []
+    prior_observations = []
+    real_create = pdf_qa_module.assembly._create_anchored_binary_file
+    real_publish = pdf_qa_module.assembly._publish_new_file
+    real_verify = pdf_qa_module._verify_prepare_figure_snapshot
+    real_remove_pages = pdf_qa_module._remove_qa_pages
+    real_restore = pdf_qa_module._restore_prior_evidence
+    real_native_close = pdf_qa_module.assembly.pdf_acquire_module._close_windows_handle
+    surrogate = 919191
+
+    def create(*args):
+        nonlocal new_record
+        result = real_create(*args)
+        if args[1] == "pdf-qa.json":
+            new_record = result
+        return result
+
+    def publish(*args):
+        nonlocal published
+        result = real_publish(*args)
+        if args[3] == "pdf-qa.json":
+            published = result
+            if not pdf_qa_module.assembly._IS_WINDOWS:
+                # Only the unavailable retained native handle/close boundary
+                # is represented locally; all preparation/filesystem is real.
+                result.windows_handle = surrogate
+        return result
+
+    def native_close(handle):
+        if handle != surrogate or pdf_qa_module.assembly._IS_WINDOWS:
+            real_native_close(handle)
+
+    def verify(*args):
+        nonlocal fired
+        real_verify(*args)
+        if published is not None:
+            fired = True
+            raise primary
+
+    def remove_pages(*args, **kwargs):
+        if args[0].path == run and args[1] == "qa-pages":
+            release_observations.append((new_record.stream.closed,
+                                         published.windows_handle is None))
+        return real_remove_pages(*args, **kwargs)
+
+    def restore(*args):
+        held = args[2].record
+        payload = pdf_qa_module.assembly._read_opened_bytes(held, record, "prior record")
+        prior_observations.append((not held.stream.closed, held.identity, payload))
+        release_observations.append((new_record.stream.closed,
+                                     published.windows_handle is None))
+        return real_restore(*args)
+
+    monkeypatch.setattr(pdf_qa_module.assembly, "_create_anchored_binary_file", create)
+    monkeypatch.setattr(pdf_qa_module.assembly, "_publish_new_file", publish)
+    monkeypatch.setattr(pdf_qa_module.assembly.pdf_acquire_module, "_close_windows_handle", native_close)
+    monkeypatch.setattr(pdf_qa_module, "_verify_prepare_figure_snapshot", verify)
+    monkeypatch.setattr(pdf_qa_module, "_remove_qa_pages", remove_pages)
+    monkeypatch.setattr(pdf_qa_module, "_restore_prior_evidence", restore)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        prepare_pdf_qa(run, assembled_pdf_run.output_dir)
+    assert caught.value is primary and fired
+    assert release_observations == ([(True, True), (True, True)] if prior else [(True, True)])
+    assert prior_observations == ([(True, prior_identity, prior_bytes)] if prior else [])
+    if prior:
+        assert (record.stat().st_dev, record.stat().st_ino) == prior_identity
+        assert record.read_bytes() == prior_bytes
+        assert ((run / "qa-pages").stat().st_dev, (run / "qa-pages").stat().st_ino) == prior_pages_identity
+        assert {path.name: ((path.stat().st_dev, path.stat().st_ino), path.read_bytes())
+                for path in (run / "qa-pages").iterdir()} == prior_pages
+    else:
+        assert not record.exists() and not (run / "qa-pages").exists()
+    assert (run / "staged-output" / "translated.pdf").read_bytes() == staged_bytes
+    assert keep.read_bytes() == b"foreign bytes must survive cleanup"
+    assert not assembled_pdf_run.output_dir.exists()
+
+
+@pytest.mark.parametrize("injection", ["owned-return", "publisher-owned"])
 def test_prepare_pdf_qa_cleans_post_publication_base_exception_by_identity(
     assembled_pdf_run: PdfQARun,
     monkeypatch: pytest.MonkeyPatch,
+    injection: str,
 ) -> None:
+    run = assembled_pdf_run.run_dir
+    staged_bytes = (run / "staged-output" / "translated.pdf").read_bytes()
+    keep = run / "foreign-unrelated.bin"
+    keep.write_bytes(b"foreign interruption bytes")
+    primary = KeyboardInterrupt("after real QA publication boundary")
+    fired = False
     real_publish = pdf_qa_module.assembly._publish_new_file
 
     def publish_then_interrupt(*args: object, **kwargs: object) -> object:
-        real_publish(*args, **kwargs)
-        raise KeyboardInterrupt
+        nonlocal fired
+        result = real_publish(*args, **kwargs)
+        if args[3] != "pdf-qa.json":
+            return result
+        fired = True
+        try:
+            raise primary
+        finally:
+            # Successful return transfers ownership to this wrapper.
+            pdf_qa_module.assembly._close_published_file(result)
 
-    monkeypatch.setattr(
-        pdf_qa_module.assembly,
-        "_publish_new_file",
-        publish_then_interrupt,
-    )
-    with pytest.raises(KeyboardInterrupt):
-        prepare_pdf_qa(assembled_pdf_run.run_dir, assembled_pdf_run.output_dir)
+    if injection == "owned-return":
+        monkeypatch.setattr(pdf_qa_module.assembly, "_publish_new_file", publish_then_interrupt)
+    else:
+        target = pdf_qa_module.assembly if pdf_qa_module.assembly._IS_WINDOWS else pdf_qa_module.assembly.os
+        name = "_windows_rename_open_file" if pdf_qa_module.assembly._IS_WINDOWS else "link"
+        original = getattr(target, name)
 
+        def interrupt_owned_publication(*args, **kwargs):
+            nonlocal fired
+            result = original(*args, **kwargs)
+            destination = args[2] if pdf_qa_module.assembly._IS_WINDOWS else args[1]
+            if destination == "pdf-qa.json":
+                fired = True
+                raise primary
+            return result
+
+        monkeypatch.setattr(target, name, interrupt_owned_publication)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        prepare_pdf_qa(run, assembled_pdf_run.output_dir)
+
+    assert caught.value is primary and fired
     assert not (assembled_pdf_run.run_dir / "qa-pages").exists()
     assert not (assembled_pdf_run.run_dir / "pdf-qa.json").exists()
     assert not assembled_pdf_run.output_dir.exists()
+    assert (run / "staged-output" / "translated.pdf").read_bytes() == staged_bytes
+    assert keep.read_bytes() == b"foreign interruption bytes"
 
 
 def test_prepare_pdf_qa_rejects_raced_render_symlink_without_following_it(
