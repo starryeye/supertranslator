@@ -305,6 +305,90 @@ def test_fixture_pipeline_builds_complete_offline_bundle(
     assert "<code>git status</code> 명령을 실행한 뒤" in translated_html
 
 
+def test_real_assembly_qa_preserves_link_urls_keywords_and_head_attributes(
+    tmp_path: Path,
+) -> None:
+    run_dir, output_dir = _web_cli_paths(tmp_path, "qa-contract")
+    source = run_dir / "source.html"
+    source.write_text(
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<link rel="stylesheet" href="assets/theme.css">'
+        '<link rel="modulepreload" href="https://cdn.example/app.js">'
+        '<link rel="canonical" href="https://example.com/spec" title="OAuth guide">'
+        '<title>OAuth guide</title></head><body><main>'
+        '<a href="https://example.com/spec">Read https://example.com/spec.</a>'
+        '<p>Clients MUST retry but MUST NOT duplicate OAuth tokens.</p>'
+        '</main></body></html>',
+        encoding="utf-8",
+    )
+    css = run_dir / "assets" / "theme.css"
+    css.parent.mkdir()
+    css.write_text("body { max-width: 60rem; margin: auto; }", encoding="utf-8")
+    source_url = "https://example.com/spec"
+    (run_dir / "capture.json").write_text(json.dumps({
+        "asset_map": {"https://example.com/assets/theme.css": "assets/theme.css"},
+        "captured_at": "2026-10-14T00:00:00Z",
+        "critical_assets": ["assets/theme.css"],
+        "final_url": source_url,
+        "fingerprints": {"assets/theme.css": hashlib.sha256(css.read_bytes()).hexdigest(),
+                         "source.html": hashlib.sha256(source.read_bytes()).hexdigest()},
+        "missing_optional_assets": [], "optional_assets": [], "requested_url": source_url,
+    }) + "\n", encoding="utf-8")
+    assert main(["extract", "--run-dir", str(run_dir)]) == 0
+    source_after_extract = source.read_bytes()
+    assert main(["plan-zones", "--run-dir", str(run_dir), "--max-chars", "12000"]) == 0
+    segments = [json.loads(line) for line in (run_dir / "segments.jsonl").read_text("utf-8").splitlines()]
+    translations = []
+    for segment in segments:
+        if not segment["target"]:
+            continue
+        tokens = [item["token"] for item in segment["protected"]]
+        raw = segment["source_text"]
+        if segment["semantic_type"] == "located:attributes":
+            assert raw == f"{tokens[0]}OAuth guide"
+            translated = f"{tokens[0]}OAuth 안내"
+        elif "OAuth guide" in raw:
+            assert tokens == []
+            translated = "OAuth 안내"
+        elif "Read " in raw:
+            translated = f"문서 {tokens[0]}."
+        elif "Clients " in raw:
+            translated = f"클라이언트는 {tokens[0]} 재시도하지만 {tokens[1]} OAuth 토큰을 중복해서는 안 된다."
+        else:
+            raise AssertionError(f"Unexpected fixture segment: {raw!r}")
+        translations.append({"segment_id": segment["id"], "text": translated,
+                             "notes": None, "glossary_observations": {}})
+    assert len(translations) == 4
+    translation_dir = run_dir / "translations"
+    translation_dir.mkdir()
+    (translation_dir / "zone-001.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in translations),
+        encoding="utf-8",
+    )
+    (run_dir / "glossary.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "review.json").write_text(json.dumps({
+        "unresolved_required": [], "retries": {"zone-001": 0},
+        "section_findings": {"zone-001": reviewed_zone_findings()},
+    }) + "\n", encoding="utf-8")
+    assert main(["validate-translations", "--run-dir", str(run_dir)]) == 0
+    assert main(["assemble", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
+    assert source.read_bytes() == source_after_extract
+    assert main(["qa", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
+    assert source.read_bytes() == source_after_extract
+    manifest = json.loads((output_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["qa_status"] == "passed"
+    assert manifest["required_findings"] == []
+    html = (output_dir / "index.html").read_text("utf-8")
+    assert 'href="https://example.com/spec"' in html
+    assert html.count("MUST NOT") == 1
+    assert len(re.findall(r"\bMUST\b(?!\s+NOT)", html)) == 1
+    assert 'title="OAuth 안내"' in html
+    assert {Path(path).name for path in manifest["screenshots"]} == {
+        "desktop-1440x900.png", "narrow-390x844.png"
+    }
+    assert all(Path(path).is_file() for path in manifest["screenshots"])
+
+
 def materialize_representative_snapshot(snapshot_dir: Path, run_dir: Path) -> dict[str, object]:
     metadata = json.loads((snapshot_dir / "snapshot.json").read_text("utf-8"))
     run_dir.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,8 @@ from pathlib import Path
 import threading
 
 import pytest
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 from web_translator.models import (
     Finding,
@@ -14,7 +16,8 @@ from web_translator.models import (
     QAInputs,
     QAResult,
 )
-from web_translator.qa import run_qa
+from web_translator.qa import _check_external_dependencies, run_qa
+from web_translator.protection import protect_fragment
 from web_translator.report import write_manifest, write_review_report
 
 
@@ -519,6 +522,266 @@ def test_protected_value_shared_by_keyword_and_identifier_counts_once_per_occurr
     assert result.required_findings == []
 
 
+def test_protected_url_text_and_href_are_distinct_locations(tmp_path: Path) -> None:
+    url = "https://example.com/spec"
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a"><a href="{url}">Read {url}.</a></p></main>',
+        output_body=f'<main><p><a href="{url}">{url} 문서.</a></p></main>',
+    )
+    result = run_qa(_inputs(
+        source, output,
+        protected_tokens={"a": [ProtectedToken(TOKEN, "url", url)]},
+        translated_texts={"a": f"{TOKEN} 문서."},
+    ))
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("output_fragment", "accepted"),
+    [
+        ("Read https://example.com/spec?a=1&amp;b=2.", True),
+        ("Read https://example.com/spec?a=1&amp;b=3.", False),
+        ("Read https://example.com/spec?a=1&amp;b=2. Again https://example.com/spec?a=1&amp;b=2.", False),
+        ("Read https://example.com/spec?a=1&amp;b=2&amp;c=3.", False),
+        ("Read https://example.com/spec?a=1&amp;b=2extra.", False),
+    ],
+    ids=["unchanged", "changed-query", "duplicate", "added-query", "suffix"],
+)
+def test_producer_entity_url_matches_decoded_owned_text_without_weakening_guards(
+    tmp_path: Path, output_fragment: str, accepted: bool,
+) -> None:
+    source_fragment = "Read https://example.com/spec?a=1&amp;b=2."
+    protected_text, tokens = protect_fragment(source_fragment)
+    assert [(token.kind, token.value) for token in tokens] == [
+        ("url", "https://example.com/spec?a=1&amp;b=2")
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f"<main><p>{output_fragment}</p></main>",
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                            translated_texts={"a": protected_text}))
+    if accepted:
+        assert result.required_findings == []
+        assert result.warnings == []
+    else:
+        assert "protected-token-integrity" in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize("output_title,accepted", [
+    ("문서 https://example.com/spec?a=1&amp;b=2", True),
+    ("문서 https://example.com/spec?a=1&amp;b=3", False),
+], ids=["unchanged-url", "changed-query"])
+def test_producer_entity_url_in_translated_attribute_keeps_exact_value(
+    tmp_path: Path, output_title: str, accepted: bool,
+) -> None:
+    protected_text, raw_tokens = protect_fragment(
+        "<!--wt-location:attribute:title-->Read https://example.com/spec?a=1&amp;b=2"
+    )
+    assert [(token.kind, token.value) for token in raw_tokens] == [
+        ("tag", "<!--wt-location:attribute:title-->"),
+        ("url", "https://example.com/spec?a=1&amp;b=2"),
+    ]
+    tokens = [ProtectedToken(token.token, "location" if token.kind == "tag" else token.kind, token.value)
+              for token in raw_tokens]
+    source, output = _write_pages(
+        tmp_path,
+        source_body='<main><span data-wt-segment="a" title="Read https://example.com/spec?a=1&amp;b=2">Hello</span></main>',
+        output_body=f'<main><span title="{output_title}">안녕</span></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                            translated_texts={"a": protected_text}))
+    if accepted:
+        assert result.required_findings == []
+        assert result.warnings == []
+    else:
+        assert "protected-token-integrity" in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize("source_fragment,output_fragment,accepted", [
+    ("MUST<em> retry</em>.", "MUST<em> retry</em>.", True),
+    ("MUST<em> retry</em>.", "SHOULD<em> retry</em>.", False),
+    ("MUST<em> retry</em>.", "MUSTARD<em> retry</em>.", False),
+    ("https://example.com/spec<strong> documentation</strong>.",
+     "https://example.com/spec<strong> documentation</strong>.", True),
+    ("https://example.com/spec<strong> documentation</strong>.",
+     "https://example.com/spec/evil<strong> documentation</strong>.", False),
+], ids=["keyword-unchanged", "keyword-changed", "keyword-suffix", "url-unchanged", "url-suffix"])
+def test_producer_inline_tag_boundary_preserves_protected_value_and_suffix_guard(
+    tmp_path: Path, source_fragment: str, output_fragment: str, accepted: bool,
+) -> None:
+    protected_text, tokens = protect_fragment(source_fragment)
+    assert tokens[0].kind in {"keyword", "url"}
+    assert [token.kind for token in tokens[1:]] == ["tag", "tag"]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f"<main><p>{output_fragment}</p></main>",
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                            translated_texts={"a": protected_text}))
+    if accepted:
+        assert result.required_findings == []
+        assert result.warnings == []
+    else:
+        assert "protected-token-integrity" in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize(
+    ("source_body", "output_body", "tokens", "translation", "expected"),
+    [
+        ('<main><p data-wt-segment="a"><a href="https://example.com/spec">Read https://example.com/spec.</a></p></main>',
+         '<main><p><a href="https://example.com/spec">https://example.com/other 문서.</a></p></main>',
+         [("url", "https://example.com/spec")], "⟦WT:000000⟧ 문서.", "protected-token-integrity"),
+        ('<main><p data-wt-segment="a"><a href="https://example.com/spec">Read https://example.com/spec.</a></p></main>',
+         '<main><p><a href="https://example.com/other">https://example.com/spec 문서.</a></p></main>',
+         [("url", "https://example.com/spec")], "⟦WT:000000⟧ 문서.", "structural-signature"),
+        ('<main><input data-wt-segment="a" title="OAuth token" aria-label="OAuth token"></main>',
+         '<main><input title="OIDC 토큰" aria-label="OAuth OAuth 토큰"></main>',
+         [("location", "<!--wt-location:attribute:title-->"), ("identifier", "OAuth"),
+          ("location", "<!--wt-location:attribute:aria-label-->"), ("identifier", "OAuth")],
+         "⟦WT:000000⟧⟦WT:000001⟧ 토큰⟦WT:000002⟧⟦WT:000003⟧ 토큰", "protected-token-integrity"),
+        ('<main><p data-wt-segment="a"><a href="https://example.com/spec">Read https://example.com/spec.</a></p></main>',
+         '<main><p><a href="https://example.com/spec">https://example.com/spec 문서. https://example.com/spec</a></p></main>',
+         [("url", "https://example.com/spec")], "⟦WT:000000⟧ 문서.", "protected-token-integrity"),
+        ('<main><p data-wt-segment="a"><a href="https://example.com/spec">Read https://example.com/spec.</a></p></main>',
+         '<main><p><a href="https://example.com/spec">https://example.com/spec?x=1 문서.</a></p></main>',
+         [("url", "https://example.com/spec")], "⟦WT:000000⟧ 문서.", "protected-token-integrity"),
+        ('<main><p data-wt-segment="a">Read <code>OAuth</code> and OAuth.</p></main>',
+         '<main><p>OAuth 문서 <code>OIDC</code>.</p></main>',
+         [("code", "<code>OAuth</code>"), ("identifier", "OAuth")],
+         "⟦WT:000000⟧ and ⟦WT:000001⟧.", "protected-token-integrity"),
+        ('<main><p data-wt-segment="a">Read <svg><text>OAuth</text></svg> and OAuth.</p></main>',
+         '<main><p>OAuth 문서 <svg><text>OIDC</text></svg>.</p></main>',
+         [("excluded", "<svg><text>OAuth</text></svg>"), ("identifier", "OAuth")],
+         "⟦WT:000000⟧ and ⟦WT:000001⟧.", "protected-token-integrity"),
+        ('<main><div data-wt-segment="a">OAuth <span data-wt-segment="b">Child</span></div></main>',
+         '<main><div>OIDC <span>자식</span></div></main>',
+         [("identifier", "OAuth"), ("segment", '<span data-wt-segment="b">Child</span>')],
+         "⟦WT:000000⟧ ⟦WT:000001⟧", "protected-token-integrity"),
+    ],
+    ids=["body-url", "href", "translated-attribute", "extra-url", "query-suffix", "opaque-code", "opaque-svg", "nested-owner"],
+)
+def test_protected_locations_reject_independent_tampering(
+    tmp_path: Path, source_body: str, output_body: str,
+    tokens: list[tuple[str, str]], translation: str, expected: str,
+) -> None:
+    source, output = _write_pages(tmp_path, source_body=source_body, output_body=output_body)
+    protected = [ProtectedToken(f"⟦WT:{index:06d}⟧", kind, value)
+                 for index, (kind, value) in enumerate(tokens)]
+    result = run_qa(_inputs(source, output, protected_tokens={"a": protected},
+                            translated_texts={"a": translation},
+                            source_segment_ids={"a", "b"} if 'data-wt-segment="b"' in source_body else {"a"},
+                            translated_segment_ids={"a", "b"} if 'data-wt-segment="b"' in source_body else {"a"}))
+    assert expected in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize("kind,markup", [
+    ("code", "<code>OAuth</code>"),
+    ("excluded", "<svg><text>OAuth</text></svg>"),
+], ids=["code", "svg"])
+@pytest.mark.parametrize("tampered", [False, True], ids=["unchanged", "changed-second"])
+def test_repeated_identical_opaque_tokens_keep_exact_multiplicity(
+    tmp_path: Path, kind: str, markup: str, tampered: bool,
+) -> None:
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">Read {markup} and {markup}.</p></main>',
+        output_body=(f'<main><p>{markup} 및 '
+                     f'{markup.replace("OAuth", "OIDC") if tampered else markup} 문서.</p></main>'),
+    )
+    result = run_qa(_inputs(
+        source, output,
+        protected_tokens={"a": [ProtectedToken(TOKEN, kind, markup),
+                                ProtectedToken("⟦WT:000001⟧", kind, markup)]},
+        translated_texts={"a": f"{TOKEN} 및 ⟦WT:000001⟧ 문서."},
+    ))
+    codes = {finding.code for finding in result.required_findings}
+    if tampered:
+        assert "protected-token-integrity" in codes
+    else:
+        assert result.required_findings == []
+        assert result.warnings == []
+
+
+@pytest.mark.parametrize("phrase", ["MUST NOT", "SHALL NOT", "SHOULD NOT", "NOT RECOMMENDED"])
+def test_compound_normative_tokens_do_not_overlap(tmp_path: Path, phrase: str) -> None:
+    first = phrase.split()[0]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{first} and {phrase} and OAuth.</p></main>',
+        output_body=f'<main><p>{first} 및 {phrase} 및 OAuth.</p></main>',
+    )
+    result = run_qa(_inputs(
+        source, output,
+        protected_tokens={"a": [ProtectedToken(TOKEN, "keyword", first),
+                                ProtectedToken("⟦WT:000001⟧", "keyword", phrase),
+                                ProtectedToken("⟦WT:000002⟧", "identifier", "OAuth")]},
+        translated_texts={"a": "⟦WT:000000⟧ 및 ⟦WT:000001⟧ 및 ⟦WT:000002⟧."},
+    ))
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    "output_phrase",
+    ["MUST and MUST and OAuth.", "MUST NOT and MUST NOT and OAuth.",
+     "MUST NOT and OAuth.", "MUST NOT and MUST NOT and MUST and OAuth.",
+     "MUSTARD and MUST NOT and OAuth."],
+    ids=["lost-negation", "lost-standalone", "missing-standalone", "duplicate-compound", "larger-word"],
+)
+def test_compound_normative_tokens_reject_loss_negation_and_duplicates(
+    tmp_path: Path, output_phrase: str,
+) -> None:
+    source, output = _write_pages(
+        tmp_path,
+        source_body='<main><p data-wt-segment="a">MUST and MUST NOT and OAuth.</p></main>',
+        output_body=f"<main><p>{output_phrase}</p></main>",
+    )
+    result = run_qa(_inputs(
+        source, output,
+        protected_tokens={"a": [ProtectedToken(TOKEN, "keyword", "MUST"),
+                                ProtectedToken("⟦WT:000001⟧", "keyword", "MUST NOT"),
+                                ProtectedToken("⟦WT:000002⟧", "identifier", "OAuth")]},
+        translated_texts={"a": "⟦WT:000000⟧ and ⟦WT:000001⟧ and ⟦WT:000002⟧."},
+    ))
+    assert "protected-token-integrity" in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize(
+    ("output_head", "accepted"),
+    [
+        ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="script-src \'none\'"><meta charset="utf-8"><link rel="canonical" href="https://example.com/doc" title="OAuth 안내"><title>OAuth 안내</title>', True),
+        ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="script-src \'none\'"><meta charset="utf-8"><title>OAuth 안내</title>', False),
+        ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="script-src \'none\'"><meta charset="utf-8"><link rel="canonical" href="https://example.com/doc" title="OAuth 안내"><link rel="canonical" href="https://example.com/doc" title="OAuth 안내"><title>OAuth 안내</title>', False),
+        ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="script-src \'none\'"><meta charset="utf-8"><title>OAuth 안내</title><link rel="canonical" href="https://example.com/doc" title="OAuth 안내">', False),
+        ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="script-src \'none\'"><meta charset="utf-8"><link rel="canonical" href="https://example.com/doc" title="OAuth 안내" aria-label="surprise"><title>OAuth 안내</title>', False),
+    ], ids=["normalized", "missing-link", "duplicate-link", "reordered", "added-translatable-attribute"],
+)
+def test_head_targets_survive_known_metadata_normalization(
+    tmp_path: Path, output_head: str, accepted: bool,
+) -> None:
+    source, output = _write_pages(
+        tmp_path, source_body="<main>Body</main>", output_body="<main>본문</main>",
+        head='<meta charset="iso-8859-1"><meta http-equiv="content-type" content="text/html; charset=iso-8859-1"><meta charset="utf-8"><link data-wt-segment="a" rel="canonical" href="https://example.com/doc" title="OAuth guide"><title data-wt-segment="b">OAuth guide</title>',
+        output_head=output_head,
+    )
+    result = run_qa(_inputs(
+        source, output, source_segment_ids={"a", "b"}, translated_segment_ids={"a", "b"},
+        protected_tokens={"a": [ProtectedToken(TOKEN, "location", "<!--wt-location:attribute:title-->"),
+                                ProtectedToken("⟦WT:000001⟧", "identifier", "OAuth")],
+                          "b": [ProtectedToken("⟦WT:000002⟧", "identifier", "OAuth")]},
+        translated_texts={"a": "⟦WT:000000⟧⟦WT:000001⟧ 안내", "b": "⟦WT:000002⟧ 안내"},
+    ))
+    codes = {finding.code for finding in result.required_findings}
+    assert (codes == set()) if accepted else ("protected-token-integrity" in codes)
+    if accepted:
+        assert result.warnings == []
+
+
 def test_qa_detects_structural_change_and_unresolved_internal_anchor(tmp_path: Path) -> None:
     source, output = _write_pages(
         tmp_path,
@@ -738,6 +1001,131 @@ def test_external_script_remains_required_without_the_offline_csp(
     assert result.required_findings[0].evidence == {
         "urls": ["https://cdn.example/app.js"]
     }
+
+
+@pytest.mark.parametrize("link", [
+    '<link rel="modulepreload" href="https://cdn.example/app.js">',
+    '<link rel="MoDuLePrElOaD" href="//cdn.example/app.js">',
+    '<link rel="preload" as="script" href="https://cdn.example/app.js">',
+    '<link rel="PRELOAD" as="ScRiPt" href="//cdn.example/app.js">',
+])
+def test_script_preloads_require_effective_prior_blocking_csp(
+    tmp_path: Path, link: str,
+) -> None:
+    csp = ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
+           'content="default-src \'none\'; script-src \'none\'">')
+    source, output = _write_pages(tmp_path, head=link, output_head=csp + link)
+    result = run_qa(_inputs(source, output))
+    assert result.required_findings == []
+    assert result.warnings == []
+    assert {path.name for path in result.screenshots} == {
+        "desktop-1440x900.png", "narrow-390x844.png"
+    }
+
+
+def test_nonascii_csp_whitespace_cannot_exempt_an_attempted_script_preload(
+    tmp_path: Path,
+) -> None:
+    url = "https://cdn.example/app.js"
+    link = f'<link rel="modulepreload" href="{url}">'
+    malformed_policy = "script-src\u00a0'none'"
+    source, output = _write_pages(
+        tmp_path, head=link,
+        output_head=(f'<meta http-equiv="Content-Security-Policy" '
+                     f'content="{malformed_policy}">{link}'),
+    )
+    required: list[Finding] = []
+    warnings: list[Finding] = []
+    _check_external_dependencies(
+        _inputs(source, output), BeautifulSoup(output.read_text("utf-8"), "lxml"),
+        required, warnings,
+    )
+    assert [finding.code for finding in required] == ["external-critical-dependency"]
+    assert required[0].evidence == {"urls": [url]}
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            for policy, expected_requests in (
+                ("script-src 'none'", []),
+                (malformed_policy, [url]),
+            ):
+                attempted: list[str] = []
+                context = browser.new_context(service_workers="block")
+
+                def intercept(route: object) -> None:
+                    attempted.append(route.request.url)  # type: ignore[attr-defined]
+                    route.fulfill(status=200, content_type="text/javascript", body="export default 0")  # type: ignore[attr-defined]
+
+                context.route("**/*", intercept)
+                page = context.new_page()
+                try:
+                    page.set_content(
+                        f'<html><head><meta http-equiv="Content-Security-Policy" '
+                        f'content="{policy}">{link}</head><body></body></html>',
+                        wait_until="networkidle",
+                    )
+                finally:
+                    context.close()
+                assert attempted == expected_requests
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("policy_before,policy_after,body_policy", [
+    ("", "", ""),
+    ('<meta data-wt-csp="offline">', "", ""),
+    ('<meta http-equiv="Content-Security-Policy-Report-Only" content="script-src \'none\'">', "", ""),
+    ("", '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">', ""),
+    ("", "", '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">'),
+    ('<meta http-equiv="Content-Security-Policy" content="script-src \'none">', "", ""),
+    ('<meta http-equiv="Content-Security-Policy" content="script-src https:; script-src \'none\'">', "", ""),
+    ('<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; script-src-elem https:">', "", ""),
+], ids=["absent", "marker-only", "report-only", "late-head", "body", "malformed", "permissive-first", "element-override"])
+def test_script_preloads_require_effective_prior_blocking_csp_negative(
+    tmp_path: Path, policy_before: str, policy_after: str, body_policy: str,
+) -> None:
+    link = '<link rel="modulepreload" href="https://cdn.example/app.js">'
+    source, output = _write_pages(
+        tmp_path, head=link, output_head=policy_before + link + policy_after,
+        output_body=f"<main><p>안녕하세요</p>{body_policy}</main>",
+    )
+    result = run_qa(_inputs(source, output))
+    assert "external-critical-dependency" in {finding.code for finding in result.required_findings}
+
+
+@pytest.mark.parametrize("extra,expected,warning", [
+    ('<link rel="stylesheet modulepreload" href="https://cdn.example/theme.css">',
+     "external-critical-dependency", False),
+    ('<link rel="preload" as="style" href="https://cdn.example/theme.css">',
+     "external-critical-dependency", False),
+    ('<style>@import url("https://cdn.example/theme.css");</style>',
+     "external-critical-dependency", False),
+    ('<base href="https://cdn.example/"><link rel="stylesheet" href="theme.css">',
+     "external-critical-dependency", False),
+    ('<link rel="stylesheet" href="http://[bad">',
+     "invalid-critical-dependency-url", False),
+    ('<link rel="stylesheet" href="blob:https://cdn.example/theme">',
+     "unsupported-critical-dependency-scheme", False),
+    ('<link rel="icon" href="https://cdn.example/icon.png">',
+     "external-optional-dependency", True),
+    ('<link rel="preload" as="font" href="https://cdn.example/font.woff2">',
+     "external-optional-dependency", True),
+], ids=["mixed-stylesheet", "preload-style", "css-import", "external-base", "malformed", "unsupported", "icon", "font"])
+def test_script_preload_exemption_never_hides_css_or_other_dependencies(
+    tmp_path: Path, extra: str, expected: str, warning: bool,
+) -> None:
+    csp = ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
+           'content="default-src \'none\'; script-src \'none\'">')
+    preload = '<link rel="modulepreload" href="https://cdn.example/app.js">'
+    source, output = _write_pages(
+        tmp_path, head=preload + extra, output_head=csp + preload + extra,
+    )
+    result = run_qa(_inputs(source, output))
+    codes = {finding.code for finding in result.warnings if warning}
+    codes.update(finding.code for finding in result.required_findings)
+    assert expected in codes
+    assert not any("app.js" in str(finding.evidence) for finding in result.required_findings)
 
 
 def test_protocol_relative_stylesheet_is_external_but_metadata_link_is_not(

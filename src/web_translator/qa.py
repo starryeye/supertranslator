@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from html import unescape
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ import threading
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Route, WebSocketRoute, sync_playwright
 import tinycss2
@@ -80,6 +81,7 @@ _URL_ATTRIBUTES = {
 _OPTIONAL_TAGS = {"audio", "img", "source", "video"}
 _REPARSE_POINT = 0x400
 _END_GUARD = "\x00END"
+_TAG_BOUNDARY_GUARD = "\x00TAG"
 
 
 def run_qa(inputs: QAInputs) -> QAResult:
@@ -219,50 +221,66 @@ def _check_tokens(
         if not isinstance(source_element, Tag) or output_element is None:
             changed.add(segment_id)
             continue
-        source_fragment = _protected_fragment(source_element, tokens)
-        output_fragment = _protected_fragment(output_element, tokens)
-        if source_fragment is None or output_fragment is None:
-            changed.add(segment_id)
-            continue
-        value_expectations: Counter[str] = Counter()
-        kinds_by_value: dict[str, set[str]] = {}
-        output_expectations: Counter[tuple[str, str, str | None]] = Counter()
         semantic_text = text
         metadata_kinds = {"location", "segment"}
         guard_tokens = [token for token in tokens if token.kind not in metadata_kinds]
         for token in tokens:
             if token.kind in metadata_kinds:
                 semantic_text = semantic_text.replace(token.token, "")
+        locations: dict[str, list[ProtectedToken]] = {}
+        location = "<!--wt-location:content-->"
         for token in tokens:
-            if token.kind in {"tag", *metadata_kinds}:
+            if token.kind == "location":
+                location = token.value
                 continue
-            normalized = _normalized_fragment(token.value)
-            if not normalized:
+            if token.kind == "segment":
+                continue
+            locations.setdefault(location, []).append(token)
+        for location, owned_tokens in locations.items():
+            fragments = _owned_location_fragments(
+                source_element, output_element, location, owned_tokens
+            )
+            if fragments is None:
                 changed.add(segment_id)
                 break
-            value_expectations[normalized] += 1
-            kinds_by_value.setdefault(normalized, set()).add(token.kind)
-            guard = _following_token_guard(
-                semantic_text, token.token, guard_tokens
+            source_parts, output_parts, source_markup, output_markup = fragments
+            opaque_expected = Counter(
+                _normalized_fragment(token.value)
+                for token in owned_tokens if token.kind in {"code", "excluded"}
             )
-            output_expectations[(normalized, token.kind, guard)] += 1
-        if segment_id in changed:
-            continue
-        if any(
-            _exact_fragment_count_across_kinds(
-                source_fragment, value, kinds_by_value[value]
-            ) != count
-            for value, count in value_expectations.items()
-        ) or any(
-            _exact_fragment_count_across_kinds(
-                output_fragment, value, kinds_by_value[value]
-            ) != count
-            for value, count in value_expectations.items()
-        ) or any(
-            _guarded_fragment_count(output_fragment, value, kind, guard) != count
-            for (value, kind, guard), count in output_expectations.items()
-        ):
-            changed.add(segment_id)
+            if source_markup != opaque_expected or output_markup != opaque_expected:
+                changed.add(segment_id)
+                break
+            regular = [token for token in owned_tokens if token.kind not in {"tag", "code", "excluded"}]
+            expected: Counter[str] = Counter()
+            kinds: dict[str, set[str]] = {}
+            guarded: Counter[tuple[str, str, str | None]] = Counter()
+            for token in regular:
+                value = unescape(token.value)
+                if not value:
+                    changed.add(segment_id)
+                    break
+                expected[value] += 1
+                kinds.setdefault(value, set()).add(token.kind)
+                guarded[(value, token.kind, _following_token_guard(
+                    semantic_text, token.token, guard_tokens
+                ))] += 1
+            if segment_id in changed:
+                break
+            source_matches = _nonoverlapping_protected_matches(source_parts, kinds)
+            output_matches = _nonoverlapping_protected_matches(output_parts, kinds)
+            if (Counter(value for _, _, value in source_matches) != expected
+                or Counter(value for _, _, value in output_matches) != expected
+                or any(
+                    sum(
+                        _matches_following_guard(part, end, kind, guard)
+                        for part, end, matched_value in output_matches
+                        if matched_value == value
+                    ) != count
+                    for (value, kind, guard), count in guarded.items()
+                )):
+                changed.add(segment_id)
+                break
     leaked = sorted(set(_TOKEN_PATTERN.findall(output_text)))
     if changed or leaked:
         findings.append(
@@ -286,45 +304,106 @@ def _has_exact_tokens(text: str, tokens: Iterable[ProtectedToken]) -> bool:
     return sorted(actual) == sorted(expected) and all(text.count(token) == 1 for token in expected)
 
 
-def _protected_fragment(
-    element: Tag, tokens: Iterable[ProtectedToken]
-) -> str | None:
-    locations = [token.value for token in tokens if token.kind == "location"]
-    if not locations:
-        return element.decode_contents()
-    parts: list[str] = []
-    for marker in locations:
-        if marker == "<!--wt-location:content-->":
-            parts.append(element.decode_contents())
-            continue
-        match = re.fullmatch(
-            r"<!--wt-location:attribute:([a-z][a-z0-9-]*)-->", marker
-        )
+def _owned_location_fragments(
+    source: Tag, output: Tag, location: str, tokens: list[ProtectedToken]
+) -> tuple[list[str], list[str], Counter[str], Counter[str]] | None:
+    if location != "<!--wt-location:content-->":
+        match = re.fullmatch(r"<!--wt-location:attribute:([a-z][a-z0-9-]*)-->", location)
         if match is None or match.group(1) not in TRANSLATABLE_ATTRIBUTES:
             return None
-        value = element.get(match.group(1))
-        if value is None or isinstance(value, list):
+        source_value = source.get(match.group(1))
+        output_value = output.get(match.group(1))
+        if not isinstance(source_value, str) or not isinstance(output_value, str):
             return None
-        parts.append(str(value))
-    return "".join(parts)
+        return [source_value], [output_value], Counter(), Counter()
+
+    excluded: set[tuple[int, ...]] = set()
+    nested: set[tuple[int, ...]] = set()
+    opaque = {_normalized_fragment(token.value) for token in tokens if token.kind in {"code", "excluded"}}
+
+    def mark_excluded(tag: Tag, path: tuple[int, ...] = ()) -> None:
+        index = 0
+        for child in tag.children:
+            if not isinstance(child, Tag):
+                continue
+            child_path = path + (index,)
+            if child.has_attr("data-wt-segment"):
+                nested.add(child_path)
+                excluded.add(child_path)
+            elif _normalized_fragment(str(child)) in opaque:
+                excluded.add(child_path)
+            else:
+                mark_excluded(child, child_path)
+            index += 1
+
+    def text_parts(tag: Tag, path: tuple[int, ...] = ()) -> list[str]:
+        parts: list[str] = []
+        index = 0
+        for child in tag.children:
+            if isinstance(child, Tag):
+                child_path = path + (index,)
+                if child_path not in excluded:
+                    parts.extend(text_parts(child, child_path))
+                index += 1
+            elif isinstance(child, NavigableString) and not isinstance(child, Comment):
+                parts.append(str(child))
+        return parts
+
+    def opaque_counts(tag: Tag, path: tuple[int, ...] = ()) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        index = 0
+        for child in tag.children:
+            if not isinstance(child, Tag):
+                continue
+            child_path = path + (index,)
+            if child_path not in nested:
+                value = _normalized_fragment(str(child))
+                if value in opaque:
+                    counts[value] += 1
+                else:
+                    counts.update(opaque_counts(child, child_path))
+            index += 1
+        return counts
+
+    mark_excluded(source)
+    return text_parts(source), text_parts(output), opaque_counts(source), opaque_counts(output)
+
+
+def _nonoverlapping_protected_matches(
+    parts: list[str], kinds: dict[str, set[str]]
+) -> list[tuple[str, int, str]]:
+    selected: list[tuple[str, int, str]] = []
+    for part in parts:
+        candidates = {
+            (match.start(), match.end(), value)
+            for value, value_kinds in kinds.items()
+            for kind in value_kinds
+            for match in re.finditer(_exact_fragment_pattern(value, kind), part)
+        }
+        previous_end = 0
+        for start, end, value in sorted(candidates, key=lambda item: (item[0], -item[1], item[2])):
+            if start >= previous_end:
+                selected.append((part, end, value))
+                previous_end = end
+    return selected
+
+
+def _matches_following_guard(part: str, end: int, kind: str, guard: str | None) -> bool:
+    if guard in {_END_GUARD, _TAG_BOUNDARY_GUARD}:
+        return end == len(part)
+    if guard:
+        return part.startswith(guard, end)
+    if kind == "url":
+        return re.match(r"(?![A-Za-z0-9_~:/?#\[\]@!$&'()*+,;=%-])", part[end:]) is not None
+    if kind in {"command", "identifier", "keyword"}:
+        return re.match(r"(?![A-Za-z0-9_])", part[end:]) is not None
+    return True
 
 
 def _normalized_fragment(value: str) -> str:
     if "<" not in value and "&" not in value:
         return value
     return BeautifulSoup(value, "html.parser").decode_contents()
-
-
-def _exact_fragment_count_across_kinds(
-    fragment: str, value: str, kinds: Iterable[str]
-) -> int:
-    return len(
-        {
-            match.span()
-            for kind in kinds
-            for match in re.finditer(_exact_fragment_pattern(value, kind), fragment)
-        }
-    )
 
 
 def _exact_fragment_pattern(value: str, kind: str) -> str:
@@ -345,26 +424,6 @@ def _exact_fragment_pattern(value: str, kind: str) -> str:
     return prefix + re.escape(value) + suffix
 
 
-def _guarded_fragment_count(
-    fragment: str, value: str, kind: str, guard: str | None
-) -> int:
-    lexical = kind in {"command", "identifier", "keyword", "url"}
-    prefix = (
-        r"(?<![A-Za-z0-9_])"
-        if lexical or (value[0].isascii() and value[0].isalnum())
-        else ""
-    )
-    if guard == _END_GUARD:
-        suffix = r"(?=$)"
-    elif guard:
-        suffix = rf"(?={re.escape(guard)})"
-    elif kind == "url":
-        suffix = r"(?![A-Za-z0-9_~:/?#\[\]@!$&'()*+,;=%-])"
-    else:
-        suffix = r"(?![A-Za-z0-9_])" if lexical else ""
-    return len(re.findall(prefix + re.escape(value) + suffix, fragment))
-
-
 def _following_token_guard(
     text: str, placeholder: str, tokens: Iterable[ProtectedToken]
 ) -> str | None:
@@ -377,12 +436,14 @@ def _following_token_guard(
             following.append((position, token))
     if following:
         position, next_token = min(following, key=lambda item: item[0])
-        literal = _normalized_fragment(after[:position])
+        literal = unescape(after[:position])
         if literal:
             return literal[0]
-        normalized_next = _normalized_fragment(next_token.value)
+        if next_token.kind in {"tag", "code", "excluded"}:
+            return _TAG_BOUNDARY_GUARD
+        normalized_next = unescape(next_token.value)
         return normalized_next[0] if normalized_next else None
-    literal = _normalized_fragment(after)
+    literal = unescape(after)
     return literal[0] if literal else _END_GUARD
 
 
@@ -400,17 +461,70 @@ def _corresponding_output_element(
         siblings = [child for child in parent.children if isinstance(child, Tag)]
         indices.append(siblings.index(current))
         current = parent
+    source_candidate = source_root
     candidate = output_root
     for index in reversed(indices):
-        children = [
-            child
-            for child in candidate.children
-            if isinstance(child, Tag) and not child.has_attr("data-wt-attribution")
-        ]
-        if index >= len(children):
+        raw_children = [child for child in source_candidate.children if isinstance(child, Tag)]
+        if index >= len(raw_children):
             return None
-        candidate = children[index]
+        if source_candidate.name == "head" and candidate.name == "head":
+            head_pair = _normalized_head_children(source_candidate, candidate)
+            if head_pair is None:
+                return None
+            source_children, output_children = head_pair
+            if raw_children[index] not in source_children:
+                return None
+            candidate = output_children[source_children.index(raw_children[index])]
+        else:
+            children = [
+                child for child in candidate.children
+                if isinstance(child, Tag) and not child.has_attr("data-wt-attribution")
+            ]
+            if index >= len(children):
+                return None
+            candidate = children[index]
+        source_candidate = raw_children[index]
     return candidate
+
+
+def _normalized_head_children(source: Tag, output: Tag) -> tuple[list[Tag], list[Tag]] | None:
+    original = [child for child in source.children if isinstance(child, Tag)]
+    restored = [child for child in output.children if isinstance(child, Tag)]
+    source_children = [child for child in original if not _is_removed_head_meta(child)]
+    if (len(restored) >= 2 and restored[0].name == "meta"
+        and restored[0].get("data-wt-csp") == "offline"
+        and str(restored[0].get("http-equiv", "")).lower() == "content-security-policy"
+        and restored[1].name == "meta" and str(restored[1].get("charset", "")).lower() == "utf-8"):
+        output_children = restored[2:]
+    elif any(child.get("data-wt-csp") == "offline" for child in restored):
+        return None
+    elif len(source_children) != len(original):
+        return None
+    else:
+        output_children = restored
+    if len(source_children) != len(output_children):
+        return None
+    for left, right in zip(source_children, output_children, strict=True):
+        if left.name != right.name:
+            return None
+        left_names = set(left.attrs) - {"data-wt-segment"}
+        right_names = set(right.attrs)
+        if left_names != right_names:
+            return None
+        translated = left_names.intersection(TRANSLATABLE_ATTRIBUTES) if left.has_attr("data-wt-segment") else set()
+        left_attrs = {name: value for name, value in left.attrs.items()
+                      if name != "data-wt-segment" and name not in translated}
+        right_attrs = {name: value for name, value in right.attrs.items()
+                       if name not in translated}
+        if left_attrs != right_attrs:
+            return None
+    return source_children, output_children
+
+
+def _is_removed_head_meta(tag: Tag) -> bool:
+    return tag.name == "meta" and (
+        tag.has_attr("charset") or str(tag.get("http-equiv", "")).strip().lower() == "content-type"
+    )
 
 
 def _check_structure(
@@ -569,6 +683,8 @@ def _check_external_dependencies(
         name = tag.name.lower()
         if name == "link":
             classification = _link_dependency_class(tag)
+            if classification == "critical" and _is_script_only_preload(tag) and _prior_blocking_script_csp(soup, tag):
+                classification = None
         elif name == "script":
             classification = None
         elif name in _OPTIONAL_TAGS:
@@ -852,6 +968,54 @@ def _link_dependency_class(tag: Tag) -> str | None:
     if "preload" in rels:
         return "optional" if str(tag.get("as", "")).lower() in {"font", "image", "audio", "video"} else "critical"
     return None
+
+
+def _is_script_only_preload(tag: Tag) -> bool:
+    rel_value = tag.get("rel", [])
+    rels = {
+        str(value).lower()
+        for value in (rel_value if isinstance(rel_value, list) else str(rel_value).split())
+    }
+    if not rels or not rels <= {"modulepreload", "preload"}:
+        return False
+    destination = str(tag.get("as", "")).lower()
+    return ("modulepreload" in rels and destination in {"", "script"}) or (
+        "preload" in rels and destination == "script"
+    )
+
+
+def _prior_blocking_script_csp(soup: BeautifulSoup, preload: Tag) -> bool:
+    if soup.head is None:
+        return False
+    all_tags = list(soup.find_all(True))
+    preload_index = all_tags.index(preload)
+    for meta in soup.head.find_all("meta", recursive=False):
+        if all_tags.index(meta) >= preload_index:
+            continue
+        if str(meta.get("http-equiv", "")).strip().lower() != "content-security-policy":
+            continue
+        content = meta.get("content")
+        if not isinstance(content, str):
+            continue
+        directives: dict[str, list[str]] = {}
+        malformed = False
+        for part in content.split(";"):
+            words = re.split(r"[ \t\r\n\f]+", part.strip(" \t\r\n\f")) if part.strip(" \t\r\n\f") else []
+            if not words:
+                continue
+            name = words[0].lower()
+            if re.fullmatch(r"[a-z][a-z0-9-]*", name) is None:
+                malformed = True
+                break
+            directives.setdefault(name, words[1:])
+        if malformed:
+            continue
+        for name in ("script-src-elem", "script-src", "default-src"):
+            if name in directives:
+                if directives[name] == ["'none'"]:
+                    return True
+                break
+    return False
 
 
 def _check_assets(
