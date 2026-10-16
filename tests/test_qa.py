@@ -601,6 +601,347 @@ def test_producer_entity_url_in_translated_attribute_keeps_exact_value(
         assert "protected-token-integrity" in {finding.code for finding in result.required_findings}
 
 
+@pytest.mark.parametrize(
+    ("source_fragment", "output_fragment", "expected_urls", "in_title"),
+    [
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs).",
+         ["https://example.com/docs"], False),
+        ("See [https://example.com/docs]", "참조 [https://example.com/docs]",
+         ["https://example.com/docs"], False),
+        ("See {https://example.com/docs}", "참조 {https://example.com/docs}",
+         ["https://example.com/docs"], False),
+        ("See https://example.com/docs, then continue.",
+         "참조 https://example.com/docs, 계속.", ["https://example.com/docs"], False),
+        ("See https://example.com/a(b).", "참조 https://example.com/a(b).",
+         ["https://example.com/a(b)"], False),
+        ("See https://example.com/a[b].", "참조 https://example.com/a[b].",
+         ["https://example.com/a[b]"], False),
+        ("See https://example.com/spec?a=1&amp;b=2.",
+         "참조 https://example.com/spec?a=1&amp;b=2.",
+         ["https://example.com/spec?a=1&amp;b=2"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs).",
+         ["https://example.com/docs"], True),
+        ("See https://example.com/docs and https://example.com/docs.",
+         "참조 https://example.com/docs 및 https://example.com/docs.",
+         ["https://example.com/docs", "https://example.com/docs"], False),
+        ("See https://example.com/docs and https://example.com/docs/next.",
+         "참조 https://example.com/docs 및 https://example.com/docs/next.",
+         ["https://example.com/docs", "https://example.com/docs/next"], False),
+    ],
+    ids=["parenthesis", "bracket", "brace", "comma", "balanced-parenthesis",
+         "balanced-bracket", "entity-query", "title-parenthesis", "repeated",
+         "overlapping-prefixes"],
+)
+def test_producer_url_prose_delimiters_preserve_exact_values(
+    tmp_path: Path, source_fragment: str, output_fragment: str,
+    expected_urls: list[str], in_title: bool,
+) -> None:
+    # This catches a matcher that rejects producer-trimmed prose or loses full URLs.
+    producer_input = (
+        f"<!--wt-location:attribute:title-->{source_fragment}"
+        if in_title else source_fragment
+    )
+    protected_text, raw_tokens = protect_fragment(producer_input)
+    assert [token.value for token in raw_tokens if token.kind == "url"] == expected_urls
+    tokens = [
+        ProtectedToken(token.token, "location" if token.kind == "tag" else token.kind,
+                       token.value)
+        for token in raw_tokens
+    ]
+    if in_title:
+        source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
+        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+    else:
+        source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
+        output_body = f'<main><p>{output_fragment}</p></main>'
+    source, output = _write_pages(
+        tmp_path, source_body=source_body, output_body=output_body,
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("source_fragment", "output_fragment", "expected_urls", "in_title"),
+    [
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs/extra).",
+         ["https://example.com/docs"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs?q=2).",
+         ["https://example.com/docs"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs.evil).",
+         ["https://example.com/docs"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs)/extra.",
+         ["https://example.com/docs"], False),
+        ("See https://example.com/a(b).", "참조 https://example.com/a(c).",
+         ["https://example.com/a(b)"], False),
+        ("See https://example.com/a[b].", "참조 https://example.com/a[c].",
+         ["https://example.com/a[b]"], False),
+        ("See https://example.com/spec?a=1&amp;b=2.",
+         "참조 https://example.com/spec?a=1&amp;b=3.",
+         ["https://example.com/spec?a=1&amp;b=2"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs). "
+         "또 https://example.com/docs]", ["https://example.com/docs"], False),
+        ("See https://example.com/docs and https://example.com/docs.",
+         "참조 https://example.com/docs 및 https://example.com/docs 및 "
+         "https://example.com/docs.",
+         ["https://example.com/docs", "https://example.com/docs"], False),
+        ("See https://example.com/docs and https://example.com/docs/next.",
+         "참조 https://example.com/docs/next 및 https://example.com/docs/next.",
+         ["https://example.com/docs", "https://example.com/docs/next"], False),
+        ("See (https://example.com/docs).", "참조 (https://example.com/docs/extra).",
+         ["https://example.com/docs"], True),
+    ],
+    ids=["path", "query", "dotted-extension", "closer-then-path",
+         "changed-balanced-parenthesis", "changed-balanced-bracket", "changed-entity-query",
+         "duplicate-different-delimiter", "extra-repeated", "overlapping-prefix-substitution",
+         "title-path"],
+)
+def test_producer_url_prose_delimiters_reject_extensions_and_duplicates(
+    tmp_path: Path, source_fragment: str, output_fragment: str,
+    expected_urls: list[str], in_title: bool,
+) -> None:
+    # This catches accepting a protected URL prefix inside a larger URL or losing counts.
+    producer_input = (
+        f"<!--wt-location:attribute:title-->{source_fragment}"
+        if in_title else source_fragment
+    )
+    protected_text, raw_tokens = protect_fragment(producer_input)
+    assert [token.value for token in raw_tokens if token.kind == "url"] == expected_urls
+    tokens = [
+        ProtectedToken(token.token, "location" if token.kind == "tag" else token.kind,
+                       token.value)
+        for token in raw_tokens
+    ]
+    if in_title:
+        source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
+        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+    else:
+        source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
+        output_body = f'<main><p>{output_fragment}</p></main>'
+    source, output = _write_pages(
+        tmp_path, source_body=source_body, output_body=output_body,
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert "protected-token-integrity" in {
+        finding.code for finding in result.required_findings
+    }
+
+
+@pytest.mark.parametrize("prefix", ["x", "7", "_"], ids=["letter", "digit", "underscore"])
+def test_producer_adjacent_prefix_url_preserves_exact_value(
+    tmp_path: Path, prefix: str,
+) -> None:
+    # A producer-recognized URL remains owned even beside an ASCII word character.
+    source_fragment = f"See {prefix}https://example.com/docs."
+    protected_text, tokens = protect_fragment(source_fragment)
+    assert [(token.kind, token.value) for token in tokens] == [
+        ("url", "https://example.com/docs")
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>참조 {prefix}https://example.com/docs.</p></main>',
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("source_fragment", "output_fragment"),
+    [
+        ("See xhttps://example.com/docs.", "참조 xhttps://example.com/docs/evil."),
+        ("See https://example.com/docs normal.",
+         "https://example.com/docs normal. 또 xhttps://example.com/docs."),
+    ],
+    ids=["adjacent-extension", "ordinary-plus-prefixed-duplicate"],
+)
+def test_producer_adjacent_prefix_url_rejects_extension_and_duplicate(
+    tmp_path: Path, source_fragment: str, output_fragment: str,
+) -> None:
+    # The duplicate case catches a missed prefixed URL even if another copy matches.
+    protected_text, tokens = protect_fragment(source_fragment)
+    assert [(token.kind, token.value) for token in tokens] == [
+        ("url", "https://example.com/docs")
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>{output_fragment}</p></main>',
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert "protected-token-integrity" in {
+        finding.code for finding in result.required_findings
+    }
+
+
+@pytest.mark.parametrize(
+    ("source_fragment", "output_fragment", "expected_url", "in_title"),
+    [
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly.",
+         "https://example.com/?name=O&apos;Reilly", False),
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly.",
+         "https://example.com/?name=O&apos;Reilly", True),
+        ("See https://example.com/?name=O&quot;Reilly.",
+         "참조 https://example.com/?name=O&quot;Reilly.",
+         "https://example.com/?name=O&quot;Reilly", False),
+        ("See https://example.com/?name=O&lt;Reilly.",
+         "참조 https://example.com/?name=O&lt;Reilly.",
+         "https://example.com/?name=O&lt;Reilly", False),
+        ("See https://example.com/?name=O&gt;Reilly.",
+         "참조 https://example.com/?name=O&gt;Reilly.",
+         "https://example.com/?name=O&gt;Reilly", False),
+        ("See https://example.com/docs' after.",
+         "참조 https://example.com/docs' 이후.",
+         "https://example.com/docs", False),
+        ('See https://example.com/docs" after.',
+         '참조 https://example.com/docs" 이후.',
+         "https://example.com/docs", False),
+    ],
+    ids=["body-apostrophe", "title-apostrophe", "body-double-quote",
+         "body-less-than", "body-greater-than", "literal-apostrophe-boundary",
+         "literal-double-quote-boundary"],
+)
+def test_producer_entity_delimiter_url_preserves_exact_value(
+    tmp_path: Path, source_fragment: str, output_fragment: str,
+    expected_url: str, in_title: bool,
+) -> None:
+    # HTML entities can decode to URL characters that delimit raw producer input.
+    producer_input = (
+        f"<!--wt-location:attribute:title-->{source_fragment}"
+        if in_title else source_fragment
+    )
+    protected_text, raw_tokens = protect_fragment(producer_input)
+    assert [(token.kind, token.value) for token in raw_tokens if token.kind == "url"] == [
+        ("url", expected_url)
+    ]
+    tokens = [
+        ProtectedToken(token.token, "location" if token.kind == "tag" else token.kind,
+                       token.value)
+        for token in raw_tokens
+    ]
+    if in_title:
+        source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
+        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+    else:
+        source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
+        output_body = f'<main><p>{output_fragment}</p></main>'
+    source, output = _write_pages(
+        tmp_path, source_body=source_body, output_body=output_body,
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("source_fragment", "output_fragment", "in_title"),
+    [
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly/evil.", False),
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly&amp;q=2.", False),
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly. "
+         "또 https://example.com/?name=O&apos;Reilly.", False),
+        ("See https://example.com/?name=O&apos;Reilly.",
+         "참조 https://example.com/?name=O&apos;Reilly/evil.", True),
+    ],
+    ids=["apostrophe-path", "apostrophe-query", "apostrophe-duplicate",
+         "title-apostrophe-path"],
+)
+def test_producer_entity_delimiter_url_rejects_extensions_and_duplicates(
+    tmp_path: Path, source_fragment: str, output_fragment: str, in_title: bool,
+) -> None:
+    producer_input = (
+        f"<!--wt-location:attribute:title-->{source_fragment}"
+        if in_title else source_fragment
+    )
+    protected_text, raw_tokens = protect_fragment(producer_input)
+    assert [(token.kind, token.value) for token in raw_tokens if token.kind == "url"] == [
+        ("url", "https://example.com/?name=O&apos;Reilly")
+    ]
+    tokens = [
+        ProtectedToken(token.token, "location" if token.kind == "tag" else token.kind,
+                       token.value)
+        for token in raw_tokens
+    ]
+    if in_title:
+        source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
+        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+    else:
+        source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
+        output_body = f'<main><p>{output_fragment}</p></main>'
+    source, output = _write_pages(
+        tmp_path, source_body=source_body, output_body=output_body,
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    assert "protected-token-integrity" in {
+        finding.code for finding in result.required_findings
+    }
+
+
+@pytest.mark.parametrize(
+    ("output_fragment", "accepted"),
+    [
+        ("참조 https://example.com/?name=O&apos;Reilly 및 "
+         "https://example.com/?name=O&apos;Reilly/next.", True),
+        ("참조 https://example.com/?name=O&apos;Reilly/next 및 "
+         "https://example.com/?name=O&apos;Reilly/next.", False),
+    ],
+    ids=["overlap-unchanged", "overlap-short-value-lost"],
+)
+def test_producer_entity_delimiter_url_keeps_overlapping_values(
+    tmp_path: Path, output_fragment: str, accepted: bool,
+) -> None:
+    source_fragment = (
+        "See https://example.com/?name=O&apos;Reilly and "
+        "https://example.com/?name=O&apos;Reilly/next."
+    )
+    protected_text, tokens = protect_fragment(source_fragment)
+    assert [(token.kind, token.value) for token in tokens] == [
+        ("url", "https://example.com/?name=O&apos;Reilly"),
+        ("url", "https://example.com/?name=O&apos;Reilly/next"),
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>{output_fragment}</p></main>',
+    )
+    result = run_qa(_inputs(
+        source, output, protected_tokens={"a": tokens},
+        translated_texts={"a": protected_text},
+    ))
+    if accepted:
+        assert result.required_findings == []
+        assert result.warnings == []
+    else:
+        assert "protected-token-integrity" in {
+            finding.code for finding in result.required_findings
+        }
+
+
 @pytest.mark.parametrize("source_fragment,output_fragment,accepted", [
     ("MUST<em> retry</em>.", "MUST<em> retry</em>.", True),
     ("MUST<em> retry</em>.", "SHOULD<em> retry</em>.", False),

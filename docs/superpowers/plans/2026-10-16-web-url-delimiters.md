@@ -1,0 +1,48 @@
+# Protected Web URL Delimiters Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (preserved user-selected method) to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Accept unchanged protected URLs followed by prose delimiters without accepting changed URL values, suffixes, queries or extra occurrences; then rerun normal QA on the unchanged real AI translation.
+
+**Architecture:** Correct URL candidate-boundary recognition inside web QA, keeping owned DOM text/attribute locations, nonoverlapping selection, exact multiplicity and following guards. The existing producer already trims sentence punctuation and unmatched closing delimiters while preserving balanced delimiters inside URLs; QA must agree on those ordinary boundaries without treating every closing delimiter as an unconditional URL terminator. Ordinary decoded text and opaque whole-markup checks stay separate.
+
+**Tech Stack:** Existing Python/BeautifulSoup/pytest/Playwright runtime, no installation or new dependency.
+
+**Spec:** Small-change chat description approved by the human's latest “네”: a separate URL-delimiter correction with regression tests and independent review, while retaining the original translated HTML and exact protection. This plan records the implementation details for review before execution.
+
+## Global Constraints
+
+- Change only `src/web_translator/qa.py`, `tests/test_qa.py` and this controller-owned plan. Do not edit protection/extraction/capture/assembly, public types/schema/retry limits, old fixtures/expected outputs, CSS/fonts, PDF, versions/dependencies or workflows.
+- No site/URL/segment-specific exception, bypass, reduced finding severity, count-only approval or unconditional acceptance of closing punctuation.
+- Preserve exact protected values, ownership, multiplicity, nested/opaque markup, attribute names/values, suffix/query/duplicate rejection, normative force, CSP and critical dependency checks.
+- Preserve all existing run/source/glossary/assignment/translation/asset/index bytes. No retranslation, recapture, reassembly or HTML patch. Real QA may normally regenerate report/manifest/screenshots after failure evidence is backed up.
+- Reuse the isolated worktree `/Users/starryeye/play/web-translator/.worktrees/pdf-commercial-layout`, branch `codex/web-nested-locations`, BASE `c862c6ab51e957c1cccd4d963f1c2b654e9ac4e3`, interpreter `/Users/starryeye/play/web-translator/.venv/bin/python`. Preserve unrelated dirty/untracked files.
+- Root owns independent task/final review, commit and immediate push; no main merge, PR creation, release or marketplace change. Retain this plan's ignored evidence and prior artifacts.
+
+## Review Focus
+
+1. Prose `)`, `]`, `}` and sentence punctuation outside the protected value must not reject an unchanged URL; test body and translated attribute locations.
+2. Balanced parentheses/brackets that belong to the URL must remain part of its exact protected value; changing them must fail, not become punctuation trimming.
+3. A real extension such as `/extra`, `?q=2`, `.evil` or `)/extra` must fail; a nearby punctuation character must not hide that extension.
+4. Extra copies with a different delimiter, repeated values, overlapping URL prefixes and decoded entities must retain per-location exact multiplicity and nonoverlapping semantics.
+5. Delimiter recognition must not weaken existing inline-tag/opaque/nested ownership, following-token guards or non-URL protection; cover existing QA/pipeline consumers and the actual normal CLI, not a diagnostic helper substituted for acceptance.
+
+---
+
+### Task 1: Align protected URL recognition with prose delimiters
+
+**Files:** Modify `src/web_translator/qa.py` and `tests/test_qa.py`; create this controller-owned plan. No other implementation file.
+
+**Interfaces:** Existing `_check_tokens`, `_nonoverlapping_protected_matches(parts, kinds)`, `_exact_fragment_pattern(value, kind)` and `_matches_following_guard` are private boundaries; factor a private QA helper only if needed. `protect_fragment` is the real test producer, not changed. Public `QAInputs`, `ProtectedToken`, `QAResult` and finding codes remain unchanged. Use the established source/output test helpers; no mocked checker or approval.
+
+- [ ] **Step 1: Write producer-backed regression tests before product edits.** Add `test_producer_url_prose_delimiters_preserve_exact_values` and `test_producer_url_prose_delimiters_reject_extensions_and_duplicates`. Independently specify source/output fragments and literal expected URL values. Include `See (https://example.com/docs).`, `[https://example.com/docs]`, `{https://example.com/docs}`, balanced `https://example.com/a(b)`, an entity-bearing query, a translated title attribute, repeated URL values and overlapping URL prefixes. Unchanged cases assert `required_findings == []` and `warnings == []`; changed protected value/query/path/balanced delimiter and added complete occurrences assert `protected-token-integrity`. Include `https://example.com/docs)/extra` as a true-extension negative and retain existing suffix/attribute/ownership tests unchanged.
+- [ ] **Step 2: Run exact new node selectors RED once.** From the isolated worktree use `PYTHONPATH=src /Users/starryeye/play/web-translator/.venv/bin/python -m pytest tests/test_qa.py::test_producer_url_prose_delimiters_preserve_exact_values tests/test_qa.py::test_producer_url_prose_delimiters_reject_extensions_and_duplicates -q --junitxml <this-plan-workspace>/red.xml`, retaining unique raw log and true exit. Require actual delimiter failures, not fixture/permission failures. Permission-only denial gets only failed-node rerun. Never overwrite an earlier attempt.
+- [ ] **Step 3: Correct URL candidate recognition in qa.py.** Match complete producer-consistent URL extents before exact-value/multiplicity checks; distinguish unmatched prose closers from balanced URL characters and real extensions. Preserve decoded DOM representation, full location ownership and separate opaque checks. Do not merely remove punctuation from a global rejection class, trust one following character as complete URL proof, or accept a protected prefix of a longer URL. Keep non-URL matching unchanged.
+- [ ] **Step 4: Verify exact new nodes GREEN, then covering consumers once.** Retain raw logs/XML/true exits. Run `PYTHONPATH=src /Users/starryeye/play/web-translator/.venv/bin/python -m pytest tests/test_qa.py tests/test_pipeline.py -q --junitxml <this-plan-workspace>/qa-pipeline.xml` with browser permission, zero failures/errors; inventory skips/warnings. This is web QA/pipeline coverage, not a fresh full-project/PDF/native-Windows certificate. Review-driven amendments rerun their covering tests only.
+- [ ] **Step 5: Freeze and independently review.** Implementer reports exact three-file scope, producer RED/GREEN evidence, commands/logs/XML/exits, hashes and immutability. Root generates the uncommitted package including this plan, audits evidence and diff checks; fresh task reviewer returns spec/quality verdicts. Preserve SDD limits and root-only commits. Final whole-effort reviewer examines only this new range relative to BASE; one consolidated final correction/scoped re-review wave maximum. Resolve every declined-to-judge item explicitly.
+- [ ] **Step 6: Commit and immediately push.** After review approval root stages only the exact three approved files, uses existing `fix: ...` convention, commits and immediately pushes `codex/web-nested-locations`; verify HEAD/upstream/remote parity. Retain worktree/ignored evidence; main and deployment remain unchanged.
+- [ ] **Step 7: Run actual unchanged-bundle normal QA.** Independently snapshot the 58 input files (source/capture/segments/glossary/summary/review/retry-exception plus zones/assignments/translations/assets), verify index SHA256 `199029ce2d0f4a103caa23a2247e5f64dc5c98f0420ed0ebcf6cf423b950c839`, and back up the current FAIL report/manifest into this plan's workspace. Do not read/write another plan's ledger. From `/Users/starryeye/play/web-translator`, use the absolute interpreter and `PYTHONPATH=/Users/starryeye/play/web-translator/.worktrees/pdf-commercial-layout/src` with `-m web_translator qa --run-dir /Users/starryeye/play/web-translator/.web-translator/runs/datatracker.ietf.org-doc-html-draft-ietf-wimse-aims-00-20261013-181014 --output-dir /Users/starryeye/play/web-translator/translated-pages/datatracker.ietf.org-doc-html-draft-ietf-wimse-aims-00-20261013-181014`. Require exit0/PASS, all478 targets/8zones and all master findings; extra translation correction remains disclosed in review report/retry-exception, ordinary counters stay unchanged. Verify input/index hashes afterward, inspect actual normal and retained instant-scroll desktop/mobile screenshots, inventory optional warnings. Original tiny-mobile-font/CSS English-label limitations remain disclosed; no all-body clipping claim from the main-only metric. Original preformatted URL support remains unfinished. On failure preserve diagnostics and report blocker, never present success or silently expand the correction scope.
+
+## Self-review
+
+Single task owns the same matcher/test surface; no cross-task shared edit. Every Review Focus maps to new tests or the explicit existing consumer/real-QA steps. All public interfaces remain unchanged. Small approved intent is recorded without adding a general URL parser, changing the producer or redesigning translation/layout. Product code, tests and new execution agents have not started; human plan review is the next gate. Preserve the previously selected subagent-driven method.

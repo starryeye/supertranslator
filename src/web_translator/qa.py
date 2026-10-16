@@ -22,9 +22,11 @@ from tinycss2.ast import AtRule, FunctionBlock, StringToken, URLToken
 
 from web_translator.extract import TRANSLATABLE_ATTRIBUTES
 from web_translator.models import Finding, ProtectedToken, QAInputs, QAResult
+from web_translator.protection import _URL_PATTERN, _trim_url_end
 
 
 _TOKEN_PATTERN = re.compile(r"⟦WT:\d{6}⟧")
+_URL_CANDIDATE_PATTERN = re.compile(_URL_PATTERN, re.IGNORECASE)
 _VIEWPORTS = (("desktop-1440x900", 1440, 900), ("narrow-390x844", 390, 844))
 _BROWSER_METRICS = """(() => {
   const stylesheetFailures = [];
@@ -373,13 +375,32 @@ def _nonoverlapping_protected_matches(
     parts: list[str], kinds: dict[str, set[str]]
 ) -> list[tuple[str, int, str]]:
     selected: list[tuple[str, int, str]] = []
+    urls = {value for value, value_kinds in kinds.items() if "url" in value_kinds}
     for part in parts:
         candidates = {
             (match.start(), match.end(), value)
             for value, value_kinds in kinds.items()
             for kind in value_kinds
+            if kind != "url"
             for match in re.finditer(_exact_fragment_pattern(value, kind), part)
         }
+        # Decoded entities may contain raw-HTML URL delimiters. Continue through
+        # one only when the producer protected that exact prefix, then compare
+        # the complete candidate so an extension cannot match a shorter value.
+        cursor = 0
+        while match := _URL_CANDIDATE_PATTERN.search(part, cursor):
+            start, end = match.span()
+            while end < len(part) and not part[end].isspace():
+                if part[end] in "<>\"'" and not any(
+                    url.startswith(part[start:end + 1]) for url in urls
+                ):
+                    break
+                end += 1
+            cursor = end
+            value_end = _trim_url_end(part, start, end)
+            value = part[start:value_end]
+            if value in urls:
+                candidates.add((start, value_end, value))
         previous_end = 0
         for start, end, value in sorted(candidates, key=lambda item: (item[0], -item[1], item[2])):
             if start >= previous_end:
