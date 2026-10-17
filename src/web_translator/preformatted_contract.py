@@ -566,3 +566,61 @@ class ProjectionArtifact:
         if not isinstance(evidence, Mapping):
             _fail("artifact evidence must be an object")
         return cls(html, css, path, dict(evidence), summary)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionRecord:
+    """Final acceptance fence; raw record digests also bind JSON formatting."""
+
+    schema_version: str
+    phase: str
+    source_sha256: str
+    analysis_sha256: str
+    review_sha256: str
+    package_sha256: dict[str, str]
+    unmarked_sha256: str
+    marked_sha256: str | None
+    segments_sha256: str | None
+    css_path: str
+    css_sha256: str
+    evidence: dict[str, object]
+    summary: NormalizationSummary
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "package_sha256", _freeze_json(self.package_sha256))
+        object.__setattr__(self, "evidence", _freeze_json(self.evidence))
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: (self.summary.to_dict() if name == "summary" else
+                       _thaw_json(getattr(self, name))) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, data: object) -> ProjectionRecord:
+        d = _map(data, "projection record", set(cls.__dataclass_fields__))
+        if d["schema_version"] != SCHEMA_VERSION or _str(d["phase"], "phase") not in {"projected", "extracted"}:
+            _fail("projection record schema or phase is invalid")
+        values = dict(d)
+        for name in ("source_sha256", "analysis_sha256", "review_sha256", "unmarked_sha256", "css_sha256"):
+            values[name] = _hash(d[name], name)
+        for name in ("marked_sha256", "segments_sha256"):
+            if d["phase"] == "projected":
+                if d[name] is not None:
+                    _fail("projected record cannot contain extraction hashes")
+            else:
+                values[name] = _hash(d[name], name)
+        packages = d["package_sha256"]
+        if not isinstance(packages, Mapping) or not packages:
+            _fail("projection package hashes must be a nonempty object")
+        values["package_sha256"] = {_id(k, "package hash key", "package"): _hash(v, "package hash")
+                                    for k, v in packages.items()}
+        summary = NormalizationSummary.from_dict(d["summary"])
+        path = _str(d["css_path"], "css_path")
+        if (path != f"assets/wt-preformatted-{values['css_sha256'][:16]}.css"
+                or summary.generated_assets[0] != {"path": path, "sha256": values["css_sha256"]}
+                or summary.source_sha256 != values["source_sha256"]
+                or summary.projection_sha256 != values["unmarked_sha256"]):
+            _fail("projection record summary/asset identity mismatch")
+        if not isinstance(d["evidence"], Mapping):
+            _fail("projection evidence must be an object")
+        values["summary"] = summary
+        return cls(**values)
