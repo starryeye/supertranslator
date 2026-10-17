@@ -346,11 +346,15 @@ def project_preformatted(source_html: str, analysis: PreformattedAnalysis,
     else:
         soup.insert(0, link)
     _mark_owned_anchor_attributes(soup, original_anchors)
-    constraints = _constraint_evidence(analysis, review, soup)
     # Numeric CR entities survive both consumers' newline normalization.
     # Scope them to reviewed roots and retained explicit-code <pre> text.
-    html = _encode_scoped_cr(str(soup), sum(item["owner_block_id"] is None for item in constraints))
+    retained_count = sum(not item.line_ids and item.path.split("/")[-1].split("[")[0] == "pre"
+                         for item in analysis.constraints)
+    html = _encode_scoped_cr(str(soup), retained_count)
     reparsed = BeautifulSoup(html, "html.parser")
+    # html.parser serialization may insert a document-level newline after a
+    # doctype, changing all-child paths without moving the retained element.
+    constraints = _constraint_evidence(analysis, review, reparsed)
     review_by_id = {block.id: block for block in review.blocks}
     for item in evidence_blocks:
         rendered = reparsed.find(attrs={"data-wt-preformatted-block": item["id"]})
@@ -578,10 +582,21 @@ def verify_projected_output(artifact: ProjectionArtifact, output_html: str) -> N
     actual_retained = [tag for tag in soup.find_all("pre")
                        if tag.find_parent(attrs={"data-wt-preformatted-root": True}) is None
                        and not tag.has_attr("data-wt-preformatted-block")]
+    # Existing extract/assemble consumers parse with lxml before serializing.
+    # Derive their exact all-child path from the held projection, never from
+    # the translated output under verification.
+    consumer_soup = BeautifulSoup(str(BeautifulSoup(artifact.unmarked_html, "lxml")), "html.parser")
+    consumer_retained = [tag for tag in consumer_soup.find_all("pre")
+                         if tag.find_parent(attrs={"data-wt-preformatted-root": True}) is None
+                         and not tag.has_attr("data-wt-preformatted-block")]
     if len(actual_retained) != len(retained):
         _fail("retained explicit source constraint count changed")
+    if len(consumer_retained) != len(retained):
+        _fail("held projection consumer constraint mapping changed")
     for ordinal, (item, tag) in enumerate(zip(retained, actual_retained, strict=True), 1):
-        if (item["retained_pre_ordinal"] != ordinal or _path(tag) != item["projected_path"]
+        expected_path = (item["projected_path"] if output_html == artifact.unmarked_html
+                         else _path(consumer_retained[ordinal - 1]))
+        if (item["retained_pre_ordinal"] != ordinal or _path(tag) != expected_path
                 or _attrs(tag) != item["attributes"]
                 or tag.get_text() != item["text"]):
             _fail("retained explicit source constraint identity or order changed")

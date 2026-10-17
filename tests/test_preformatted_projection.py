@@ -548,3 +548,43 @@ def test_verifier_rejects_relocated_retained_constraint_with_same_content():
     soup.body.insert(0, retained.extract())
     with pytest.raises(ValueError, match="constraint"):
         _api()[2](artifact, str(soup))
+
+
+@pytest.mark.parametrize("document_prefix, source_path, projected_path", [
+    ("<!doctype html>", "/html[1]/body[1]/pre[1]", "/html[2]/body[1]/pre[1]"),
+    ("<!doctype html>\n<!--document comment-->\n", "/html[4]/body[1]/pre[1]",
+     "/html[4]/body[1]/pre[1]"),
+])
+def test_doctype_retained_code_path_survives_real_consumers_and_rejects_relocation(
+    tmp_path, document_prefix, source_path, projected_path
+):
+    # Catches recording the retained pre's path before serialization inserts a doctype newline.
+    from web_translator.extract import extract_segments
+    from web_translator.assemble import assemble_page
+    from web_translator.models import Translation
+    from web_translator.preformatted_projection import encode_projection_transport
+
+    source = (document_prefix + '<html><head></head><body><pre>Reviewed prose</pre>'
+              '<pre id="code"><code>A\r\nB</code></pre></body></html>')
+    analysis, review = _review(source, [
+        {"line_ids": ["line-000001"], "role": "prose", "evidence": "Reviewed prose"},
+    ])
+    artifact = _api()[0](source, analysis, review)
+    assert artifact.evidence["constraints"][0]["path"] == source_path
+    assert artifact.evidence["constraints"][0]["projected_path"] == projected_path
+    staged = tmp_path / "run" / "source.html"
+    staged.parent.mkdir()
+    staged.write_bytes(artifact.unmarked_html.encode())
+    segments = extract_segments(staged, tmp_path / "segments.jsonl")
+    staged.write_bytes(encode_projection_transport(staged.read_bytes().decode(), artifact).encode())
+    output = assemble_page(staged, {item.id: item for item in segments},
+                           {item.id: Translation(item.id, item.source_text) for item in segments},
+                           {}, tmp_path / "output", "https://example.com/")
+    rendered = output.read_bytes().decode()
+    _api()[2](artifact, rendered)
+    soup = BeautifulSoup(rendered, "html.parser")
+    assert soup.find("pre", id="code").get_text() == "A\r\nB"
+    retained = soup.find("pre", id="code")
+    soup.body.insert(0, retained.extract())
+    with pytest.raises(ValueError, match="constraint"):
+        _api()[2](artifact, str(soup))
