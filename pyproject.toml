@@ -43,6 +43,7 @@ web_translator = [
     "font_assets/OFL.txt",
     "font_assets/NotoSans-OFL.txt",
     "font_assets/PROVENANCE.json",
+    "web_assets/preformatted-flow.css",
 ]
 
 [tool.pytest.ini_options]

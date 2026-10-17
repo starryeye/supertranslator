@@ -7,6 +7,7 @@ all children (including text nodes), so they are not CSS/tag-only positions.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import re
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any, Mapping
 
 
 SCHEMA_VERSION = "1.0"
+NORMALIZATION_POLICY = "prose-reflow-literals-preserved"
 ROLES = frozenset({
     "prose", "heading", "list-item", "caption", "literal-code",
     "literal-diagram", "literal-table", "literal-layout", "blank", "unknown",
@@ -463,3 +465,104 @@ class ReviewedBlocks:
                    _hash(d["analysis_sha256"], "review.analysis_sha256"), parsed_hashes,
                    tuple(ReviewedBlock.from_dict(x) for x in _list(d["blocks"], "review.blocks")),
                    unresolved)
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizationSummary:
+    schema_version: str
+    policy: str
+    source_sha256: str
+    review_sha256: str
+    projection_sha256: str
+    translated_blocks: int
+    preserved_blocks: int
+    unknown_blocks: int
+    preserved_reasons: dict[str, int]
+    generated_assets: tuple[dict[str, str], ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "preserved_reasons", _freeze_json(self.preserved_reasons))
+        object.__setattr__(self, "generated_assets", tuple(_freeze_json(x) for x in self.generated_assets))
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": self.schema_version, "policy": self.policy,
+                "source_sha256": self.source_sha256, "review_sha256": self.review_sha256,
+                "projection_sha256": self.projection_sha256,
+                "translated_blocks": self.translated_blocks,
+                "preserved_blocks": self.preserved_blocks,
+                "unknown_blocks": self.unknown_blocks,
+                "preserved_reasons": _thaw_json(self.preserved_reasons),
+                "generated_assets": _thaw_json(self.generated_assets)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> NormalizationSummary:
+        d = _map(data, "normalization summary", {"schema_version", "policy", "source_sha256",
+            "review_sha256", "projection_sha256", "translated_blocks", "preserved_blocks",
+            "unknown_blocks", "preserved_reasons", "generated_assets"})
+        if d["schema_version"] != SCHEMA_VERSION or d["policy"] != NORMALIZATION_POLICY:
+            _fail("normalization summary schema or policy is unsupported")
+        reasons = d["preserved_reasons"]
+        if not isinstance(reasons, Mapping) or any(k not in {"literal-code", "literal-diagram",
+                "literal-table", "literal-layout", "blank"} for k in reasons):
+            _fail("summary preserved_reasons is invalid")
+        parsed_reasons = {k: _int(v, "summary preserved reason") for k, v in reasons.items()}
+        assets = []
+        for value in _list(d["generated_assets"], "summary.generated_assets"):
+            item = _map(value, "generated asset", {"path", "sha256"})
+            path = _str(item["path"], "generated asset.path", nonempty=True)
+            if not re.fullmatch(r"assets/wt-preformatted-[0-9a-f]{16}\.css", path):
+                _fail("generated asset path is invalid")
+            assets.append({"path": path, "sha256": _hash(item["sha256"], "generated asset.sha256")})
+        translated = _int(d["translated_blocks"], "summary.translated_blocks")
+        preserved = _int(d["preserved_blocks"], "summary.preserved_blocks")
+        unknown = _int(d["unknown_blocks"], "summary.unknown_blocks")
+        if sum(parsed_reasons.values()) != preserved or unknown or len(assets) != 1:
+            _fail("normalization summary counts/assets are inconsistent")
+        return cls(SCHEMA_VERSION, NORMALIZATION_POLICY, _hash(d["source_sha256"], "summary.source_sha256"),
+                   _hash(d["review_sha256"], "summary.review_sha256"),
+                   _hash(d["projection_sha256"], "summary.projection_sha256"),
+                   translated, preserved, unknown, parsed_reasons, tuple(assets))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionArtifact:
+    unmarked_html: str
+    css_bytes: bytes
+    css_path: str
+    evidence: dict[str, object]
+    summary: NormalizationSummary
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence", _freeze_json(self.evidence))
+
+    def to_dict(self) -> dict[str, object]:
+        return {"unmarked_html": self.unmarked_html,
+                "css_base64": base64.b64encode(self.css_bytes).decode("ascii"),
+                "css_path": self.css_path, "evidence": _thaw_json(self.evidence),
+                "summary": self.summary.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: object) -> ProjectionArtifact:
+        d = _map(data, "projection artifact", {"unmarked_html", "css_base64", "css_path",
+                                               "evidence", "summary"})
+        encoded = _str(d["css_base64"], "artifact.css_base64")
+        try:
+            css = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise PreformattedContractError("artifact CSS base64 is invalid") from exc
+        if base64.b64encode(css).decode("ascii") != encoded:
+            _fail("artifact CSS base64 is not canonical")
+        summary = NormalizationSummary.from_dict(d["summary"])
+        path = _str(d["css_path"], "artifact.css_path")
+        digest = hashlib.sha256(css).hexdigest()
+        if (summary.generated_assets[0]["path"] != path
+                or summary.generated_assets[0]["sha256"] != digest
+                or path != f"assets/wt-preformatted-{digest[:16]}.css"):
+            _fail("artifact CSS asset identity mismatch")
+        html = _str(d["unmarked_html"], "artifact.unmarked_html")
+        if hashlib.sha256(html.encode("utf-8")).hexdigest() != summary.projection_sha256:
+            _fail("artifact projection SHA256 mismatch")
+        evidence = d["evidence"]
+        if not isinstance(evidence, Mapping):
+            _fail("artifact evidence must be an object")
+        return cls(html, css, path, dict(evidence), summary)

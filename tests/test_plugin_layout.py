@@ -53,6 +53,15 @@ def test_pdf_fonts_are_exposed_as_package_resources() -> None:
     assert assets.joinpath("PROVENANCE.json").is_file()
 
 
+def test_preformatted_flow_css_is_exposed_as_package_resource() -> None:
+    packaged = files("web_translator").joinpath("web_assets", "preformatted-flow.css")
+    source = ROOT / "src/web_translator/web_assets/preformatted-flow.css"
+
+    assert packaged.is_file()
+    assert packaged.read_bytes() == source.read_bytes()
+    assert b"[data-wt-preformatted-literal]" in packaged.read_bytes()
+
+
 def test_font_license_is_marked_binary_to_preserve_pinned_bytes_on_windows() -> None:
     assert "src/web_translator/font_assets/OFL.txt -text" in (
         ROOT / ".gitattributes"

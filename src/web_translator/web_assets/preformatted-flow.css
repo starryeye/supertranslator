@@ -1,0 +1,38 @@
+/* Only backend-generated preformatted projections; captured page CSS is untouched. */
+[data-wt-preformatted-root] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-wt-preformatted-root] [data-wt-preformatted-figure] {
+  min-width: 0;
+  max-width: 100%;
+  margin-inline: 0;
+}
+
+[data-wt-preformatted-root] [data-wt-preformatted-block]:not([data-wt-preformatted-literal]) {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+[data-wt-preformatted-root] [role="listitem"] {
+  list-style: none;
+  margin-inline-start: calc(1.5em * var(--wt-list-depth, 0));
+}
+
+[data-wt-preformatted-root] [data-wt-preformatted-literal] {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: monospace;
+}
+
+[data-wt-preformatted-root] code[data-wt-preformatted-url],
+[data-wt-preformatted-root] code[data-wt-preformatted-marker] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
