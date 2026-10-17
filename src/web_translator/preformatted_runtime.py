@@ -52,6 +52,7 @@ class _HeldRun:
         self.packages = ()
         self.review = None
         self.closed = False
+        self._legacy_extract_source = False
 
     def directory(self, relative: str) -> anchored._DirectoryAnchor:
         if relative not in self.directories:
@@ -83,7 +84,8 @@ class _HeldRun:
         opened, payload = self.files[relative]
         parent, _, name = relative.rpartition("/")
         anchored._verify_anchored_input_identity(self.directory(parent), name, opened.identity)
-        if os.fstat(opened.stream.fileno()).st_nlink != 1:
+        if (os.fstat(opened.stream.fileno()).st_nlink != 1
+                and not (relative == "source.html" and self._legacy_extract_source)):
             _fail(f"held input has hardlinks: {relative}")
         opened.stream.seek(0)
         if opened.stream.read() != payload:
@@ -110,11 +112,11 @@ class _HeldRun:
 
 
 @contextmanager
-def _hold_run(run_dir: Path) -> Iterator[_HeldRun]:
+def _hold_run(run_dir: Path, *, phase: str | None = None) -> Iterator[_HeldRun]:
     held = _HeldRun(run_dir)
     try:
         held.directory("")
-        _load(held)
+        _load(held, phase=phase)
         held.verify()
         yield held
     except (anchored.PdfAssemblyError, OSError, UnicodeError) as error:
@@ -123,10 +125,20 @@ def _hold_run(run_dir: Path) -> Iterator[_HeldRun]:
         held.close()
 
 
-def _load(held: _HeldRun) -> None:
+def _load(held: _HeldRun, *, phase: str | None = None) -> None:
     root_names = held.names("")
     if any(name.startswith(".preformatted-") for name in root_names):
         _fail("interrupted preformatted transaction requires a fresh run")
+    asset_names = held.names("assets") if "assets" in root_names else []
+    generated = [name for name in asset_names if name.startswith("wt-preformatted-")]
+    # Legacy extraction reads this inode, then atomically replaces a private
+    # copy after the selector lease closes. Only that read-only source selection
+    # may have aliases. The held identity/bytes and these exact directory sets
+    # are still checked before yielding and on every lease verification.
+    held._legacy_extract_source = (
+        phase == "extract" and "preformatted" not in root_names
+        and "preformatted-source.html" not in root_names and not generated
+    )
     source = held.read("source.html")
     capture = canonical_loads(held.read("capture.json").decode("utf-8"))
     # Reuse the established lexical asset-path contract; never open a URL/path
@@ -143,8 +155,6 @@ def _load(held: _HeldRun) -> None:
             _validate_asset_path(relative, held.path / "capture.json")
         if _digest(held.read(relative)) != digest:
             _fail(f"capture fingerprint mismatch: {relative}")
-    asset_names = held.names("assets") if "assets" in root_names else []
-    generated = [name for name in asset_names if name.startswith("wt-preformatted-")]
     if any(Path(path).name.startswith("wt-preformatted-") for path in asset_paths):
         _fail("captured asset uses reserved generated CSS path")
     if "preformatted" not in root_names:
@@ -255,7 +265,7 @@ class ProcessingSource:
 def hold_processing_source(run_dir: Path, *, phase: str) -> Iterator[ProcessingSource]:
     if phase not in {"extract", "assemble", "qa"}:
         _fail("processing phase must be extract, assemble or qa")
-    with _hold_run(run_dir) as held:
+    with _hold_run(run_dir, phase=phase) as held:
         if held.analysis is not None and held.record is None:
             _fail("preformatted analysis is pending review/materialization")
         if held.record is not None and phase != "extract" and held.record.phase != "extracted":

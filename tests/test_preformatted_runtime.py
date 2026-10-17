@@ -588,3 +588,116 @@ def test_staged_foreign_replacement_survives_extractor_interruption(tmp_path, mo
     assert target.read_bytes() == observed["bytes"]
     assert (target.stat().st_dev, target.stat().st_ino) == observed["identity"]
     assert {key: value for key, value in _snapshot(run).items() if not key.startswith(".preformatted-")} == before
+
+
+def test_legacy_extract_source_alias_is_a_read_only_held_input(tmp_path):
+    # Existing legacy extraction replaces a private copy, never writes this inode.
+    api = _api()
+    run = _run(tmp_path, b"<html><body><p>Ordinary page</p></body></html>")
+    alias = tmp_path / "outside.html"
+    os.link(run / "source.html", alias)
+    original = _snapshot(run)
+    original_identity = (alias.stat().st_dev, alias.stat().st_ino)
+    with api.hold_processing_source(run, phase="extract") as source:
+        assert source.path == run / "source.html"
+        assert source.normalization is None
+        assert source.path.read_bytes() == b"<html><body><p>Ordinary page</p></body></html>"
+        source.verify()
+    assert _snapshot(run) == original
+    assert alias.read_bytes() == b"<html><body><p>Ordinary page</p></body></html>"
+    assert (alias.stat().st_dev, alias.stat().st_ino) == original_identity
+
+
+@pytest.mark.parametrize("operation", ["assemble", "qa", "prepare"])
+def test_legacy_source_alias_is_not_permitted_outside_extract_selection(tmp_path, operation):
+    # Compatibility is not a general waiver for linked input evidence.
+    api = _api()
+    run = _run(tmp_path)
+    alias = tmp_path / "outside.html"
+    os.link(run / "source.html", alias)
+    before = _snapshot(run)
+    with pytest.raises(ValueError, match="hardlinks"):
+        if operation == "prepare":
+            api.prepare_preformatted_run(run)
+        else:
+            with api.hold_processing_source(run, phase=operation):
+                pass
+    assert _snapshot(run) == before
+    assert alias.read_bytes() == SOURCE
+
+
+@pytest.mark.parametrize("state", ["analyzed", "projected", "extracted", "orphan-source", "orphan-css", "partial", "staging"])
+def test_preformatted_state_never_gains_legacy_source_alias_permission(tmp_path, state):
+    api = _api()
+    run = _run(tmp_path)
+    if state in {"analyzed", "projected", "extracted"}:
+        api.prepare_preformatted_run(run)
+        if state != "analyzed":
+            _review(run)
+            api.materialize_preformatted_run(run)
+        if state == "extracted":
+            api.extract_preformatted_run(run)
+    elif state == "orphan-source":
+        (run / "preformatted-source.html").write_bytes(b"orphan")
+    elif state == "orphan-css":
+        (run / "assets/wt-preformatted-0000000000000000.css").write_bytes(b"orphan")
+    elif state == "partial":
+        (run / "preformatted").mkdir()
+    else:
+        (run / ".preformatted-interrupted").mkdir()
+    alias = tmp_path / "outside.html"
+    os.link(run / "source.html", alias)
+    with pytest.raises(ValueError):
+        with api.hold_processing_source(run, phase="extract"):
+            pass
+    assert alias.read_bytes() == SOURCE
+
+
+@pytest.mark.parametrize("relative", ["capture.json", "assets/theme.css"])
+def test_legacy_extract_alias_permission_never_applies_to_other_inputs(tmp_path, relative):
+    api = _api()
+    run = _run(tmp_path)
+    original = (run / relative).read_bytes()
+    alias = tmp_path / "outside"
+    os.link(run / relative, alias)
+    with pytest.raises(ValueError, match="hardlinks"):
+        with api.hold_processing_source(run, phase="extract"):
+            pass
+    assert alias.read_bytes() == original
+
+
+@pytest.mark.parametrize("mutation", ["source-rebind", "capture-rebind", "alias-edit", "state-directory",
+                                      "derived", "generated-css", "staging", "assets-rebind"])
+def test_legacy_extract_alias_lease_rejects_rebinding_content_and_state_changes(tmp_path, mutation):
+    # The read-only alias exception must retain all identity/content/state fences.
+    api = _api()
+    run = _run(tmp_path)
+    alias = tmp_path / "outside.html"
+    os.link(run / "source.html", alias)
+    entered = False
+    with pytest.raises(ValueError):
+        with api.hold_processing_source(run, phase="extract") as source:
+            entered = True
+            if mutation in {"source-rebind", "capture-rebind"}:
+                target = run / ("source.html" if mutation == "source-rebind" else "capture.json")
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(target.read_bytes())
+                os.replace(replacement, target)
+            elif mutation == "alias-edit":
+                alias.write_bytes(SOURCE + b"changed through alias")
+            elif mutation == "state-directory":
+                (run / "preformatted").mkdir()
+            elif mutation == "derived":
+                (run / "preformatted-source.html").write_bytes(b"new state")
+            elif mutation == "generated-css":
+                (run / "assets/wt-preformatted-0000000000000000.css").write_bytes(b"new state")
+            elif mutation == "staging":
+                (run / ".preformatted-interrupted").mkdir()
+            else:
+                (run / "assets").rename(tmp_path / "old-assets")
+                (run / "assets").mkdir()
+                (run / "assets/theme.css").write_bytes((tmp_path / "old-assets/theme.css").read_bytes())
+            source.verify()
+    assert entered, "the valid read-only alias lease must enter before testing its verification fence"
+    if mutation != "alias-edit":
+        assert alias.read_bytes() == SOURCE
