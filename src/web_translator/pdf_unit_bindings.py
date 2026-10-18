@@ -206,7 +206,10 @@ def _publish_pdf_unit_assignments(
     Successful exit validates that file and publishes the whole directory.
     """
     import web_translator.pdf_assemble as anchored
-    from web_translator.pdf_qa import PdfQAFailure, _rename_anchored_directory_no_replace
+    from web_translator.pdf_qa import (
+        PdfQAFailure, _open_windows_qa_mutation_directory,
+        _rename_anchored_directory_no_replace,
+    )
 
     try:
         with ExitStack() as stack:
@@ -292,13 +295,20 @@ def _publish_pdf_unit_assignments(
                     staged.path = inputs.run_anchor.path / "assignments"
                     try:
                         staged.verify_visible()
-                    except anchored.PdfAssemblyError:
-                        pass
-                    else:
                         for name, opened in opened_files.items():
                             anchored._close_opened_file(opened)
                             anchored._remove_owned_file(
                                 staged, name, anchored._PublishedFile(opened.identity)
+                            )
+                        if publication_handle is None and anchored._IS_WINDOWS:
+                            # A move can raise before transferring its DELETE
+                            # handle. Reopen only the exact owned public identity.
+                            publication_handle = _open_windows_qa_mutation_directory(
+                                inputs.run_anchor, "assignments", staged.identity
+                            )
+                            stack.callback(
+                                anchored.pdf_acquire_module._close_windows_handle,
+                                publication_handle,
                             )
                         if publication_handle is not None:
                             # The retained rename handle has DELETE access; the
@@ -309,5 +319,9 @@ def _publish_pdf_unit_assignments(
                             anchored._remove_owned_directory(
                                 inputs.run_anchor, "assignments", staged.identity, child=staged
                             )
+                    except (anchored.PdfAssemblyError, PdfQAFailure, OSError):
+                        # A failed best-effort rollback must not replace the
+                        # original publication error or caller interruption.
+                        pass
     except (anchored.PdfAssemblyError, PdfQAFailure, OSError) as error:
         raise PdfUnitBindingError(f"cannot publish PDF assignment binding: {error}") from error

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -64,7 +65,7 @@ def _review_classification(run):
                    'evidence': '+---+', 'metadata': {}, 'literal_spans': []}],
               'unresolved_required': []}
     # Deliberately pretty: the file digest and canonical review digest differ.
-    (run / 'preformatted/review.json').write_text(json.dumps(review, indent=2) + '\n')
+    (run / 'preformatted/review.json').write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
 
 
 def _assembled(tmp_path):
@@ -74,8 +75,8 @@ def _assembled(tmp_path):
     assert _command('materialize-preformatted', run) == 0
     assert _command('extract', run) == 0
     assert _command('plan-zones', run) == 0
-    (run / 'glossary.json').write_text('{}\n')
-    (run / 'document-summary.txt').write_text('Manual prose with a protected guide link, wrapped URL, fixed grid and code.\n')
+    (run / 'glossary.json').write_text('{}\n', encoding='utf-8')
+    (run / 'document-summary.txt').write_text('Manual prose with a protected guide link, wrapped URL, fixed grid and code.\n', encoding='utf-8')
     assert _command('prepare-assignments', run) == 0
     segments = [s for s in read_segments(run / 'segments.jsonl') if s.target]
     assert len(segments) == 1
@@ -85,13 +86,13 @@ def _assembled(tmp_path):
     (run / 'translations').mkdir()
     (run / 'translations/zone-001.jsonl').write_text(json.dumps({
         'segment_id': segments[0].id, 'text': text, 'notes': None,
-        'glossary_observations': {}}, ensure_ascii=False) + '\n')
+        'glossary_observations': {}}, ensure_ascii=False) + '\n', encoding='utf-8')
     (run / 'review.json').write_text(json.dumps({
         'unresolved_required': [], 'retries': {'zone-001': 0},
         'section_findings': {'zone-001': [
             {'dimension': name, 'verdict': 'pass',
              'evidence': f'Fixture reviewer compared source and Korean {name}.'}
-            for name in DIMENSIONS]}}) + '\n')
+            for name in DIMENSIONS]}}) + '\n', encoding='utf-8')
     assert _command('validate-translations', run) == 0
     assert _command('assemble', run, output) == 0
     return run, output
@@ -101,7 +102,42 @@ def _no_pass(output):
     manifest = output / 'manifest.json'
     report = output / 'review-report.md'
     assert not manifest.exists() or json.loads(manifest.read_bytes())['qa_status'] != 'passed'
-    assert not report.exists() or '**PASS**' not in report.read_text()
+    assert not report.exists() or '**PASS**' not in report.read_text(encoding='utf-8')
+
+
+def _attempt_held_replacement(foreign, target):
+    """Observe the actual native attack, without releasing any production handle."""
+    original = target.stat()
+    replacement = foreign.stat()
+    observed = {'target': target, 'foreign': foreign, 'completed': False,
+                'original_identity': (original.st_dev, original.st_ino),
+                'original_bytes': target.read_bytes(),
+                'foreign_identity': (replacement.st_dev, replacement.st_ino),
+                'foreign_bytes': foreign.read_bytes()}
+    assert observed['foreign_identity'] != observed['original_identity']
+    try:
+        foreign.replace(target)
+    except PermissionError as error:
+        if os.name != 'nt' or error.winerror not in {5, 32}:
+            raise
+        observed['blocked'] = error
+        current = target.stat()
+        assert (current.st_dev, current.st_ino) == observed['original_identity']
+        assert target.read_bytes() == observed['original_bytes']
+        _assert_foreign_replacement_survives(observed)
+        print(f'held replacement blocked by native Windows error {error.winerror}')
+    else:
+        observed['completed'] = True
+        _assert_foreign_replacement_survives(observed)
+        print('held replacement completed; exact foreign identity recorded')
+    return observed
+
+
+def _assert_foreign_replacement_survives(observed):
+    path = observed['target'] if observed['completed'] else observed['foreign']
+    current = path.stat()
+    assert (current.st_dev, current.st_ino) == observed['foreign_identity']
+    assert path.read_bytes() == observed['foreign_bytes']
 
 
 def _generic_run(tmp_path, source):
@@ -263,7 +299,7 @@ def test_preformatted_pipeline_runs_real_commands_and_preserves_capture(tmp_path
         assert hashlib.sha256((output / asset['path']).read_bytes()).hexdigest() == asset['sha256']
         assert asset['path'] not in manifest['capture_metadata']['fingerprints']
     assert manifest['capture_metadata'] == json.loads(captured['capture.json'])
-    assert '## Preformatted normalization' in (output / 'review-report.md').read_text()
+    assert '## Preformatted normalization' in (output / 'review-report.md').read_text(encoding='utf-8')
     soup = BeautifulSoup((output / 'index.html').read_bytes().decode(), 'html.parser')
     assert soup.find(id='guide')['href'] == '#manual'
     assert soup.find(id='guide').text == '안내서'
@@ -336,11 +372,17 @@ def test_preformatted_qa_changes_at_acceptance_boundaries_leave_no_pass(
             'replacement': output / 'index.html',
             'css': next((output / 'assets').glob('wt-preformatted-*.css')),
             'capture': run / 'capture.json'}[target]
+    replacements = []
     def mutate():
         if target == 'replacement':
             replacement = output / 'replacement.html'
             replacement.write_bytes(path.read_bytes())
-            replacement.replace(path)
+            observed = _attempt_held_replacement(replacement, path)
+            replacements.append(observed)
+            if not observed['completed']:
+                # The attack was prevented. Still exercise failed acceptance,
+                # rather than treating an unmodified output as a mutation.
+                raise ValueError('acceptance stopped after native replacement denial')
         else:
             path.write_bytes(path.read_bytes() + b'\n')
     if boundary == 'after-browser':
@@ -359,6 +401,9 @@ def test_preformatted_qa_changes_at_acceptance_boundaries_leave_no_pass(
         monkeypatch.setattr(cli, '_publish_qa_evidence', change)
     assert _command('qa', run, output) != 0
     _no_pass(output)
+    if target == 'replacement':
+        assert len(replacements) == 1
+        _assert_foreign_replacement_survives(replacements[0])
 
 
 def test_preformatted_pending_and_projected_state_do_not_allow_wrong_consumers(tmp_path):
@@ -449,8 +494,8 @@ def test_empty_preformatted_extraction_is_not_successful_translation(tmp_path):
     assert (run / 'segments.jsonl').read_bytes() == b''
     assert _command('plan-zones', run) == 0
     (run / 'translations').mkdir()
-    (run / 'glossary.json').write_text('{}\n')
-    (run / 'review.json').write_text('{"unresolved_required":[],"retries":{},"section_findings":{}}\n')
+    (run / 'glossary.json').write_text('{}\n', encoding='utf-8')
+    (run / 'review.json').write_text('{"unresolved_required":[],"retries":{},"section_findings":{}}\n', encoding='utf-8')
     assert _command('assemble', run, output) != 0
     # A caller can use the old low-level assembler, but neither public QA nor
     # direct typed QA may certify this zero-target extraction as a translation.
@@ -474,15 +519,24 @@ def test_foreign_report_replacement_survives_failed_postpublication_check(tmp_pa
     run, output = _assembled(tmp_path)
     real = cli._publish_qa_evidence
     foreign = b'# Foreign report\nnot transaction owned\n'
+    replacements = []
     def replace_report(*args, **kwargs):
         real(*args, **kwargs)
         replacement = output / 'foreign.md'
         replacement.write_bytes(foreign)
-        replacement.replace(output / 'review-report.md')
+        observed = _attempt_held_replacement(replacement, output / 'review-report.md')
+        replacements.append(observed)
+        if not observed['completed']:
+            raise ValueError('acceptance stopped after native report replacement denial')
     monkeypatch.setattr(cli, '_publish_qa_evidence', replace_report)
     assert _command('qa', run, output) == 6
     assert not (output / 'manifest.json').exists()
-    assert (output / 'review-report.md').read_bytes() == foreign
+    assert len(replacements) == 1
+    _assert_foreign_replacement_survives(replacements[0])
+    if replacements[0]['completed']:
+        assert (output / 'review-report.md').read_bytes() == foreign
+    else:
+        assert not (output / 'review-report.md').exists()
 
 
 def test_recovery_snapshot_failure_does_not_delete_prior_evidence(tmp_path, monkeypatch):
@@ -587,7 +641,7 @@ def test_recovery_tampering_resecures_exact_owned_bytes_before_original_cleanup(
     for name, payload in prior.items():
         (output / name).write_bytes(payload)
     failure = ValueError('subsequent acceptance validation failed')
-    foreign_identity = None
+    replacement = None
     with pytest.raises(ValueError) as raised:
         with cli._preformatted_qa_evidence(output) as transaction:
             if boundary == 'after-publication':
@@ -598,8 +652,7 @@ def test_recovery_tampering_resecures_exact_owned_bytes_before_original_cleanup(
             else:
                 foreign = output / 'foreign-backup.json'
                 foreign.write_bytes(prior['manifest.json'])
-                foreign.replace(backup)
-                foreign_identity = backup.stat().st_ino
+                replacement = _attempt_held_replacement(foreign, backup)
             if boundary == 'before-publication':
                 transaction.publish(QAResult(False, [], [], []), MasterReview([], {}, {}), None)
             raise failure
@@ -609,11 +662,10 @@ def test_recovery_tampering_resecures_exact_owned_bytes_before_original_cleanup(
         exact = [path for path in output.glob('.qa-evidence-*/prior-' + name)
                  if path.read_bytes() == payload]
         assert exact, f'exact original {name} was lost'
-        if name == 'manifest.json' and foreign_identity is not None:
-            assert any(path.stat().st_ino != foreign_identity for path in exact)
-    if foreign_identity is not None:
-        assert backup.stat().st_ino == foreign_identity
-        assert backup.read_bytes() == prior['manifest.json']
+        if name == 'manifest.json' and replacement is not None and replacement['completed']:
+            assert any((path.stat().st_dev, path.stat().st_ino) != replacement['foreign_identity'] for path in exact)
+    if replacement is not None:
+        _assert_foreign_replacement_survives(replacement)
 
 
 def test_failed_resecuring_of_edited_backup_preserves_the_unbacked_original(tmp_path, monkeypatch):
@@ -647,7 +699,7 @@ def test_recovery_can_repair_again_after_its_first_fresh_snapshot_is_changed(tmp
     (output / 'manifest.json').write_bytes(original)
     (output / 'review-report.md').write_bytes(b'# Prior exact FAIL\n')
     failure = ValueError('failure after repeated recovery tampering')
-    foreign_identity = None
+    replacement_attempt = None
     with pytest.raises(ValueError) as raised:
         with cli._preformatted_qa_evidence(output) as transaction:
             first = next(output.glob('.qa-evidence-*/prior-manifest.json'))
@@ -661,15 +713,86 @@ def test_recovery_can_repair_again_after_its_first_fresh_snapshot_is_changed(tmp
             else:
                 replacement = output / 'foreign-second-snapshot.json'
                 replacement.write_bytes(original)
-                replacement.replace(fresh)
-                foreign_identity = fresh.stat().st_ino
+                replacement_attempt = _attempt_held_replacement(replacement, fresh)
             raise failure
     assert raised.value is failure
     _no_pass(output)
     exact = [path for path in output.glob('.qa-evidence-*/prior-manifest.json')
              if path.read_bytes() == original]
     assert exact
-    if foreign_identity is not None:
-        assert fresh.stat().st_ino == foreign_identity
-        assert fresh.read_bytes() == original
-        assert any(path.stat().st_ino != foreign_identity for path in exact)
+    if replacement_attempt is not None:
+        _assert_foreign_replacement_survives(replacement_attempt)
+        if replacement_attempt['completed']:
+            assert any((path.stat().st_dev, path.stat().st_ino) != replacement_attempt['foreign_identity'] for path in exact)
+
+
+@pytest.mark.parametrize('failure_type', [None, OSError, KeyboardInterrupt])
+def test_prior_evidence_handles_close_before_real_no_clobber_publication(
+    tmp_path, monkeypatch, failure_type
+):
+    # A live old descriptor leaves the destination delete-pending on Windows.
+    # Observe real descriptor state at the real publisher, without OS simulation.
+    import web_translator.pdf_assemble as storage
+    from web_translator.models import MasterReview, QAResult
+    output = tmp_path / 'output'
+    output.mkdir()
+    prior = {'manifest.json': b'{"qa_status":"failed","original":true}\n',
+             'review-report.md': b'# Exact previous FAIL\n'}
+    for name, payload in prior.items():
+        (output / name).write_bytes(payload)
+    originals = {}
+    real_open = storage._open_anchored_input_file
+    real_publish = storage._publish_new_file
+    failure = failure_type('interrupted after report publication') if failure_type else None
+
+    def track_original(directory, name, context):
+        opened = real_open(directory, name, context)
+        if context == 'prior QA evidence':
+            originals[name] = opened
+        return opened
+
+    def publish_with_released_prior(source, source_name, destination, name):
+        assert originals[name].stream.closed, 'prior evidence descriptor is still live'
+        published = real_publish(source, source_name, destination, name)
+        if failure is not None and name == 'review-report.md':
+            # The real publisher returned ownership to this wrapper. Release its
+            # returned handle before injecting a no-return exceptional boundary.
+            storage._close_published_file(published)
+            raise failure
+        return published
+
+    monkeypatch.setattr(storage, '_open_anchored_input_file', track_original)
+    monkeypatch.setattr(storage, '_publish_new_file', publish_with_released_prior)
+
+    def publish():
+        with cli._preformatted_qa_evidence(output) as transaction:
+            transaction.publish(QAResult(False, [], [], []), MasterReview([], {}, {}), None)
+
+    if failure is None:
+        publish()
+        assert json.loads((output / 'manifest.json').read_bytes())['qa_status'] == 'failed'
+        assert (output / 'review-report.md').read_bytes() != prior['review-report.md']
+        assert not list(output.glob('.qa-evidence-*'))
+    else:
+        with pytest.raises(failure_type) as raised:
+            publish()
+        assert raised.value is failure
+        assert not (output / 'manifest.json').exists()
+        assert not (output / 'review-report.md').exists()
+        for name, payload in prior.items():
+            assert any(p.read_bytes() == payload for p in output.glob('.qa-evidence-*/prior-' + name))
+    assert all(opened.stream.closed for opened in originals.values())
+
+
+def test_repeated_real_preformatted_qa_replaces_legitimate_prior_evidence(tmp_path):
+    run, output = _assembled(tmp_path)
+    raw = {name: (run / name).read_bytes() for name in ('source.html', 'capture.json')}
+    assert _command('qa', run, output) == 0
+    first = json.loads((output / 'manifest.json').read_bytes())
+    assert first['qa_status'] == 'passed'
+    assert _command('qa', run, output) == 0
+    second = json.loads((output / 'manifest.json').read_bytes())
+    assert second['qa_status'] == 'passed'
+    assert second['normalization'] == first['normalization']
+    assert not list(output.glob('.qa-evidence-*'))
+    assert all((run / name).read_bytes() == payload for name, payload in raw.items())

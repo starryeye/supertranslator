@@ -12,6 +12,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - if: runner.os == 'macOS'
+        run: brew install poppler
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $extractRoot = Join-Path $env:RUNNER_TEMP "Release-26.02.0-0"
+          python scripts/install_pinned_poppler.py --destination-root $extractRoot
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Poppler bootstrap failed with exit code $LASTEXITCODE." }
+          $popplerBin = Join-Path $extractRoot "poppler-26.02.0\Library\bin"
+          $pdfinfo = Join-Path $popplerBin "pdfinfo.exe"
+          $pdftoppm = Join-Path $popplerBin "pdftoppm.exe"
+          if (-not (Test-Path -LiteralPath $pdfinfo -PathType Leaf)) { throw "Pinned Poppler archive did not provide pdfinfo.exe." }
+          if (-not (Test-Path -LiteralPath $pdftoppm -PathType Leaf)) { throw "Pinned Poppler archive did not provide pdftoppm.exe." }
+          & $pdfinfo -v
+          if ($LASTEXITCODE -ne 0) { throw "Pinned pdfinfo.exe failed its runtime dependency check with exit code $LASTEXITCODE." }
+          & $pdftoppm -v
+          if ($LASTEXITCODE -ne 0) { throw "Pinned pdftoppm.exe failed its runtime dependency check with exit code $LASTEXITCODE." }
+          $popplerBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install isolated build frontend
         run: python -m pip install --upgrade pip build
       - name: Build wheel
@@ -38,9 +56,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python -m playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # These exact two Windows Poppler nodes require the pinned PDF job's DLL-complete
-      # bootstrap. They remain covered there on this same push, not silently skipped here.
-      # All other plugin/package consumers and the shared anchored creators run here.
+      # Full CLI selection includes real PDF figure fixtures. Provide Poppler here
+      # too; all plugin consumers run, including both Windows executable-load nodes.
       - name: Installed-wheel web gate (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -59,8 +76,6 @@ jobs:
             "$tests/test_preformatted_runtime.py" "$tests/test_preformatted_pipeline.py" \
             "$tests/test_anchored_creation.py" "$tests/test_cli_contract.py" \
             "$tests/test_qa.py" "$tests/test_pipeline.py" "$tests/test_plugin_layout.py" \
-            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdfinfo]' \
-            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdftoppm]' \
             --basetemp="$evidence/pytest" --junitxml="$evidence/results.xml" 2>&1 | tee "$evidence/pytest.log"
           test_exit=${PIPESTATUS[0]}
           printf 'pytest_exit=%s\n' "$test_exit" > "$evidence/exit.txt"
@@ -82,8 +97,6 @@ jobs:
             'test_anchored_creation.py', 'test_cli_contract.py', 'test_qa.py',
             'test_pipeline.py', 'test_plugin_layout.py') | ForEach-Object { Join-Path $tests $_ }
           & $python -I -m pytest -c (Join-Path $env:GITHUB_WORKSPACE 'pyproject.toml') -o 'pythonpath=' --import-mode=importlib -q -ra -s @selectors `
-            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdfinfo]' `
-            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdftoppm]' `
             "--basetemp=$evidence/pytest" "--junitxml=$evidence/results.xml" 2>&1 | Tee-Object -FilePath (Join-Path $evidence 'pytest.log')
           $testExit = $LASTEXITCODE
           "pytest_exit=$testExit" | Out-File -FilePath (Join-Path $evidence 'exit.txt') -Encoding utf8

@@ -47,7 +47,7 @@ def test_pdf_figure_input_command_routes_native_unicode_paths_to_pdf_root(tmp_pa
 @pytest.mark.parametrize("native_argument", ["/tmp/그림 검토 with spaces", r"C:\workspace\그림 검토 with spaces"])
 def test_pdf_figure_input_parser_keeps_native_path_one_argument_and_pdf_root(tmp_path, native_argument):
     args = cli_module._build_parser().parse_args(["pdf-figure-review-input", "--run-dir", native_argument])
-    assert str(args.run_dir) == native_argument
+    assert args.run_dir == Path(native_argument)
     assert cli_module._command_output_root(args, tmp_path / "no-source-marker") == "translated-pdfs"
 
 
@@ -130,22 +130,28 @@ def test_native_assignment_rejects_package_changed_after_binding_write(tmp_path,
 
 
 def _inject_assignment_rename(monkeypatch, run, mutation):
-    """Exercise both the existing and anchored no-clobber publication boundaries."""
+    """Interrupt after the real move, while the native helper still owns its handle."""
     import web_translator.pdf_qa as pdf_qa
-    original_replace = os.replace
-    original_rename = pdf_qa._rename_anchored_directory_no_replace
-    def replace(source, destination, *args, **kwargs):
-        result = original_replace(source, destination, *args, **kwargs)
-        if Path(destination) == run / "assignments":
+    observed = {"moves": 0}
+    owner = pdf_assemble_module if os.name == "nt" else pdf_qa
+    name = "_windows_rename_open_file" if os.name == "nt" else "_posix_rename_directory_no_replace"
+    original = getattr(owner, name)
+
+    def rename(*args, **kwargs):
+        result = original(*args, **kwargs)
+        destination_parent, destination_name = args[-2:]
+        if os.name == "nt":
+            identity = pdf_assemble_module._windows_file_identity(destination_parent, require_regular=False)
+        else:
+            stat = os.fstat(destination_parent)
+            identity = (stat.st_dev, stat.st_ino)
+        stat = run.stat()
+        if destination_name == "assignments" and identity == (stat.st_dev, stat.st_ino):
+            observed["moves"] += 1
             mutation()
         return result
-    def rename(source_parent, source_name, identity, destination_parent, destination_name, **kwargs):
-        result = original_rename(source_parent, source_name, identity, destination_parent, destination_name, **kwargs)
-        if destination_name == "assignments":
-            mutation()
-        return result
-    monkeypatch.setattr(os, "replace", replace)
-    monkeypatch.setattr(pdf_qa, "_rename_anchored_directory_no_replace", rename)
+    monkeypatch.setattr(owner, name, rename)
+    return observed
 
 
 def test_native_assignment_source_mutation_at_rename_rolls_back_and_allows_retry(tmp_path, monkeypatch):
@@ -175,14 +181,63 @@ def test_native_assignment_output_mutation_at_rename_rolls_back(tmp_path, monkey
     assert not (run / "assignments").exists()
 
 
-def test_native_assignment_rename_error_after_move_rolls_back(tmp_path, monkeypatch):
+def test_native_assignment_rename_error_after_move_rolls_back(tmp_path, monkeypatch, capsys):
     from tests.test_pdf_unit_bindings import make_unit_run
     run = make_unit_run(tmp_path)
     def raise_after_move():
         raise OSError("injected error after completed directory move")
-    _inject_assignment_rename(monkeypatch, run, raise_after_move)
+    observed = _inject_assignment_rename(monkeypatch, run, raise_after_move)
     assert main(["prepare-assignments", "--run-dir", str(run)]) == cli_module.EXIT_CONTRACT_FAILURE
+    assert observed["moves"] == 1
+    assert "injected error after completed directory move" in capsys.readouterr().err
     assert not (run / "assignments").exists()
+    assert not list(run.glob(".assignments-*"))
+
+
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_native_assignment_post_move_preserves_original_error(
+    tmp_path, monkeypatch, error_type, cleanup_failure
+):
+    # Catches lost no-return-handle ownership and cleanup masking the move error.
+    from tests.test_pdf_unit_bindings import make_unit_run, write_json
+    import web_translator.pdf_unit_bindings as bindings
+    run = make_unit_run(tmp_path)
+    temporary = run / ".assignments-test" / "assignments"
+    temporary.mkdir(parents=True)
+    write_json(temporary / "zone-001.json", {"zone_id": "zone-001"})
+    failure = error_type("original post-move failure")
+    opened_files = []
+    real_open = pdf_assemble_module._open_anchored_input_file
+
+    def record_open(*args, **kwargs):
+        opened = real_open(*args, **kwargs)
+        opened_files.append(opened)
+        return opened
+
+    monkeypatch.setattr(pdf_assemble_module, "_open_anchored_input_file", record_open)
+
+    def interrupt():
+        raise failure
+
+    observed = _inject_assignment_rename(monkeypatch, run, interrupt)
+    if cleanup_failure:
+        def fail_cleanup(*args, **kwargs):
+            raise OSError("secondary rollback I/O failure")
+        monkeypatch.setattr(pdf_assemble_module, "_remove_owned_file", fail_cleanup)
+    expected = bindings.PdfUnitBindingError if error_type is OSError else error_type
+    with pytest.raises(expected) as caught:
+        with bindings._hold_pdf_unit_inputs(run, ("zones",)) as inputs:
+            with bindings._publish_pdf_unit_assignments(inputs, temporary) as binding:
+                write_json(temporary / bindings.PDF_UNIT_BINDING_NAME, binding.to_dict())
+    assert observed["moves"] == 1
+    assert (caught.value.__cause__ if error_type is OSError else caught.value) is failure
+    assert opened_files and all(opened.stream.closed for opened in opened_files)
+    assert not temporary.exists()
+    if cleanup_failure:
+        assert (run / "assignments" / "zone-001.json").is_file()
+    else:
+        assert not (run / "assignments").exists()
 
 
 def test_native_assignment_rollback_preserves_foreign_replaced_file(tmp_path, monkeypatch):
@@ -991,30 +1046,55 @@ def test_pdf_acquire_cli_rolls_back_source_when_metadata_publication_fails(
     }
 
 
+def _inject_acquire_publication_link(monkeypatch, name, mutation):
+    """Match a real publication by basename and its held run's filesystem identity."""
+    import web_translator.pdf_acquire as acquire_module
+    original_publish = acquire_module._publish_staged_file
+    original_link = acquire_module.os.link
+    observed = {"calls": 0}
+
+    def publish(staging, source_name, destination, run):
+        def link(source, target, **kwargs):
+            if Path(target).name == name:
+                descriptor = kwargs.get("dst_dir_fd")
+                parent = os.fstat(descriptor) if descriptor is not None else Path(target).parent.stat()
+                if (parent.st_dev, parent.st_ino) == run.identity:
+                    observed["calls"] += 1
+                    mutation(run.path / name)
+            return original_link(source, target, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(acquire_module.os, "link", link)
+            return original_publish(staging, source_name, destination, run)
+
+    monkeypatch.setattr(acquire_module, "_publish_staged_file", publish)
+    return observed
+
+
 def test_pdf_acquire_cli_rolls_back_source_when_metadata_destination_races(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.pdf"
     source.write_bytes(b"%PDF-1.7\n")
     run_dir, _output_dir = _pdf_cli_paths(tmp_path)
-    import web_translator.pdf_acquire as acquire_module
+    source_identity = (source.stat().st_dev, source.stat().st_ino)
+    racer_identity = []
 
-    original_link = acquire_module.os.link
+    def race_metadata_destination(destination):
+        destination.write_text("racer", encoding="utf-8")
+        racer_identity.append((destination.stat().st_dev, destination.stat().st_ino))
 
-    def race_metadata_destination(
-        source: Path, destination: str, **kwargs: object
-    ) -> None:
-        if destination == "source.json":
-            (run_dir / destination).write_text("racer", encoding="utf-8")
-        original_link(source, destination, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(acquire_module.os, "link", race_metadata_destination)
+    observed = _inject_acquire_publication_link(monkeypatch, "source.json", race_metadata_destination)
 
     exit_code = main(["pdf-acquire", str(source), "--run-dir", str(run_dir)])
 
+    assert observed["calls"] == 1
     assert exit_code == cli_module.EXIT_CAPTURE_FAILURE
     assert not (run_dir / "source.pdf").exists()
     assert (run_dir / "source.json").read_text(encoding="utf-8") == "racer"
+    assert ((run_dir / "source.json").stat().st_dev, (run_dir / "source.json").stat().st_ino) == racer_identity[0]
+    assert source.read_bytes() == b"%PDF-1.7\n"
+    assert (source.stat().st_dev, source.stat().st_ino) == source_identity
     assert json.loads(capsys.readouterr().out) == {
         "command": "pdf-acquire",
         "exit_code": cli_module.EXIT_CAPTURE_FAILURE,
@@ -1033,24 +1113,21 @@ def test_pdf_acquire_cli_maps_windows_fallback_link_failure(
     monkeypatch.setattr(
         acquire_module, "_supports_descriptor_relative_operations", lambda: False
     )
-    original_link = acquire_module.os.link
+    source_identity = (source.stat().st_dev, source.stat().st_ino)
 
-    def fail_final_source_link(
-        source_path: str | Path, destination: str | Path, **kwargs: object
-    ) -> None:
-        if Path(destination) == run_dir / "source.pdf":
-            raise NotImplementedError()
-        original_link(source_path, destination, **kwargs)  # type: ignore[arg-type]
+    def fail_final_source_link(destination):
+        raise NotImplementedError()
 
-    monkeypatch.setattr(
-        acquire_module.os,
-        "link",
-        fail_final_source_link,
-    )
+    observed = _inject_acquire_publication_link(monkeypatch, "source.pdf", fail_final_source_link)
 
     exit_code = main(["pdf-acquire", str(source), "--run-dir", str(run_dir)])
 
+    assert observed["calls"] == 1
     assert exit_code == cli_module.EXIT_CAPTURE_FAILURE
+    assert not (run_dir / "source.pdf").exists()
+    assert not (run_dir / "source.json").exists()
+    assert source.read_bytes() == b"%PDF-1.7\n"
+    assert (source.stat().st_dev, source.stat().st_ino) == source_identity
     assert json.loads(capsys.readouterr().out) == {
         "command": "pdf-acquire",
         "exit_code": cli_module.EXIT_CAPTURE_FAILURE,

@@ -39,7 +39,7 @@ def _assert_usable(root, kind, created):
     assert (visible.st_dev, visible.st_ino) == created.identity
     if kind == "directory":
         created.verify_visible()
-        assert created.current_path() == root.path / "created"
+        assert created.current_path().samefile(root.path / "created")
         opened = storage._create_anchored_binary_file(created, "inside")
     else:
         opened = created

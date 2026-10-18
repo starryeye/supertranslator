@@ -504,10 +504,22 @@ def test_staged_extraction_never_adopts_replaced_or_linked_outputs(tmp_path, mon
         if mutation == "replacement":
             foreign.write_bytes(payload)
             foreign_identity = (foreign.stat().st_dev, foreign.stat().st_ino)
-            assert foreign_identity != (target.stat().st_dev, target.stat().st_ino)
-            os.replace(foreign, target)
-            observed["foreign"] = target
+            owned_identity = (target.stat().st_dev, target.stat().st_ino)
+            assert foreign_identity != owned_identity
+            observed["foreign"] = foreign
             observed["identity"] = foreign_identity
+            observed["bytes"] = payload
+            observed["target"] = target
+            try:
+                os.replace(foreign, target)
+            except PermissionError as error:
+                if os.name != "nt" or error.winerror not in {5, 32}:
+                    raise
+                assert (target.stat().st_dev, target.stat().st_ino) == owned_identity
+                assert target.read_bytes() == payload
+                observed["blocked"] = error
+                raise
+            observed["foreign"] = target
         else:
             os.link(target, foreign)
             observed["foreign"] = foreign
@@ -516,14 +528,18 @@ def test_staged_extraction_never_adopts_replaced_or_linked_outputs(tmp_path, mon
         return result
 
     monkeypatch.setattr(api, "extract_segments", change_after_real_extraction)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as caught:
         api.extract_preformatted_run(run)
     foreign = observed["foreign"]
     assert foreign.read_bytes() == observed["bytes"]
     assert (foreign.stat().st_dev, foreign.stat().st_ino) == observed["identity"]
     assert {key: value for key, value in _snapshot(run).items() if not key.startswith(".preformatted-")} == before
     assert json.loads((run / "preformatted/provenance.json").read_bytes())["phase"] == "projected"
-    if mutation == "replacement":
+    if "blocked" in observed:
+        assert caught.value.__cause__ is observed["blocked"]
+        assert not observed["target"].exists()
+        assert not any(p.name.startswith(".preformatted-") for p in run.iterdir())
+    elif mutation == "replacement":
         # Foreign staging survives cleanup and therefore cannot become a usable run.
         with pytest.raises(ValueError):
             with api.hold_processing_source(run, phase="extract"):
@@ -576,18 +592,33 @@ def test_staged_foreign_replacement_survives_extractor_interruption(tmp_path, mo
         foreign.write_bytes(target.read_bytes())
         observed["identity"] = (foreign.stat().st_dev, foreign.stat().st_ino)
         observed["bytes"] = foreign.read_bytes()
-        os.replace(foreign, target)
+        owned_identity = (target.stat().st_dev, target.stat().st_ino)
+        assert observed["identity"] != owned_identity
+        observed["foreign"] = foreign
         observed["target"] = target
+        try:
+            os.replace(foreign, target)
+        except PermissionError as error:
+            if os.name != "nt" or error.winerror not in {5, 32}:
+                raise
+            assert (target.stat().st_dev, target.stat().st_ino) == owned_identity
+            assert target.read_bytes() == observed["bytes"]
+            observed["blocked"] = error
+        else:
+            observed["foreign"] = target
         raise failure
 
     monkeypatch.setattr(api, "extract_segments", replace_and_interrupt)
     with pytest.raises(KeyboardInterrupt) as caught:
         api.extract_preformatted_run(run)
     assert caught.value is failure
-    target = observed["target"]
-    assert target.read_bytes() == observed["bytes"]
-    assert (target.stat().st_dev, target.stat().st_ino) == observed["identity"]
+    foreign = observed["foreign"]
+    assert foreign.read_bytes() == observed["bytes"]
+    assert (foreign.stat().st_dev, foreign.stat().st_ino) == observed["identity"]
     assert {key: value for key, value in _snapshot(run).items() if not key.startswith(".preformatted-")} == before
+    if "blocked" in observed:
+        assert not observed["target"].exists()
+        assert not any(p.name.startswith(".preformatted-") for p in run.iterdir())
 
 
 def test_legacy_extract_source_alias_is_a_read_only_held_input(tmp_path):

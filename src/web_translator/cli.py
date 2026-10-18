@@ -1469,6 +1469,9 @@ def _preformatted_qa_evidence(output_dir):
                         if originals[name].stream.read() != prior_payloads[name]:
                             raise QAFailure('prior QA evidence changed during publication')
                         ensure_recovery(name)
+                        # Exact bytes are secured above; retain the identity, not
+                        # a read handle that leaves the Windows name delete-pending.
+                        anchored._close_opened_file(originals[name])
                         anchored._remove_owned_file(root, name, anchored._PublishedFile(originals[name].identity))
                     # Register before publication so BaseException never adopts a replacement.
                     published[name] = anchored._PublishedFile(stage.owned_files[staged_name])
