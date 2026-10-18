@@ -3,6 +3,8 @@ from importlib.resources import files
 import os
 from pathlib import Path
 import subprocess
+import sys
+import sysconfig
 
 import pytest
 
@@ -60,6 +62,44 @@ def test_preformatted_flow_css_is_exposed_as_package_resource() -> None:
     assert packaged.is_file()
     assert packaged.read_bytes() == source.read_bytes()
     assert b"[data-wt-preformatted-literal]" in packaged.read_bytes()
+
+
+def test_installed_web_resources_are_consumed_without_checkout_fallback(tmp_path) -> None:
+    """Missing wheel CSS or source-tree module fallback must fail the installed gate."""
+    import web_translator
+    from web_translator.preformatted_analysis import analyze_preformatted, build_classification_packages, validate_review
+    from web_translator.preformatted_contract import canonical_sha256
+    from web_translator.preformatted_projection import project_preformatted
+
+    checkout = os.environ.get("WEB_TRANSLATOR_FORBID_SOURCE_ROOT")
+    module = Path(web_translator.__file__).resolve()
+    resource = Path(str(files("web_translator").joinpath("web_assets", "preformatted-flow.css"))).resolve()
+    if checkout:
+        forbidden = Path(checkout).resolve()
+        installed = Path(sysconfig.get_paths()['purelib']).resolve()
+        assert not module.is_relative_to(forbidden), module
+        assert not resource.is_relative_to(forbidden), resource
+        assert not Path.cwd().resolve().is_relative_to(forbidden), Path.cwd()
+        assert module.is_relative_to(installed), module
+        assert resource.is_relative_to(installed), resource
+    # Real projection consumes the installed resource; finding a filename is not enough.
+    source = '<html><body><pre>Inspect the observatory.</pre></body></html>'
+    analysis = analyze_preformatted(source)
+    packages = build_classification_packages(analysis)
+    review = validate_review(analysis, packages, {
+        'schema_version': '1.0', 'source_sha256': analysis.source_sha256,
+        'analysis_sha256': canonical_sha256(analysis.to_dict()),
+        'package_sha256': {p.id: canonical_sha256(p.to_dict()) for p in packages},
+        'blocks': [{'id': 'block-000001', 'pre_id': 'pre-000001',
+                    'line_ids': ['line-000001'], 'role': 'prose',
+                    'evidence': 'Inspect the observatory.', 'metadata': {}, 'literal_spans': []}],
+        'unresolved_required': [],
+    })
+    artifact = project_preformatted(source, analysis, review)
+    assert artifact.css_bytes == resource.read_bytes()
+    assert artifact.css_path.startswith('assets/wt-preformatted-')
+    assert 'Inspect the observatory.' in artifact.unmarked_html
+    print(json.dumps({'python': sys.executable, 'module': str(module), 'css': str(resource)}))
 
 
 def test_font_license_is_marked_binary_to_preserve_pinned_bytes_on_windows() -> None:

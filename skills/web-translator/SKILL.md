@@ -62,6 +62,20 @@ preserving spaces and non-ASCII characters.
 
    ```text
    <python> -m web_translator capture <url> --run-dir <work-dir>
+   <python> -m web_translator prepare-preformatted --run-dir <work-dir>
+   ```
+
+   If `preformatted/analysis.json` exists, read
+   [preformatted-contract.md](references/preformatted-contract.md) completely and finish
+   its source-bound classification, every-block master inspection and materialization
+   before extraction. Preparation is not semantic approval. If preparation produces no
+   analysis, continue the legacy path; explicit code-only `<pre>` is a safe no-op.
+   A nonzero command or unresolved preformatted finding stops the run, not a fallback
+   to excluding all `<pre>` content. Never overwrite the raw capture with a projection.
+
+   After that conditional gate, continue:
+
+   ```text
    <python> -m web_translator extract --run-dir <work-dir>
    <python> -m web_translator plan-zones --run-dir <work-dir> --max-chars 12000 --target-zones 3
    ```

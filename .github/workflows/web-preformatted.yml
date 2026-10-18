@@ -1,0 +1,97 @@
+name: Web preformatted cross-platform
+on: [pull_request, push]
+jobs:
+  installed-web:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install isolated build frontend
+        run: python -m pip install --upgrade pip build
+      - name: Build wheel
+        run: python -m build --wheel
+      - name: Install wheel and Chromium (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python="$(python -c 'import sys; print(sys.executable)')"
+          wheels=("$GITHUB_WORKSPACE"/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          "$python" -m pip install "${wheels[0]}[test]"
+          "$python" -m playwright install chromium
+      - name: Install wheel and Chromium (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = (Get-Command python).Source
+          $wheels = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'dist') -Filter *.whl)
+          if ($wheels.Count -ne 1) { throw 'Expected exactly one built wheel.' }
+          & $python -m pip install "$($wheels[0].FullName)[test]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # These exact two Windows Poppler nodes require the pinned PDF job's DLL-complete
+      # bootstrap. They remain covered there on this same push, not silently skipped here.
+      # All other plugin/package consumers and the shared anchored creators run here.
+      - name: Installed-wheel web gate (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python="$(python -c 'import sys; print(sys.executable)')"
+          evidence="$RUNNER_TEMP/web-preformatted"
+          mkdir -p "$evidence"
+          cd "$evidence"
+          unset PYTHONPATH
+          export WEB_TRANSLATOR_FORBID_SOURCE_ROOT="$GITHUB_WORKSPACE"
+          tests="$GITHUB_WORKSPACE/tests"
+          set +e
+          "$python" -I -m pytest -c "$GITHUB_WORKSPACE/pyproject.toml" -o pythonpath= --import-mode=importlib -q -ra -s \
+            "$tests/test_preformatted_analysis.py" "$tests/test_preformatted_projection.py" \
+            "$tests/test_preformatted_runtime.py" "$tests/test_preformatted_pipeline.py" \
+            "$tests/test_anchored_creation.py" "$tests/test_cli_contract.py" \
+            "$tests/test_qa.py" "$tests/test_pipeline.py" "$tests/test_plugin_layout.py" \
+            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdfinfo]' \
+            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdftoppm]' \
+            --basetemp="$evidence/pytest" --junitxml="$evidence/results.xml" 2>&1 | tee "$evidence/pytest.log"
+          test_exit=${PIPESTATUS[0]}
+          printf 'pytest_exit=%s\n' "$test_exit" > "$evidence/exit.txt"
+          exit "$test_exit"
+      - name: Installed-wheel web gate (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = (Get-Command python).Source
+          $evidence = Join-Path $env:RUNNER_TEMP 'web-preformatted'
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          Set-Location -LiteralPath $evidence
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          $env:WEB_TRANSLATOR_FORBID_SOURCE_ROOT = $env:GITHUB_WORKSPACE
+          $tests = Join-Path $env:GITHUB_WORKSPACE 'tests'
+          $selectors = @('test_preformatted_analysis.py', 'test_preformatted_projection.py',
+            'test_preformatted_runtime.py', 'test_preformatted_pipeline.py',
+            'test_anchored_creation.py', 'test_cli_contract.py', 'test_qa.py',
+            'test_pipeline.py', 'test_plugin_layout.py') | ForEach-Object { Join-Path $tests $_ }
+          & $python -I -m pytest -c (Join-Path $env:GITHUB_WORKSPACE 'pyproject.toml') -o 'pythonpath=' --import-mode=importlib -q -ra -s @selectors `
+            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdfinfo]' `
+            '--deselect=tests/test_plugin_layout.py::test_windows_poppler_commands_load_with_all_runtime_dependencies[pdftoppm]' `
+            "--basetemp=$evidence/pytest" "--junitxml=$evidence/results.xml" 2>&1 | Tee-Object -FilePath (Join-Path $evidence 'pytest.log')
+          $testExit = $LASTEXITCODE
+          "pytest_exit=$testExit" | Out-File -FilePath (Join-Path $evidence 'exit.txt') -Encoding utf8
+          exit $testExit
+      - name: Retain logs, JUnit and browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-preformatted-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/web-preformatted
+          if-no-files-found: error

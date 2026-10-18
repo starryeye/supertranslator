@@ -104,6 +104,144 @@ def _no_pass(output):
     assert not report.exists() or '**PASS**' not in report.read_text()
 
 
+def _generic_run(tmp_path, source):
+    """Fresh captures only; existing snapshots and their expected outputs stay frozen."""
+    run, output = _run(tmp_path)
+    (run / 'source.html').write_bytes(source)
+    capture = json.loads((run / 'capture.json').read_bytes())
+    capture['fingerprints']['source.html'] = hashlib.sha256(source).hexdigest()
+    (run / 'capture.json').write_bytes(canonical_bytes(capture))
+    return run, output
+
+
+def _generic_review(run, blocks):
+    analysis = json.loads((run / 'preformatted/analysis.json').read_bytes())
+    payload = {
+        'schema_version': '1.0', 'source_sha256': analysis['source_sha256'],
+        'analysis_sha256': canonical_sha256(analysis),
+        'package_sha256': {p.stem: canonical_sha256(json.loads(p.read_bytes()))
+                           for p in (run / 'preformatted/packages').glob('*.json')},
+        'blocks': blocks, 'unresolved_required': [],
+    }
+    (run / 'preformatted/review.json').write_bytes(canonical_bytes(payload))
+    return payload
+
+
+def _block(number, pre, lines, role, evidence, metadata=None, spans=None):
+    return {'id': f'block-{number:06d}', 'pre_id': f'pre-{pre:06d}',
+            'line_ids': [f'line-{n:06d}' for n in lines], 'role': role,
+            'evidence': evidence, 'metadata': metadata or {}, 'literal_spans': spans or []}
+
+
+def test_generic_code_only_preparation_is_exact_noop(tmp_path):
+    # Reclassifying explicit code or publishing unnecessary state breaks this.
+    source = b'<html><body><p>Compile the sample.</p><pre><code>x = 1\r\nprint(x)</code></pre></body></html>'
+    run, _ = _generic_run(tmp_path, source)
+    before = {p.relative_to(run): p.read_bytes() for p in run.rglob('*') if p.is_file()}
+    assert _command('prepare-preformatted', run) == 0
+    assert {p.relative_to(run): p.read_bytes() for p in run.rglob('*') if p.is_file()} == before
+    assert not (run / 'preformatted').exists()
+    assert _command('extract', run) == 0
+    assert [s.source_text for s in read_segments(run / 'segments.jsonl') if s.target] == ['Compile the sample.']
+
+
+def test_generic_multiple_roots_keep_ordinary_html_and_page_furniture_boundaries(tmp_path):
+    # Losing a pre root/ordinary paragraph, or merging through furniture, breaks this.
+    source = (b'<html><body><h1>Field notebook</h1><p>Start the experiment.</p>'
+              b'<pre id="notes">Observations\nThe sample remains stable.\nNotebook 7 [page 2]\n'
+              b'The result MUST be recorded.</pre><p>Compare the next trial.</p>'
+              b'<pre id="method">1. Keep the vessel closed.\n+---+\n| V |</pre>'
+              b'<p>End of notebook.</p></body></html>')
+    run, _ = _generic_run(tmp_path, source)
+    assert _command('prepare-preformatted', run) == 0
+    _generic_review(run, [
+        _block(1, 1, [1], 'heading', 'Observations', {'level': 2}),
+        _block(2, 1, [2], 'prose', 'The sample remains stable.'),
+        _block(3, 1, [3], 'literal-layout', 'Notebook 7 [page 2]'),
+        _block(4, 1, [4], 'prose', 'The result MUST be recorded.'),
+        _block(5, 2, [5], 'list-item', 'Keep the vessel closed.',
+               {'depth': 0, 'marker_span': {'line_id': 'line-000005', 'start': 0, 'end': 2}}),
+        _block(6, 2, [6, 7], 'literal-diagram', '+---+'),
+    ])
+    assert _command('materialize-preformatted', run) == 0
+    assert _command('extract', run) == 0
+    assert _command('plan-zones', run) == 0
+    targets = [s.source_text for s in read_segments(run / 'segments.jsonl') if s.target]
+    assert targets == ['Field notebook', 'Start the experiment.', 'Observations\n',
+                       'The sample remains stable.\n', 'The result ⟦WT:000000⟧ be recorded.',
+                       'Compare the next trial.', '⟦WT:000000⟧ Keep the vessel closed.\n', 'End of notebook.']
+    records = [s for s in read_segments(run / 'segments.jsonl') if s.target]
+    assert [p.value for p in records[4].protected] == ['MUST']
+    assert [BeautifulSoup(p.value, 'html.parser').text for p in records[6].protected] == ['1.']
+    soup = BeautifulSoup((run / 'preformatted-source.html').read_bytes().decode(), 'html.parser')
+    assert [n.text for n in soup.select('[data-wt-preformatted-literal]')] == ['Notebook 7 [page 2]\n', '+---+\n| V |']
+    assert (run / 'source.html').read_bytes() == source
+
+
+def test_generic_long_document_packages_preserve_targets_across_boundary(tmp_path):
+    # Truncation/context-as-target or prohibiting safe cross-package blocks breaks this.
+    source = ('<html><body><pre>' + '\n'.join(['Observe the specimen.'] * 201) + '</pre></body></html>').encode()
+    run, _ = _generic_run(tmp_path, source)
+    assert _command('prepare-preformatted', run) == 0
+    packages = [json.loads(p.read_bytes()) for p in sorted((run / 'preformatted/packages').glob('*.json'))]
+    assert [len(p['target_lines']) for p in packages] == [200, 1]
+    assert packages[0]['target_lines'][-1] == 'line-000200'
+    assert packages[1]['target_lines'] == ['line-000201']
+    _generic_review(run, [_block(1, 1, range(1, 202), 'prose', 'Observe the specimen.')])
+    assert _command('materialize-preformatted', run) == 0
+    assert _command('extract', run) == 0
+    targets = [s.source_text for s in read_segments(run / 'segments.jsonl') if s.target]
+    assert len(targets) == 1
+    assert targets[0].count('Observe the specimen.') == 201
+
+
+@pytest.mark.parametrize('mutation', ['foreign-line', 'wrong-hash', 'outside-column'])
+def test_generic_malformed_wrapped_url_review_fails_before_projection(tmp_path, mutation):
+    # Accepting guessed URL bytes, foreign endpoints or invalid offsets breaks this.
+    run, _ = _generic_run(tmp_path, b'<html><body><pre>See https://data.example/\r\nnotes?a=1&amp;b=2 now.</pre></body></html>')
+    assert _command('prepare-preformatted', run) == 0
+    span = {'kind': 'url', 'start_line_id': 'line-000001', 'start_column': 4,
+            'end_line_id': 'line-000002', 'end_column': 13,
+            'source_sha256': hashlib.sha256(b'https://data.example/\r\nnotes?a=1&b=2').hexdigest()}
+    if mutation == 'foreign-line':
+        span['end_line_id'] = 'line-000003'
+    elif mutation == 'wrong-hash':
+        span['source_sha256'] = hashlib.sha256(b'https://data.example/notes?a=1&b=2').hexdigest()
+    else:
+        span['end_column'] = 500
+    _generic_review(run, [_block(1, 1, [1, 2], 'prose', 'See ', spans=[span])])
+    assert _command('materialize-preformatted', run) == 4
+    assert not (run / 'preformatted-source.html').exists()
+    assert not (run / 'preformatted/provenance.json').exists()
+
+
+def test_generic_wrapped_url_keeps_decoded_entities_and_line_separators(tmp_path):
+    # Flattening a protected URL or hashing HTML entities instead of decoded text fails.
+    source = b'<html><body><pre>See https://data.example/\r\nnotes?a=1&amp;b=2 now.</pre></body></html>'
+    run, _ = _generic_run(tmp_path, source)
+    assert _command('prepare-preformatted', run) == 0
+    _generic_review(run, [_block(1, 1, [1, 2], 'prose', 'See ', spans=[{
+        'kind': 'url', 'start_line_id': 'line-000001', 'start_column': 4,
+        'end_line_id': 'line-000002', 'end_column': 13,
+        'source_sha256': hashlib.sha256(b'https://data.example/\r\nnotes?a=1&b=2').hexdigest()}])])
+    assert _command('materialize-preformatted', run) == 0
+    assert _command('extract', run) == 0
+    soup = BeautifulSoup((run / 'preformatted-source.html').read_bytes().decode(), 'html.parser')
+    assert soup.select_one('[data-wt-preformatted-url]').text == 'https://data.example/\r\nnotes?a=1&b=2'
+
+
+def test_generic_missing_scoped_css_cannot_reenter_legacy_extraction(tmp_path):
+    # Treating a projected run with missing generated CSS as legacy breaks this.
+    run, _ = _generic_run(tmp_path, b'<html><body><pre>Retain the instrument log.</pre></body></html>')
+    assert _command('prepare-preformatted', run) == 0
+    _generic_review(run, [_block(1, 1, [1], 'prose', 'Retain the instrument log.')])
+    assert _command('materialize-preformatted', run) == 0
+    css = next((run / 'assets').glob('wt-preformatted-*.css'))
+    css.unlink()
+    assert _command('extract', run) == 4
+    assert not (run / 'segments.jsonl').exists()
+
+
 def test_preformatted_pipeline_runs_real_commands_and_preserves_capture(tmp_path, capsys):
     # Missing source selection, CR-preserving QA reads or generated CSS binding breaks this.
     run, output = _assembled(tmp_path)
