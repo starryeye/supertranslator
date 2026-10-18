@@ -2086,3 +2086,28 @@ def test_report_wraps_all_source_values_in_inert_gfm_code_spans(tmp_path: Path) 
     # syntax remains inside inert code spans instead of becoming GFM structure.
     assert "`` ~~strike~~ # heading - list &gt; quote" in text
     assert "``" in text
+
+
+def test_optional_normalization_report_is_typed_and_legacy_is_omitted(tmp_path):
+    from dataclasses import replace
+    from web_translator.preformatted_contract import NormalizationSummary
+    summary = NormalizationSummary.from_dict({
+        'schema_version': '1.0', 'policy': 'prose-reflow-literals-preserved',
+        'source_sha256': '1' * 64, 'review_sha256': '2' * 64,
+        'projection_sha256': '3' * 64, 'translated_blocks': 2,
+        'preserved_blocks': 1, 'unknown_blocks': 0,
+        'preserved_reasons': {'literal-table': 1},
+        'generated_assets': [{'path': 'assets/wt-preformatted-' + '4' * 16 + '.css',
+                              'sha256': '4' * 64}]})
+    legacy = QAResult(True, [], [], [])
+    normalized = replace(legacy, normalization=summary)
+    review = MasterReview([], {}, {})
+    for name, result in [('legacy', legacy), ('normalized', normalized)]:
+        write_manifest(result, tmp_path / (name + '.json'))
+        write_review_report(result, review, tmp_path / (name + '.md'))
+    assert 'normalization' not in json.loads((tmp_path / 'legacy.json').read_bytes())
+    assert 'Preformatted normalization' not in (tmp_path / 'legacy.md').read_text()
+    assert json.loads((tmp_path / 'normalized.json').read_bytes())['normalization'] == summary.to_dict()
+    report = (tmp_path / 'normalized.md').read_text()
+    assert '## Preformatted normalization' in report
+    assert 'literal-table' in report and '3' * 64 in report

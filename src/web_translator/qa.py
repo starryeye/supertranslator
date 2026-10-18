@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from contextlib import ExitStack, contextmanager
+from dataclasses import replace
+import hashlib
 from html import unescape
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -23,6 +26,8 @@ from tinycss2.ast import AtRule, FunctionBlock, StringToken, URLToken
 from web_translator.extract import TRANSLATABLE_ATTRIBUTES
 from web_translator.models import Finding, ProtectedToken, QAInputs, QAResult
 from web_translator.protection import _URL_PATTERN, _trim_url_end
+import web_translator.pdf_assemble as anchored
+from web_translator.preformatted_runtime import hold_processing_source, verify_preformatted_output
 
 
 _TOKEN_PATTERN = re.compile(r"⟦WT:\d{6}⟧")
@@ -90,6 +95,123 @@ def run_qa(inputs: QAInputs) -> QAResult:
     """Run stable preflight checks, followed by isolated Chromium QA."""
     if not isinstance(inputs, QAInputs):
         raise TypeError("inputs must be QAInputs")
+    known_preformatted = _has_preformatted_state(inputs.source_html.parent)
+    if inputs.normalization is None and not known_preformatted:
+        return _run_qa(inputs)
+    result = None
+    try:
+        if inputs.normalization is None:
+            raise ValueError('preformatted-provenance: known preformatted source requires normalization evidence')
+        _prepare_preformatted_screenshots(inputs.source_html.parent, inputs.screenshot_dir)
+        with hold_processing_source(inputs.source_html.parent, phase="qa") as source:
+            if source.path != inputs.source_html.absolute() or source.normalization != inputs.normalization:
+                raise ValueError("preformatted-provenance: QA normalization/source does not match held provenance")
+            with _hold_preformatted_output(source, inputs.output_html) as output:
+                output.verify()
+                result = _run_qa(inputs)
+                output.verify()
+    except (ValueError, anchored.PdfAssemblyError, OSError) as error:
+        code = 'preformatted-literal-integrity' if str(error).startswith('preformatted-literal-integrity:') else 'preformatted-provenance'
+        finding = _required(code, "Preformatted acceptance evidence is invalid.", {'reason': str(error)})
+        if result is None:
+            return QAResult(False, [finding], [], [], source_url=inputs.source_url,
+                            capture_metadata=dict(inputs.capture_metadata), normalization=inputs.normalization)
+        return replace(result, passed=False, required_findings=[*result.required_findings, finding])
+    return result
+
+
+def _has_preformatted_state(run_dir: Path) -> bool:
+    """Inventory lexical runtime indicators, never traverse a linked asset tree.
+
+    An unsafe/unreadable inventory cannot establish legacy absence; route it
+    through provenance failure handling and leave validation to the runtime.
+    """
+    if not os.path.lexists(run_dir):
+        return False
+    root = assets = None
+    try:
+        anchored._reject_linked_ancestors(run_dir)
+        root = anchored._open_directory_anchor(run_dir, 'QA state inventory')
+        names = anchored._anchored_directory_names(root)
+        if ('preformatted' in names or 'preformatted-source.html' in names
+                or any(name.startswith('.preformatted-') for name in names)):
+            return True
+        if 'assets' not in names:
+            return False
+        assets = anchored._open_existing_child_directory(root, 'assets', 'QA asset inventory')
+        return any(name.startswith('wt-preformatted-')
+                   for name in anchored._anchored_directory_names(assets))
+    except (ValueError, anchored.PdfAssemblyError, OSError):
+        return True
+    finally:
+        if assets is not None:
+            assets.close()
+        if root is not None:
+            root.close()
+
+
+def _prepare_preformatted_screenshots(run_dir, screenshot_dir):
+    """Create the consumer-owned directory before the immutable run lease."""
+    if screenshot_dir.absolute().parent != run_dir.absolute():
+        raise ValueError('preformatted-provenance: screenshots must be an immediate run child')
+    anchored._reject_linked_ancestors(run_dir)
+    root = anchored._open_directory_anchor(run_dir, 'QA screenshot run')
+    child = None
+    try:
+        if screenshot_dir.name in anchored._anchored_directory_names(root):
+            child = anchored._open_existing_child_directory(root, screenshot_dir.name, 'QA screenshots')
+        else:
+            child = anchored._create_child_directory(root, screenshot_dir.name, 'QA screenshots')
+        root.verify_visible()
+        child.verify_visible()
+    finally:
+        if child is not None:
+            child.close()
+        root.close()
+
+
+@contextmanager
+def _hold_preformatted_output(source, output_html):
+    """Keep exact output/CSS descriptors live across checks and publication."""
+    with ExitStack() as stack:
+        root = anchored._open_directory_anchor(output_html.parent, 'preformatted output')
+        stack.callback(root.close)
+        directories = {'': root}
+        files = []
+        for relative, digest in [(output_html.name, None),
+                                 *((a['path'], a['sha256']) for a in source.generated_critical_assets)]:
+            parent, _, name = relative.rpartition('/')
+            if parent not in directories:
+                directories[parent] = anchored._open_existing_child_directory(root, parent, 'generated assets')
+                stack.callback(directories[parent].close)
+            directory = directories[parent]
+            opened = anchored._open_anchored_input_file(directory, name, 'preformatted output evidence')
+            stack.callback(anchored._close_opened_file, opened)
+            payload = opened.stream.read()
+            files.append((directory, name, opened, payload))
+            if digest is not None and hashlib.sha256(payload).hexdigest() != digest:
+                raise ValueError('preformatted-provenance: generated critical CSS digest mismatch')
+
+        class Snapshot:
+            def verify(self):
+                source.verify()
+                for directory, name, opened, payload in files:
+                    anchored._verify_anchored_evidence(directory, {name: opened})
+                    opened.stream.seek(0)
+                    if os.fstat(opened.stream.fileno()).st_nlink != 1 or opened.stream.read() != payload:
+                        raise ValueError('preformatted-provenance: held output evidence changed')
+                try:
+                    verify_preformatted_output(source, output_html)
+                except ValueError as error:
+                    raise ValueError(f'preformatted-literal-integrity: {error}') from error
+
+        snapshot = Snapshot()
+        snapshot.verify()
+        yield snapshot
+        snapshot.verify()
+
+
+def _run_qa(inputs: QAInputs) -> QAResult:
 
     required: list[Finding] = []
     warnings: list[Finding] = []
@@ -97,11 +219,14 @@ def run_qa(inputs: QAInputs) -> QAResult:
     browser_metrics: dict[str, dict[str, object]] = {}
 
     _check_coverage(inputs, required)
-    source_text = _read_utf8(inputs.source_html, "source-html", required)
-    output_text = _read_utf8(inputs.output_html, "output-html", required)
+    source_text = _read_utf8(inputs.source_html, "source-html", required, preserve_newlines=inputs.normalization is not None)
+    output_text = _read_utf8(inputs.output_html, "output-html", required, preserve_newlines=inputs.normalization is not None)
     if source_text is not None and output_text is not None:
-        source_soup = BeautifulSoup(source_text, "lxml")
-        output_soup = BeautifulSoup(output_text, "lxml")
+        # lxml normalizes raw CRLF even when byte decoding preserves it. The
+        # adapter's parser retains the exact literal/opaque DOM text stream.
+        parser = 'html.parser' if inputs.normalization is not None else 'lxml'
+        source_soup = BeautifulSoup(source_text, parser)
+        output_soup = BeautifulSoup(output_text, parser)
         _check_tokens(inputs, source_soup, output_soup, output_text, required)
         _check_structure(source_soup, output_soup, required)
         _check_anchors(output_soup, inputs.output_html.name, required)
@@ -130,6 +255,7 @@ def run_qa(inputs: QAInputs) -> QAResult:
         source_url=inputs.source_url,
         browser_metrics=browser_metrics,
         capture_metadata=dict(inputs.capture_metadata),
+        normalization=inputs.normalization,
     )
 
 
@@ -170,7 +296,7 @@ def _warning(code: str, message: str, evidence: dict[str, object]) -> Finding:
 def _check_coverage(inputs: QAInputs, findings: list[Finding]) -> None:
     missing = sorted(inputs.source_segment_ids - inputs.translated_segment_ids)
     foreign = sorted(inputs.translated_segment_ids - inputs.source_segment_ids)
-    if missing or foreign:
+    if missing or foreign or (inputs.normalization is not None and not inputs.source_segment_ids):
         findings.append(
             _required(
                 "translation-coverage",
@@ -180,11 +306,11 @@ def _check_coverage(inputs: QAInputs, findings: list[Finding]) -> None:
         )
 
 
-def _read_utf8(path: Path, label: str, findings: list[Finding]) -> str | None:
+def _read_utf8(path: Path, label: str, findings: list[Finding], *, preserve_newlines: bool = False) -> str | None:
     try:
         if _is_link_or_reparse(path) or not path.is_file():
             raise OSError("file is missing or unsafe")
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes().decode('utf-8') if preserve_newlines else path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         findings.append(
             _required(

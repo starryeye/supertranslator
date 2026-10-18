@@ -60,8 +60,12 @@ from web_translator.pdf_unit_bindings import (
     _publish_pdf_unit_assignments, hold_pdf_unit_binding, require_assignable_pdf,
 )
 from web_translator.pdf_units import require_pdf_unit_budget
-from web_translator.qa import run_qa
-from web_translator.report import write_manifest, write_review_report
+from web_translator.qa import run_qa, _has_preformatted_state, _hold_preformatted_output, _prepare_preformatted_screenshots
+from web_translator.report import write_manifest, write_review_report, render_manifest, render_review_report
+from web_translator.preformatted_runtime import (
+    prepare_preformatted_run, materialize_preformatted_run, extract_preformatted_run,
+    hold_processing_source, verify_preformatted_output,
+)
 from web_translator.translations import TranslationContractError, merge_translations
 from web_translator.zones import (
     MAX_TARGET_ZONES,
@@ -204,7 +208,7 @@ def _command_output_root(args: argparse.Namespace, run_dir: Path) -> str:
     command = str(args.command)
     if command in {"pdf-acquire", "pdf-extract", "pdf-review-input", "pdf-figure-review-input", "pdf-assemble", "pdf-qa"}:
         return "translated-pdfs"
-    if command in {"capture", "extract", "assemble", "qa"}:
+    if command in {"capture", "prepare-preformatted", "materialize-preformatted", "extract", "assemble", "qa"}:
         return "translated-pages"
     # Shared stages run only after acquisition/capture. The exact source marker is
     # checked again by the stage while the run root remains held.
@@ -253,6 +257,14 @@ def _build_parser() -> argparse.ArgumentParser:
     capture.add_argument("url")
     _add_run_dir(capture)
     capture.set_defaults(handler=_capture_command)
+
+    for name, handler, help_text in (
+        ('prepare-preformatted', _prepare_preformatted_command, 'Inventory preformatted source for explicit review.'),
+        ('materialize-preformatted', _materialize_preformatted_command, 'Materialize a source-bound reviewed projection.'),
+    ):
+        command = subparsers.add_parser(name, help=help_text)
+        _add_run_dir(command)
+        command.set_defaults(handler=handler)
 
     pdf_acquire = subparsers.add_parser(
         "pdf-acquire", help="Acquire one local or public PDF."
@@ -424,7 +436,39 @@ def _pdf_review_input_command(args: argparse.Namespace) -> None:
         ) from error
 
 
+def _prepare_preformatted_command(args: argparse.Namespace) -> None:
+    try:
+        prepare_preformatted_run(args.run_dir)
+    except (ValueError, OSError) as error:
+        raise CLIContractError(str(error)) from error
+
+
+def _materialize_preformatted_command(args: argparse.Namespace) -> None:
+    try:
+        materialize_preformatted_run(args.run_dir)
+    except (ValueError, OSError) as error:
+        raise CLIContractError(str(error)) from error
+
+
 def _extract_command(args: argparse.Namespace) -> None:
+    _validate_run_root(args.run_dir)
+    try:
+        # Selection is immutable; extraction intentionally changes its own outputs.
+        # Each transaction owns that mutation, not an expired selector lease.
+        with hold_processing_source(args.run_dir, phase='extract') as source:
+            preformatted = source.normalization is not None
+            source.verify()
+        if preformatted:
+            extract_preformatted_run(args.run_dir)
+        else:
+            _extract_legacy_command(args)
+        with hold_processing_source(args.run_dir, phase='extract') as source:
+            source.verify()
+    except (ValueError, ExtractionError, OSError) as error:
+        raise CLIContractError(f'cannot extract captured source: {error}') from error
+
+
+def _extract_legacy_command(args: argparse.Namespace) -> None:
     try:
         _validate_run_root(args.run_dir)
         source = args.run_dir / "source.html"
@@ -623,20 +667,42 @@ def _assignment_records(
 
 def _assemble_command(args: argparse.Namespace) -> None:
     _validate_run_root(args.run_dir)
+    # Retain the legacy capture-contract diagnostic before the stricter lease.
+    _read_capture(args.run_dir)
+    try:
+        with hold_processing_source(args.run_dir, phase='assemble') as source:
+            _assemble_selected_command(args, source)
+            source.verify()
+    except ValueError as error:
+        raise CLIContractError(str(error)) from error
+
+
+def _assemble_selected_command(args: argparse.Namespace, source) -> None:
+    _validate_run_root(args.run_dir)
     capture = _read_capture(args.run_dir)
     segments = _read_segments(args.run_dir)
+    if source.normalization is not None and not any(segment.target for segment in segments):
+        raise CLIContractError('preformatted extraction has no translation targets')
     zones = _read_zones(args.run_dir)
     result_dir = _validate_translation_files(args.run_dir, zones)
     translations = merge_translations(segments, zones, result_dir)
     glossary = _read_glossary(args.run_dir / "glossary.json")
+    source.verify()
     assemble_page(
-        args.run_dir / "source.html",
+        source.path,
         {segment.id: segment for segment in segments if segment.target},
         translations,
         glossary,
         args.output_dir,
         capture["final_url"],
     )
+    source.verify()
+    if source.normalization is not None:
+        try:
+            with _hold_preformatted_output(source, args.output_dir / 'index.html') as output:
+                output.verify()
+        except (ValueError, PdfAssemblyError, OSError) as error:
+            raise AssemblyError(str(error)) from error
 
 
 def _pdf_assemble_command(args: argparse.Namespace) -> None:
@@ -673,6 +739,30 @@ def _pdf_qa_finalize_command(args: argparse.Namespace) -> None:
 
 
 def _qa_command(args: argparse.Namespace) -> None:
+    preformatted = _has_preformatted_state(args.run_dir)
+    try:
+        if preformatted:
+            with _preformatted_qa_evidence(args.output_dir) as transaction:
+                _prepare_preformatted_screenshots(args.run_dir, args.run_dir / 'qa-screenshots')
+                with hold_processing_source(args.run_dir, phase='qa') as source:
+                    with _hold_preformatted_output(source, args.output_dir / 'index.html') as output:
+                        _qa_selected_command(args, source, transaction, output.verify)
+                        output.verify()
+        else:
+            try:
+                _prepare_preformatted_screenshots(args.run_dir, args.run_dir / 'qa-screenshots')
+            except (ValueError, PdfAssemblyError, OSError) as error:
+                raise QAFailure(f'screenshot-directory-unsafe: {error}') from error
+            with hold_processing_source(args.run_dir, phase='qa') as source:
+                _qa_selected_command(args, source)
+    except (ValueError, PdfAssemblyError, OSError) as error:
+        if preformatted:
+            code = 'preformatted-literal-integrity' if str(error).startswith('preformatted-literal-integrity:') else 'preformatted-provenance'
+            raise QAFailure(f'{code}: {error}') from error
+        raise CLIContractError(str(error)) from error
+
+
+def _qa_selected_command(args, source, transaction=None, revalidate=None) -> None:
     _validate_run_root(args.run_dir)
     _reject_if_link(args.run_dir / "source.html")
     try:
@@ -681,24 +771,28 @@ def _qa_command(args: argparse.Namespace) -> None:
         raise QAFailure(str(error)) from error
     capture = _read_capture(args.run_dir)
     segments = _read_segments(args.run_dir)
+    if source.normalization is not None and not any(segment.target for segment in segments):
+        raise QAFailure('translation-coverage: preformatted extraction has no translation targets')
     zones = _read_zones(args.run_dir)
     result_dir = _validate_translation_files(args.run_dir, zones)
     translations = merge_translations(segments, zones, result_dir)
     review = _read_review(args.run_dir / "review.json", zones)
     result = run_qa(
         QAInputs(
-            source_html=args.run_dir / "source.html",
+            source_html=source.path,
             output_html=args.output_dir / "index.html",
             source_url=capture["final_url"],
             source_segment_ids={segment.id for segment in segments if segment.target},
             translated_segment_ids=set(translations),
-            critical_assets=[Path(path) for path in capture["critical_assets"]],
+            critical_assets=[Path(path) for path in capture["critical_assets"]]
+                            + [Path(asset['path']) for asset in source.generated_critical_assets],
             optional_assets=[Path(path) for path in capture["optional_assets"]],
             screenshot_dir=args.run_dir / "qa-screenshots",
             master_review=review,
             protected_tokens={segment.id: segment.protected for segment in segments},
             translated_texts={key: value.text for key, value in translations.items()},
             capture_metadata=dict(capture),
+            normalization=source.normalization,
         )
     )
     provenance = _build_manifest_provenance(
@@ -709,7 +803,15 @@ def _qa_command(args: argparse.Namespace) -> None:
         translated_segment_ids=set(translations),
         review=review,
     )
-    _publish_qa_evidence(result, review, args.output_dir, provenance)
+    source.verify()
+    if revalidate is not None:
+        revalidate()
+    if transaction is None:
+        _publish_qa_evidence(result, review, args.output_dir, provenance)
+    else:
+        _publish_qa_evidence(result, review, args.output_dir, provenance, _transaction=transaction)
+        revalidate()
+        transaction.verify()
     if not result.passed:
         codes = ", ".join(finding.code for finding in result.required_findings)
         raise QAFailure(f"required QA checks failed: {codes or 'unknown finding'}")
@@ -1050,6 +1152,7 @@ def _build_manifest_provenance(
         assets=assets,
         missing_optional_assets=list(missing_optional),
         retries=dict(sorted(review.retries.items())),
+        normalization=result.normalization,
     )
 
 
@@ -1282,13 +1385,167 @@ def _validate_qa_output_path(output_dir: Path) -> None:
     _reject_if_link(output_dir / "review-report.md")
 
 
+@contextmanager
+def _preformatted_qa_evidence(output_dir):
+    """Publish through existing anchored primitives; preserve recovery on failure.
+
+    Prior reports are never assumed to describe the current output. On failure
+    they remain only as private recovery copies, never restored as public PASS.
+    """
+    import web_translator.pdf_assemble as anchored
+    from web_translator.pdf_extract_transaction import _write_private_file
+
+    _validate_qa_output_path(output_dir)
+    root = anchored._open_directory_anchor(output_dir, 'QA evidence output')
+    stage = None
+    stage_name = None
+    originals = {}
+    prior_payloads = {}
+    backups = {}
+    backup_handles = []
+    recovery_stages = []
+    published = {}
+    payloads = {}
+    completed = False
+    backups_ready = False
+    failure: BaseException | None = None
+
+    def backup_is_exact(name):
+        if name not in backups:
+            return False
+        directory, backup_name, opened = backups[name]
+        try:
+            anchored._verify_anchored_evidence(directory, {backup_name: opened})
+            if opened.identity != directory.owned_files[backup_name]:
+                return False
+            opened.stream.seek(0)
+            return (os.fstat(opened.stream.fileno()).st_nlink == 1
+                    and opened.stream.read() == prior_payloads[name])
+        except (anchored.PdfAssemblyError, OSError):
+            return False
+
+    def secure_backup(directory, name):
+        backup_name = 'prior-' + name
+        _write_private_file(directory, backup_name, prior_payloads[name])
+        opened = anchored._open_anchored_input_file(directory, backup_name, 'QA recovery snapshot')
+        backup_handles.append(opened)
+        backups[name] = directory, backup_name, opened
+        if not backup_is_exact(name):
+            raise QAFailure('QA recovery snapshot identity or bytes changed')
+
+    def ensure_recovery(name):
+        if backup_is_exact(name):
+            return
+        # A changed entry is never overwritten/adopted, even with equal bytes.
+        # Secure the held original truth under fresh exclusive owned names.
+        recovery_name, recovery = anchored._create_unique_child_directory(root, '.qa-evidence-', 'QA exact recovery')
+        recovery_stages.append((recovery_name, recovery))
+        secure_backup(recovery, name)
+
+    try:
+        stage_name, stage = anchored._create_unique_child_directory(root, '.qa-evidence-', 'QA evidence recovery')
+        names = set(anchored._anchored_directory_names(root))
+        for name in ('review-report.md', 'manifest.json'):
+            if name in names:
+                opened = anchored._open_anchored_input_file(root, name, 'prior QA evidence')
+                originals[name] = opened
+                payload = opened.stream.read()
+                prior_payloads[name] = payload
+                if os.fstat(opened.stream.fileno()).st_nlink != 1:
+                    raise QAFailure('prior QA evidence has hardlinks')
+                secure_backup(stage, name)
+        backups_ready = True
+
+        class Transaction:
+            def publish(self, result, review, provenance):
+                rendered = {'review-report.md': render_review_report(result, review).encode('utf-8'),
+                            'manifest.json': render_manifest(result, provenance).encode('utf-8')}
+                for name, payload in rendered.items():
+                    staged_name = 'new-' + name
+                    _write_private_file(stage, staged_name, payload)
+                    if name in originals:
+                        anchored._verify_anchored_evidence(root, {name: originals[name]})
+                        originals[name].stream.seek(0)
+                        if originals[name].stream.read() != prior_payloads[name]:
+                            raise QAFailure('prior QA evidence changed during publication')
+                        ensure_recovery(name)
+                        anchored._remove_owned_file(root, name, anchored._PublishedFile(originals[name].identity))
+                    # Register before publication so BaseException never adopts a replacement.
+                    published[name] = anchored._PublishedFile(stage.owned_files[staged_name])
+                    payloads[name] = payload
+                    published[name] = anchored._publish_new_file(stage, staged_name, root, name)
+                self.verify()
+
+            def verify(self):
+                root.verify_visible()
+                stage.verify_visible()
+                for name, publication in published.items():
+                    anchored._verify_anchored_input_identity(root, name, publication.identity)
+                    opened = anchored._open_anchored_input_file(root, name, 'published QA evidence')
+                    try:
+                        if opened.stream.read() != payloads[name]:
+                            raise QAFailure('published QA evidence bytes changed')
+                    finally:
+                        anchored._close_opened_file(opened)
+                for name in originals:
+                    ensure_recovery(name)
+
+        transaction = Transaction()
+        yield transaction
+        transaction.verify()
+        completed = True
+    except BaseException as error:
+        failure = error
+    # Existing anchored creators/publishers treat an active exception as failed
+    # creation. Fresh recovery must run outside the original exception handler.
+    # Never overwrite/delete a raced foreign inode, or delete an unbacked prior.
+    if not completed:
+        for name, publication in published.items():
+            anchored._remove_owned_file(root, name, publication)
+        if backups_ready:
+            for name, opened in originals.items():
+                try:
+                    ensure_recovery(name)
+                except (QAFailure, anchored.PdfAssemblyError, OSError):
+                    continue
+                anchored._remove_owned_file(root, name, anchored._PublishedFile(opened.identity))
+    for publication in published.values():
+        anchored._close_published_file(publication)
+    for opened in originals.values():
+        anchored._close_opened_file(opened)
+    for opened in backup_handles:
+        anchored._close_opened_file(opened)
+    for recovery_name, recovery in reversed(recovery_stages):
+        if completed:
+            for name, identity in recovery.owned_files.items():
+                anchored._remove_owned_file(recovery, name, anchored._PublishedFile(identity))
+        recovery.close()
+        if completed:
+            anchored._remove_owned_directory(root, recovery_name, recovery.identity)
+    if stage is not None:
+        for name, identity in stage.owned_files.items():
+            if completed or name.startswith('new-'):
+                anchored._remove_owned_file(stage, name, anchored._PublishedFile(identity))
+        stage.close()
+        if completed or not originals:
+            anchored._remove_owned_directory(root, stage_name, stage.identity)
+    root.close()
+    if failure is not None:
+        raise failure
+
+
 def _publish_qa_evidence(
     result: QAResult,
     review: MasterReview,
     output_dir: Path,
     provenance: ManifestProvenance | None = None,
+    *,
+    _transaction=None,
 ) -> None:
     """Publish report first and manifest last, rolling the pair back on failure."""
+    if _transaction is not None:
+        _transaction.publish(result, review, provenance)
+        return
     manifest = output_dir / "manifest.json"
     report = output_dir / "review-report.md"
     try:

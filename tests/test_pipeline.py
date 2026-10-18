@@ -224,6 +224,9 @@ def test_fixture_pipeline_builds_complete_offline_bundle(
     assert output.err == ""
     assert (output_dir / "index.html").exists()
     manifest = json.loads((output_dir / "manifest.json").read_text("utf-8"))
+    assert 'normalization' not in manifest
+    assert 'Preformatted normalization' not in (output_dir / 'review-report.md').read_text('utf-8')
+    assert not (run_dir / 'preformatted').exists()
     assert set(manifest) == {
         "assets",
         "browser_metrics",

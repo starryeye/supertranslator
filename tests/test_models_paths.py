@@ -285,3 +285,12 @@ def test_lexical_workspace_rejects_linked_pwd_evidence(
 
     with pytest.raises(ValueError, match="link or reparse"):
         lexical_workspace()
+
+
+def test_shared_qa_models_default_to_absent_normalization():
+    from web_translator.models import QAInputs, QAResult, MasterReview
+    result = QAResult(True, [], [], [])
+    inputs = QAInputs(Path('source'), Path('output'), 'https://example.com/',
+                      set(), set(), [], [], Path('screenshots'), MasterReview([], {}, {}))
+    assert result.normalization is None
+    assert inputs.normalization is None

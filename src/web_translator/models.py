@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
+from web_translator.preformatted_contract import NormalizationSummary
+
 
 class SegmentContractError(ValueError):
     """A persisted segment JSONL record violates the segment contract."""
@@ -185,6 +187,7 @@ class QAInputs:
     protected_tokens: dict[str, list[ProtectedToken]] = field(default_factory=dict)
     translated_texts: dict[str, str] = field(default_factory=dict)
     capture_metadata: dict[str, object] = field(default_factory=dict)
+    normalization: NormalizationSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +201,7 @@ class QAResult:
     source_url: str = ""
     browser_metrics: dict[str, dict[str, object]] = field(default_factory=dict)
     capture_metadata: dict[str, object] = field(default_factory=dict)
+    normalization: NormalizationSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,9 +241,10 @@ class ManifestProvenance:
     assets: list[ManifestAsset]
     missing_optional_assets: list[str]
     retries: dict[str, int]
+    normalization: NormalizationSummary | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "assets": {
                 "captured": [asset.to_dict() for asset in self.assets],
                 "missing_optional": list(self.missing_optional_assets),
@@ -267,6 +272,9 @@ class ManifestProvenance:
             },
             "tool": {"name": "web-translator", "version": self.tool_version},
         }
+        if self.normalization is not None:
+            payload["normalization"] = self.normalization.to_dict()
+        return payload
 
 
 def write_segments(path: Path, segments: Iterable[Segment]) -> None:

@@ -1453,3 +1453,13 @@ def test_manifest_provenance_rejects_artifact_disagreement(
 
     with pytest.raises(CLIContractError, match=message):
         _build_manifest_provenance(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize('command', ['prepare-preformatted', 'materialize-preformatted'])
+def test_preformatted_commands_keep_status_and_argument_exit_contract(command, tmp_path, capsys):
+    assert main([command]) == 2
+    first = json.loads(capsys.readouterr().out)
+    assert first == {'command': command, 'status': 'error', 'exit_code': 2}
+    assert main([command, '--run-dir', str(tmp_path / 'not allocated')]) == 4
+    second = json.loads(capsys.readouterr().out)
+    assert second == {'command': command, 'status': 'error', 'exit_code': 4}

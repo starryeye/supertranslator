@@ -25,6 +25,11 @@ def write_manifest(
     provenance: ManifestProvenance | None = None,
 ) -> None:
     """Write canonical JSON evidence for one QA run."""
+    _atomic_write(Path(path), render_manifest(result, provenance))
+
+
+def render_manifest(result: QAResult, provenance: ManifestProvenance | None = None) -> str:
+    """Render evidence without introducing a path-based publication boundary."""
     provenance = provenance or _fallback_provenance(result)
     payload = {
         **provenance.to_dict(),
@@ -40,8 +45,7 @@ def write_manifest(
             _finding_payload(item) for item in sorted(result.warnings, key=_finding_key)
         ],
     }
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    _atomic_write(Path(path), serialized)
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def _fallback_provenance(result: QAResult) -> ManifestProvenance:
@@ -88,11 +92,17 @@ def _fallback_provenance(result: QAResult) -> ManifestProvenance:
         if isinstance(capture.get("missing_optional_assets", []), list)
         else [],
         retries={},
+        normalization=result.normalization,
     )
 
 
 def write_review_report(result: QAResult, review: MasterReview, path: Path) -> None:
     """Write deterministic Markdown evidence for human review."""
+    _atomic_write(Path(path), render_review_report(result, review))
+
+
+def render_review_report(result: QAResult, review: MasterReview) -> str:
+    """Render the same report for identity-checked private publication."""
     status = "PASS" if result.passed and not review.unresolved_required else "FAIL"
     lines = [
         "# Translation QA Review Report",
@@ -109,6 +119,19 @@ def write_review_report(result: QAResult, review: MasterReview, path: Path) -> N
     )
     lines.extend(["", "## Warnings", ""])
     lines.extend(_finding_lines(sorted(result.warnings, key=_finding_key), empty="None."))
+    if result.normalization is not None:
+        summary = result.normalization
+        lines.extend(["", "## Preformatted normalization", "",
+                      f"- Policy: {_markdown(summary.policy)}",
+                      f"- Source SHA256: {_markdown(summary.source_sha256)}",
+                      f"- Review SHA256 (canonical): {_markdown(summary.review_sha256)}",
+                      f"- Projection SHA256: {_markdown(summary.projection_sha256)}",
+                      f"- Translated blocks: {summary.translated_blocks}",
+                      f"- Preserved blocks: {summary.preserved_blocks}"])
+        for role, count in sorted(summary.preserved_reasons.items()):
+            lines.append(f"- Preserved {_markdown(role)}: {count}")
+        for asset in summary.generated_assets:
+            lines.append(f"- Generated critical asset: {_markdown(asset['path'])} SHA256 {_markdown(asset['sha256'])}")
     lines.extend(["", "## Browser evidence", ""])
     if result.browser_metrics:
         lines.extend(
@@ -150,7 +173,7 @@ def write_review_report(result: QAResult, review: MasterReview, path: Path) -> N
     else:
         lines.append("None.")
     lines.append("")
-    _atomic_write(Path(path), "\n".join(lines))
+    return "\n".join(lines)
 
 
 def _finding_payload(finding: Finding) -> dict[str, object]:
