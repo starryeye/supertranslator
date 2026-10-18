@@ -3557,12 +3557,14 @@ def _create_child_directory(
     identity: tuple[int, int] | None = None
     created = False
     creation_attempted = False
+    succeeded = False
     try:
         if parent.descriptor is not None:
             try:
                 creation_attempted = True
                 os.mkdir(name, 0o700, dir_fd=parent.descriptor)
-            except FileExistsError:
+            except OSError:
+                creation_attempted = False
                 raise
             created = True
             result = os.stat(
@@ -3615,6 +3617,7 @@ def _create_child_directory(
         )
         parent.verify_visible()
         child.verify_visible()
+        succeeded = True
         return child
     except FileExistsError:
         raise
@@ -3625,7 +3628,7 @@ def _create_child_directory(
             f"cannot create anchored {label} directory {parent.path / name}: {error}"
         ) from error
     finally:
-        if sys.exc_info()[0] is not None:
+        if not succeeded:
             active_error = sys.exc_info()[1]
             if (
                 identity is None
@@ -3689,18 +3692,23 @@ def _create_anchored_binary_file(
     stream: BinaryIO | None = None
     identity: tuple[int, int] | None = None
     creation_attempted = False
+    succeeded = False
     try:
         if directory.descriptor is not None:
             creation_attempted = True
-            descriptor = os.open(
-                name,
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory.descriptor,
-            )
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory.descriptor,
+                )
+            except OSError:
+                creation_attempted = False
+                raise
             result = os.fstat(descriptor)
             if not stat.S_ISREG(result.st_mode) or _is_reparse_stat(result):
                 raise PdfAssemblyError(
@@ -3731,7 +3739,9 @@ def _create_anchored_binary_file(
             )
         directory.owned_files[name] = identity
         directory.verify_visible()
-        return _OpenedFile(stream, identity)
+        opened = _OpenedFile(stream, identity)
+        succeeded = True
+        return opened
     except FileExistsError as error:
         raise PdfAssemblyError(
             f"assembly destination already exists: {directory.path / name}"
@@ -3743,7 +3753,7 @@ def _create_anchored_binary_file(
             f"cannot create anchored assembly file {directory.path / name}: {error}"
         ) from error
     finally:
-        if sys.exc_info()[0] is not None:
+        if not succeeded:
             active_error = sys.exc_info()[1]
             if (
                 identity is None
