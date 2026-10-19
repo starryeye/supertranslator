@@ -105,25 +105,37 @@ def _no_pass(output):
     assert not report.exists() or '**PASS**' not in report.read_text(encoding='utf-8')
 
 
-def _attempt_held_replacement(foreign, target):
+def _compatible_file_snapshot(path):
+    """Use the existing read primitive compatible with retained native handles."""
+    import web_translator.pdf_assemble as storage
+    root = storage._open_directory_anchor(path.parent, 'test replacement snapshot')
+    opened = None
+    try:
+        opened = storage._open_anchored_input_file(root, path.name, 'test replacement evidence')
+        payload = opened.stream.read()
+        storage._verify_anchored_evidence(root, {path.name: opened})
+        return opened.identity, payload
+    finally:
+        storage._close_opened_file(opened)
+        root.close()
+
+
+def _attempt_held_replacement(foreign, target, observed=None):
     """Observe the actual native attack, without releasing any production handle."""
-    original = target.stat()
-    replacement = foreign.stat()
-    observed = {'target': target, 'foreign': foreign, 'completed': False,
-                'original_identity': (original.st_dev, original.st_ino),
-                'original_bytes': target.read_bytes(),
-                'foreign_identity': (replacement.st_dev, replacement.st_ino),
-                'foreign_bytes': foreign.read_bytes()}
+    if observed is None:
+        observed = {}
+    observed.update({'target': target, 'foreign': foreign, 'completed': False, 'attempted': False})
+    observed['original_identity'], observed['original_bytes'] = _compatible_file_snapshot(target)
+    observed['foreign_identity'], observed['foreign_bytes'] = _compatible_file_snapshot(foreign)
     assert observed['foreign_identity'] != observed['original_identity']
+    observed['attempted'] = True
     try:
         foreign.replace(target)
     except PermissionError as error:
         if os.name != 'nt' or error.winerror not in {5, 32}:
             raise
         observed['blocked'] = error
-        current = target.stat()
-        assert (current.st_dev, current.st_ino) == observed['original_identity']
-        assert target.read_bytes() == observed['original_bytes']
+        assert _compatible_file_snapshot(target) == (observed['original_identity'], observed['original_bytes'])
         _assert_foreign_replacement_survives(observed)
         print(f'held replacement blocked by native Windows error {error.winerror}')
     else:
@@ -134,10 +146,9 @@ def _attempt_held_replacement(foreign, target):
 
 
 def _assert_foreign_replacement_survives(observed):
+    assert observed['attempted']
     path = observed['target'] if observed['completed'] else observed['foreign']
-    current = path.stat()
-    assert (current.st_dev, current.st_ino) == observed['foreign_identity']
-    assert path.read_bytes() == observed['foreign_bytes']
+    assert _compatible_file_snapshot(path) == (observed['foreign_identity'], observed['foreign_bytes'])
 
 
 def _generic_run(tmp_path, source):
@@ -377,8 +388,9 @@ def test_preformatted_qa_changes_at_acceptance_boundaries_leave_no_pass(
         if target == 'replacement':
             replacement = output / 'replacement.html'
             replacement.write_bytes(path.read_bytes())
-            observed = _attempt_held_replacement(replacement, path)
+            observed = {}
             replacements.append(observed)
+            _attempt_held_replacement(replacement, path, observed)
             if not observed['completed']:
                 # The attack was prevented. Still exercise failed acceptance,
                 # rather than treating an unmodified output as a mutation.
@@ -524,8 +536,9 @@ def test_foreign_report_replacement_survives_failed_postpublication_check(tmp_pa
         real(*args, **kwargs)
         replacement = output / 'foreign.md'
         replacement.write_bytes(foreign)
-        observed = _attempt_held_replacement(replacement, output / 'review-report.md')
+        observed = {}
         replacements.append(observed)
+        _attempt_held_replacement(replacement, output / 'review-report.md', observed)
         if not observed['completed']:
             raise ValueError('acceptance stopped after native report replacement denial')
     monkeypatch.setattr(cli, '_publish_qa_evidence', replace_report)
@@ -796,3 +809,103 @@ def test_repeated_real_preformatted_qa_replaces_legitimate_prior_evidence(tmp_pa
     assert second['normalization'] == first['normalization']
     assert not list(output.glob('.qa-evidence-*'))
     assert all((run / name).read_bytes() == payload for name, payload in raw.items())
+
+
+@pytest.mark.parametrize('failure_type', [None, OSError, KeyboardInterrupt])
+def test_qa_stage_cleanup_preserves_foreign_children_and_closes_anchor(tmp_path, monkeypatch, failure_type):
+    import web_translator.pdf_assemble as storage
+    from web_translator.models import MasterReview, QAResult
+    output = tmp_path / 'output'
+    output.mkdir()
+    stages = []
+    real_create = storage._create_unique_child_directory
+    def track_stage(*args):
+        result = real_create(*args)
+        stages.append(result[1])
+        return result
+    monkeypatch.setattr(storage, '_create_unique_child_directory', track_stage)
+    failure = failure_type('stop after a foreign child appeared') if failure_type else None
+    observed = {}
+    def publish():
+        with cli._preformatted_qa_evidence(output) as transaction:
+            transaction.publish(QAResult(False, [], [], []), MasterReview([], {}, {}), None)
+            child = stages[0].path / 'foreign.txt'
+            child.write_bytes(b'foreign child must survive\n')
+            observed['path'] = child
+            observed['identity'] = (child.stat().st_dev, child.stat().st_ino)
+            if failure is not None:
+                raise failure
+    if failure is None:
+        publish()
+    else:
+        with pytest.raises(failure_type) as caught:
+            publish()
+        assert caught.value is failure
+        assert not (output / 'manifest.json').exists()
+        assert not (output / 'review-report.md').exists()
+    child = observed['path']
+    assert (child.stat().st_dev, child.stat().st_ino) == observed['identity']
+    assert child.read_bytes() == b'foreign child must survive\n'
+    assert stages[0].descriptor is None and stages[0].path_anchor is None
+
+
+def test_qa_stage_cleanup_preserves_foreign_directory_identity(tmp_path):
+    from web_translator.models import MasterReview, QAResult
+    output = tmp_path / 'output'
+    output.mkdir()
+    failure = ValueError('stop after stage directory replacement')
+    with pytest.raises(ValueError) as caught:
+        with cli._preformatted_qa_evidence(output) as transaction:
+            transaction.publish(QAResult(False, [], [], []), MasterReview([], {}, {}), None)
+            stage = next(output.glob('.qa-evidence-*'))
+            owned_identity = (stage.stat().st_dev, stage.stat().st_ino)
+            moved = output / 'moved-owned-stage'
+            foreign = output / 'foreign-stage'
+            foreign.mkdir()
+            foreign_identity = (foreign.stat().st_dev, foreign.stat().st_ino)
+            assert foreign_identity != owned_identity
+            try:
+                stage.rename(moved)
+            except PermissionError as error:
+                if os.name != 'nt' or error.winerror not in {5, 32}:
+                    raise
+                assert (stage.stat().st_dev, stage.stat().st_ino) == owned_identity
+                assert list(stage.iterdir()) == []
+                preserved = foreign
+            else:
+                foreign.rename(stage)
+                preserved = stage
+            raise failure
+    assert caught.value is failure
+    assert (preserved.stat().st_dev, preserved.stat().st_ino) == foreign_identity
+    assert list(preserved.iterdir()) == []
+    assert not (output / 'manifest.json').exists()
+    assert not (output / 'review-report.md').exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requires native Windows checked DELETE-directory handles')
+def test_native_windows_qa_removes_empty_owned_stages_and_closes_mutation_handles(tmp_path, monkeypatch):
+    import web_translator.pdf_assemble as storage
+    import web_translator.pdf_qa as pdf_qa
+    from web_translator.models import MasterReview, QAResult
+    output = tmp_path / 'output'
+    output.mkdir()
+    (output / 'manifest.json').write_bytes(b'{"qa_status":"failed","old":true}\n')
+    (output / 'review-report.md').write_bytes(b'# Previous FAIL\n')
+    handles = []
+    real_open = pdf_qa._open_windows_qa_mutation_directory
+    def track_handle(*args):
+        handle = real_open(*args)
+        handles.append(handle)
+        return handle
+    monkeypatch.setattr(pdf_qa, '_open_windows_qa_mutation_directory', track_handle)
+    with cli._preformatted_qa_evidence(output) as transaction:
+        # Force a second exact owned recovery directory before successful cleanup.
+        backup = next(output.glob('.qa-evidence-*/prior-manifest.json'))
+        backup.write_bytes(b'changed backup\n')
+        transaction.publish(QAResult(False, [], [], []), MasterReview([], {}, {}), None)
+    assert not list(output.glob('.qa-evidence-*'))
+    assert len(handles) == 2
+    for handle in handles:
+        with pytest.raises(storage.PdfAssemblyError):
+            storage._windows_file_identity(handle, require_regular=False)

@@ -1394,6 +1394,7 @@ def _preformatted_qa_evidence(output_dir):
     """
     import web_translator.pdf_assemble as anchored
     from web_translator.pdf_extract_transaction import _write_private_file
+    from web_translator.pdf_qa import PdfQAFailure, _open_windows_qa_mutation_directory
 
     _validate_qa_output_path(output_dir)
     root = anchored._open_directory_anchor(output_dir, 'QA evidence output')
@@ -1441,6 +1442,29 @@ def _preformatted_qa_evidence(output_dir):
         recovery_name, recovery = anchored._create_unique_child_directory(root, '.qa-evidence-', 'QA exact recovery')
         recovery_stages.append((recovery_name, recovery))
         secure_backup(recovery, name)
+
+    def close_directory(name, directory, *, remove):
+        handle = None
+        try:
+            if not remove:
+                return
+            directory.verify_visible()
+            if anchored._anchored_directory_names(directory):
+                return
+            if os.name == 'nt':
+                handle = _open_windows_qa_mutation_directory(root, name, directory.identity)
+                # The checked opener binds the visible identity. Recheck held
+                # children too; never recursively delete a foreign entry.
+                if not anchored._anchored_directory_names(directory):
+                    anchored._windows_delete_open_file(handle)
+            else:
+                anchored._remove_owned_directory(root, name, directory.identity)
+        except (anchored.PdfAssemblyError, PdfQAFailure, OSError, NotImplementedError):
+            pass
+        finally:
+            if handle is not None:
+                anchored.pdf_acquire_module._close_windows_handle(handle)
+            directory.close()
 
     try:
         stage_name, stage = anchored._create_unique_child_directory(root, '.qa-evidence-', 'QA evidence recovery')
@@ -1522,16 +1546,12 @@ def _preformatted_qa_evidence(output_dir):
         if completed:
             for name, identity in recovery.owned_files.items():
                 anchored._remove_owned_file(recovery, name, anchored._PublishedFile(identity))
-        recovery.close()
-        if completed:
-            anchored._remove_owned_directory(root, recovery_name, recovery.identity)
+        close_directory(recovery_name, recovery, remove=completed)
     if stage is not None:
         for name, identity in stage.owned_files.items():
             if completed or name.startswith('new-'):
                 anchored._remove_owned_file(stage, name, anchored._PublishedFile(identity))
-        stage.close()
-        if completed or not originals:
-            anchored._remove_owned_directory(root, stage_name, stage.identity)
+        close_directory(stage_name, stage, remove=completed or not originals)
     root.close()
     if failure is not None:
         raise failure
