@@ -137,10 +137,6 @@ def _new_lines(
         body = chars[cursor:end]
         separator = chars[end:match.end()] if match else []
         ids = {item[3] for item in body + separator if item[3] is not None}
-        if ids and any(item[3] is None for item in body if not item[0].isspace()):
-            raise PreformattedContractError("unrepresentable mixed prose/code DOM boundary on one line")
-        if len(ids) > 1:
-            raise PreformattedContractError("unrepresentable multiple constraints on one line")
         lines.append(PreLine(
             id=f"line-{first_line + len(lines):06d}", pre_id=pre_id,
             ordinal=len(lines) + 1, text=value[cursor:end],
@@ -331,6 +327,19 @@ def _validate_metadata(block, line_by_id: dict[str, PreLine], blocks) -> None:
         raise PreformattedContractError("role-inapplicable metadata fields are invalid")
 
 
+def _has_unconstrained_text(line: PreLine, constraints: dict[str, PreConstraint]) -> bool:
+    """Inspect recorded ranges only; this does not classify the surrounding text."""
+    ranges = [(constraints[key].text_start, constraints[key].text_end)
+              for key in line.constraint_ids]
+    column = 0
+    for item in line.slices:
+        for offset in range(item["start"], item["end"]):
+            if not line.text[column].isspace() and not any(first <= offset < last for first, last in ranges):
+                return True
+            column += 1
+    return False
+
+
 def validate_review(
     analysis: PreformattedAnalysis,
     packages: tuple[ClassificationPackage, ...],
@@ -352,6 +361,7 @@ def validate_review(
     if [b.id for b in review.blocks] != [f"block-{i:06d}" for i in range(1, len(review.blocks) + 1)]:
         raise PreformattedContractError("review block id sequence is invalid")
     line_by_id = {line.id: line for line in analysis.lines}
+    constraint_by_id = {constraint.id: constraint for constraint in analysis.constraints}
     actual = [line_id for block in review.blocks for line_id in block.line_ids]
     expected = [line.id for line in analysis.lines]
     if actual != expected:
@@ -365,10 +375,19 @@ def validate_review(
         if block.role == "unknown":
             raise PreformattedContractError("unknown block role is unresolved required")
         constrained = [line_by_id[line_id] for line_id in block.line_ids if line_by_id[line_id].constraint_ids]
-        if constrained and (block.role != "literal-code" or len(constrained) != len(block.line_ids)):
-            raise PreformattedContractError("explicit code constraint cannot be reclassified")
-        if block.role == "literal-code" and not constrained:
-            raise PreformattedContractError("literal-code requires an explicit source constraint")
+        if constrained and block.role != "literal-code":
+            # A whole inline <code> remains opaque to the shared extractor.
+            # Standalone constrained lines are still mandatory literal code,
+            # and no constraint may be divided between reviewed blocks.
+            constraint_ids = {key for line in constrained for key in line.constraint_ids}
+            for key in constraint_ids:
+                constraint = constraint_by_id[key]
+                if (block.role not in {"prose", "heading", "list-item", "caption"}
+                        or constraint.path.rsplit("/", 1)[-1].split("[")[0] != "code"
+                        or not set(constraint.line_ids).issubset(block.line_ids)
+                        or not any(_has_unconstrained_text(line_by_id[line_id], constraint_by_id)
+                                   for line_id in constraint.line_ids)):
+                    raise PreformattedContractError("explicit code constraint cannot be reclassified or split")
         text = "".join(line_by_id[line_id].text + line_by_id[line_id].separator for line_id in block.line_ids)
         if sum(len(line_by_id[line_id].text) for line_id in block.line_ids) > _MAX_CHARS:
             raise PreformattedContractError(f"review block exceeds {_MAX_CHARS} character unit budget")

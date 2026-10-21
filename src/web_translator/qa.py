@@ -96,10 +96,12 @@ def run_qa(inputs: QAInputs) -> QAResult:
     if not isinstance(inputs, QAInputs):
         raise TypeError("inputs must be QAInputs")
     known_preformatted = _has_preformatted_state(inputs.source_html.parent)
-    if inputs.normalization is None and not known_preformatted:
-        return _run_qa(inputs)
     result = None
     try:
+        if inputs.normalization is None and not known_preformatted:
+            with _hold_legacy_qa_state(inputs.source_html.parent):
+                result = _run_qa(inputs)
+            return result
         if inputs.normalization is None:
             raise ValueError('preformatted-provenance: known preformatted source requires normalization evidence')
         _prepare_preformatted_screenshots(inputs.source_html.parent, inputs.screenshot_dir)
@@ -118,6 +120,43 @@ def run_qa(inputs: QAInputs) -> QAResult:
                             capture_metadata=dict(inputs.capture_metadata), normalization=inputs.normalization)
         return replace(result, passed=False, required_findings=[*result.required_findings, finding])
     return result
+
+
+@contextmanager
+def _hold_legacy_qa_state(run_dir: Path):
+    """Bind direct legacy acceptance to a live absence inventory, not capture metadata."""
+    with ExitStack() as stack:
+        if not os.path.lexists(run_dir):
+            # Preserve the ordinary missing-source diagnostic.
+            yield
+            if os.path.lexists(run_dir):
+                raise ValueError('QA source directory appeared during checks')
+            return
+        anchored._reject_linked_ancestors(run_dir)
+        root = anchored._open_directory_anchor(run_dir, 'legacy QA state')
+        stack.callback(root.close)
+        assets = None
+        if 'assets' in anchored._anchored_directory_names(root):
+            assets = anchored._open_existing_child_directory(root, 'assets', 'legacy QA assets')
+            stack.callback(assets.close)
+
+        def verify():
+            root.verify_visible()
+            names = anchored._anchored_directory_names(root)
+            if ('preformatted' in names or 'preformatted-source.html' in names
+                    or any(name.startswith('.preformatted-') for name in names)):
+                raise ValueError('preformatted state requires normalization evidence')
+            if ('assets' in names) != (assets is not None):
+                raise ValueError('QA asset inventory changed during checks')
+            if assets is not None:
+                assets.verify_visible()
+                if any(name.startswith('wt-preformatted-')
+                       for name in anchored._anchored_directory_names(assets)):
+                    raise ValueError('preformatted assets require normalization evidence')
+
+        verify()
+        yield
+        verify()
 
 
 def _has_preformatted_state(run_dir: Path) -> bool:

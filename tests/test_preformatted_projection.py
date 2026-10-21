@@ -138,6 +138,38 @@ def test_projection_keeps_anchor_ownership_or_rejects_unsafe_boundary():
     assert BeautifulSoup(artifact.unmarked_html, "html.parser").find_all(id="cross")[0]["href"] == "/safe"
 
 
+def test_inline_code_cannot_be_split_between_reviewed_prose_blocks():
+    source = '<pre>Call <code id="api">open(\npath)</code> to read.</pre>'
+    project, _, _ = _api()
+    with pytest.raises(ValueError, match="constraint|cross-node|DOM boundary"):
+        analysis, review = _review(source, [
+            {"line_ids": ["line-000001"], "role": "prose", "evidence": "Call"},
+            {"line_ids": ["line-000002"], "role": "prose", "evidence": "to read."},
+        ])
+        project(source, analysis, review)
+
+
+@pytest.mark.parametrize('mutation', ['content', 'attributes', 'removed'])
+def test_inline_code_is_source_bound_inside_translated_prose(mutation):
+    source = '<pre>Call <code class="api" title="Exact">open(path)</code> to read.</pre>'
+    analysis, review = _review(source, [
+        {"line_ids": ["line-000001"], "role": "prose", "evidence": "Call"},
+    ])
+    project, _, verify_output = _api()
+    artifact = project(source, analysis, review)
+    rendered = artifact.unmarked_html.replace('Call ', '호출: ').replace(' to read.', ' 읽습니다.')
+    verify_output(artifact, rendered)
+    soup = BeautifulSoup(rendered, 'html.parser')
+    if mutation == 'content':
+        soup.code.string = 'close(path)'
+    elif mutation == 'attributes':
+        soup.code['title'] = 'Changed'
+    else:
+        soup.code.unwrap()
+    with pytest.raises(ValueError, match="constraint"):
+        verify_output(artifact, str(soup))
+
+
 def test_wrapped_url_is_one_exact_opaque_span():
     # Catches invented hrefs and joining a source URL that physically wraps.
     url = "https://exam\nple.test/a?x=1&y=2"

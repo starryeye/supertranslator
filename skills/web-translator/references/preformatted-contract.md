@@ -33,11 +33,11 @@ workflow. It is not another translator or permission to author HTML. The origina
 
 | Role | Decision and exact metadata |
 | --- | --- |
-| `prose` | Reflow and translate prose. `{}` |
+| `prose` | Reflow and translate prose, preserving whole inline `<code>` nodes as opaque source content. `{}` |
 | `heading` | Translate a source heading. `{"level": 1}` through level 6; no impossible hierarchy jumps. |
 | `list-item` | Translate item prose; retain its original marker, without a second generated label. `{"depth": 0, "marker_span": {"line_id": "line-000001", "start": 0, "end": 2}}`; span must identify the original marker, depth starts at 0 and increases at most one. |
 | `caption` | Translate caption. `{}` or `{"adjacent_block_id": "block-000002"}` for an immediately adjacent diagram/table only. |
-| `literal-code` | Requires an explicit source code constraint; never guess code from punctuation. `{}` |
+| `literal-code` | Preserve source-evidenced code or commands exactly, including spacing. AI/master review may identify unmarked examples from their content and surrounding explanation; HTML code markup is not required. `{}` |
 | `literal-diagram` | Preserve exact drawing, including labels and spacing; explain its graphical role. `{}` |
 | `literal-table` | Phase 1 preserves the whole fixed table, including English text. Explain column/alignment evidence and disclose this limitation. `{}` |
 | `literal-layout` | Preserve genuine page furniture or fixed layout; explain why it is not document prose. `{}` |
@@ -47,6 +47,13 @@ workflow. It is not another translator or permission to author HTML. The origina
 Do not add rationale keys to the strict wire record. Its `evidence` is a literal
 substring of the block's decoded text (including recorded separators), not a free-form
 explanation; put the master's explanation in the separate inspection record.
+
+Explicit source-code constraints remain mandatory protection. Keep standalone
+constrained code literal. When a complete inline `<code>` node occurs within prose,
+group its containing prose without splitting the node or its anchor; the existing
+extractor protects the code and its attributes while translating surrounding text.
+Inspect that preservation and both boundaries. An ambiguous meaning or unsafe
+node split remains `unknown`/unresolved rather than permission to omit prose.
 
 ## Exact reviewed record
 

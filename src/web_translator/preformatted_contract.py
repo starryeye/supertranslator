@@ -420,6 +420,14 @@ class ReviewedBlock:
         spans = tuple(_map(x, "literal span", {"kind", "start_line_id", "start_column",
                                                  "end_line_id", "end_column", "source_sha256"})
                       for x in _list(d["literal_spans"], "block.literal_spans"))
+        for span in spans:
+            if _str(span["kind"], "literal span kind") not in {"literal", "url", "marker"}:
+                _fail("literal span kind is unknown")
+            _id(span["start_line_id"], "literal span start_line_id", "line")
+            _id(span["end_line_id"], "literal span end_line_id", "line")
+            _int(span["start_column"], "literal span start_column")
+            _int(span["end_column"], "literal span end_column")
+            _hash(span["source_sha256"], "literal span source_sha256")
         return cls(_id(d["id"], "block.id", "block"), _id(d["pre_id"], "block.pre_id", "pre"),
                    _strings(d["line_ids"], "block.line_ids", "line"), role,
                    _str(d["evidence"], "block.evidence"), dict(metadata),

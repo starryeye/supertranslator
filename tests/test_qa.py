@@ -66,6 +66,29 @@ def _inputs(source: Path, output: Path, **overrides: object) -> QAInputs:
     return QAInputs(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize('indicator', ['preformatted', 'assets'])
+def test_direct_legacy_qa_holds_absence_through_checks(tmp_path, monkeypatch, indicator):
+    # A late state appearance must invalidate even direct callers without capture.json.
+    import web_translator.qa as qa
+    source, output = _write_pages(tmp_path)
+    real = qa._run_qa
+
+    def check_then_prepare(inputs):
+        result = real(inputs)
+        if indicator == 'assets':
+            (source.parent / 'assets').mkdir()
+            (source.parent / 'assets/wt-preformatted-new.css').write_bytes(b'/* new */')
+        else:
+            (source.parent / 'preformatted').mkdir()
+        return result
+
+    monkeypatch.setattr(qa, '_run_qa', check_then_prepare)
+    result = qa.run_qa(_inputs(source, output, translated_segment_ids=set()))
+    assert not result.passed
+    assert 'preformatted-provenance' in {f.code for f in result.required_findings}
+    assert not (source.parent / 'capture.json').exists()
+
+
 def test_qa_fails_incomplete_translation_and_broken_critical_asset(tmp_path: Path) -> None:
     source, output = _write_pages(tmp_path)
     result = run_qa(

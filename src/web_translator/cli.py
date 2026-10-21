@@ -754,12 +754,31 @@ def _qa_command(args: argparse.Namespace) -> None:
             except (ValueError, PdfAssemblyError, OSError) as error:
                 raise QAFailure(f'screenshot-directory-unsafe: {error}') from error
             with hold_processing_source(args.run_dir, phase='qa') as source:
+                if source.normalization is not None:
+                    # The released inventory is only a routing hint. A new
+                    # normalized source cannot enter legacy publication.
+                    preformatted = True
+                    with _preformatted_qa_evidence(args.output_dir):
+                        raise ValueError('preformatted state appeared after QA inventory')
                 _qa_selected_command(args, source)
     except (ValueError, PdfAssemblyError, OSError) as error:
-        if preformatted:
-            code = 'preformatted-literal-integrity' if str(error).startswith('preformatted-literal-integrity:') else 'preformatted-provenance'
-            raise QAFailure(f'{code}: {error}') from error
-        raise CLIContractError(str(error)) from error
+        failure = error
+    else:
+        return
+    if not preformatted and _has_preformatted_state(args.run_dir):
+        # New pending/invalid state may fail before the selector can yield.
+        # Quarantine prior evidence too, outside the active exception handler
+        # so recovery creation retains its normal anchored lifecycle.
+        preformatted = True
+        try:
+            with _preformatted_qa_evidence(args.output_dir):
+                raise failure
+        except (ValueError, PdfAssemblyError, OSError) as error:
+            failure = error
+    if preformatted:
+        code = 'preformatted-literal-integrity' if str(failure).startswith('preformatted-literal-integrity:') else 'preformatted-provenance'
+        raise QAFailure(f'{code}: {failure}') from failure
+    raise CLIContractError(str(failure)) from failure
 
 
 def _qa_selected_command(args, source, transaction=None, revalidate=None) -> None:

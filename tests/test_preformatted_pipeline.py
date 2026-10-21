@@ -180,6 +180,208 @@ def _block(number, pre, lines, role, evidence, metadata=None, spans=None):
             'evidence': evidence, 'metadata': metadata or {}, 'literal_spans': spans or []}
 
 
+def _inventory_before_state_appears(monkeypatch, module, run, tmp_path):
+    """Actually remove every state indicator for the released inventory."""
+    real = module._has_preformatted_state
+    observed = []
+
+    def transition(path):
+        if observed:
+            return real(path)
+        moved = []
+        for source in [run / 'preformatted', run / 'preformatted-source.html',
+                       *sorted((run / 'assets').glob('wt-preformatted-*'))]:
+            saved = tmp_path / ('saved-' + source.name)
+            source.rename(saved)
+            moved.append((source, saved))
+        try:
+            absent = real(path)
+            assert absent is False
+        finally:
+            for source, saved in moved:
+                saved.rename(source)
+        assert real(path) is True
+        observed.append(absent)
+        return absent
+
+    monkeypatch.setattr(module, '_has_preformatted_state', transition)
+    return observed
+
+
+@pytest.mark.parametrize('late_change', ['source', 'output', 'foreign-report'])
+def test_qa_inventory_to_selected_source_race_never_leaves_owned_pass(
+    tmp_path, monkeypatch, late_change
+):
+    # The legacy route must not publish a normalized PASS without a transaction.
+    run, output = _assembled(tmp_path)
+    prior = {'manifest.json': b'{"qa_status":"passed","old":true}\n',
+             'review-report.md': b'# Exact old report\n**PASS**\n'}
+    for name, payload in prior.items():
+        (output / name).write_bytes(payload)
+    foreign = output / 'foreign-note.md'
+    foreign.write_bytes(b'Foreign survivor\n')
+    observed = _inventory_before_state_appears(monkeypatch, cli, run, tmp_path)
+    real_publish = cli._publish_qa_evidence
+    replacements = []
+    publications = []
+
+    def publish_then_change(*args, **kwargs):
+        publications.append(True)
+        real_publish(*args, **kwargs)
+        if late_change == 'foreign-report':
+            replacements.append(_attempt_held_replacement(
+                foreign, output / 'review-report.md'))
+            raise ValueError('stop acceptance after attempted foreign replacement')
+        path = run / 'source.html' if late_change == 'source' else output / 'index.html'
+        path.write_bytes(path.read_bytes() + b'\n')
+
+    monkeypatch.setattr(cli, '_publish_qa_evidence', publish_then_change)
+    assert _command('qa', run, output) != 0
+    assert observed == [False]
+    assert publications == []
+    _no_pass(output)
+    for name, payload in prior.items():
+        assert any(p.read_bytes() == payload
+                   for p in output.glob('.qa-evidence-*/prior-' + name))
+    if replacements:
+        _assert_foreign_replacement_survives(replacements[0])
+    else:
+        assert foreign.read_bytes() == b'Foreign survivor\n'
+
+
+@pytest.mark.parametrize('source_name', ['source.html', 'preformatted-source.html'])
+def test_direct_qa_absent_inventory_cannot_bypass_new_state(
+    tmp_path, monkeypatch, source_name
+):
+    from web_translator.models import QAInputs, MasterReview
+    import web_translator.qa as qa
+    run, output = _assembled(tmp_path)
+    observed = _inventory_before_state_appears(monkeypatch, qa, run, tmp_path)
+    result = qa.run_qa(QAInputs(
+        run / source_name, output / 'index.html', 'https://example.com/',
+        {'s'}, {'s'}, [], [], run / 'qa-screenshots', MasterReview([], {}, {})))
+    assert observed == [False]
+    assert not result.passed
+    assert 'preformatted-provenance' in {f.code for f in result.required_findings}
+    assert result.screenshots == []
+
+
+def test_qa_inventory_to_invalid_state_quarantines_prior_pass(tmp_path, monkeypatch):
+    # Selection can fail before yielding the normalized source; prior PASS is still stale.
+    run, output = _assembled(tmp_path)
+    prior = {'manifest.json': b'{"qa_status":"passed","old":true}\n',
+             'review-report.md': b'# Exact old report\n**PASS**\n'}
+    for name, payload in prior.items():
+        (output / name).write_bytes(payload)
+    survivor = output / 'foreign-note.md'
+    survivor.write_bytes(b'Foreign survivor\n')
+    observed = _inventory_before_state_appears(monkeypatch, cli, run, tmp_path)
+    transition = cli._has_preformatted_state
+
+    def transition_then_corrupt(path):
+        absent = transition(path)
+        if not absent:
+            (run / 'preformatted/provenance.json').unlink()
+        return absent
+
+    monkeypatch.setattr(cli, '_has_preformatted_state', transition_then_corrupt)
+    assert _command('qa', run, output) != 0
+    assert observed == [False]
+    _no_pass(output)
+    for name, payload in prior.items():
+        assert any(p.read_bytes() == payload
+                   for p in output.glob('.qa-evidence-*/prior-' + name))
+    assert survivor.read_bytes() == b'Foreign survivor\n'
+
+
+@pytest.mark.parametrize('field', [
+    'kind', 'start_line_id', 'end_line_id', 'start_column', 'end_column', 'source_sha256'])
+@pytest.mark.parametrize('bad_value', [{}, []])
+def test_materialize_malformed_literal_span_scalars_return_one_status(
+    tmp_path, capsys, field, bad_value
+):
+    # Non-string kind must never leak an unhashable mapping TypeError.
+    run, _ = _run(tmp_path)
+    assert _command('prepare-preformatted', run) == 0
+    _review_classification(run)
+    path = run / 'preformatted/review.json'
+    payload = json.loads(path.read_bytes())
+    payload['blocks'][0]['literal_spans'][0][field] = bad_value
+    path.write_bytes(canonical_bytes(payload))
+    capsys.readouterr()
+    assert _command('materialize-preformatted', run) == 4
+    captured = capsys.readouterr()
+    assert [json.loads(line) for line in captured.out.splitlines()] == [
+        {'command': 'materialize-preformatted', 'exit_code': 4, 'status': 'error'}]
+    assert not (run / 'preformatted-source.html').exists()
+    assert not (run / 'preformatted/provenance.json').exists()
+    assert not list((run / 'assets').glob('wt-preformatted-*'))
+
+
+@pytest.mark.parametrize('inline', [False, True, 'anchor'])
+def test_reviewed_code_reaches_real_consumers_without_translating_code(tmp_path, inline):
+    # Markup-only semantic classification and mixed-line rejection both lose valid prose.
+    if inline:
+        middle = ('<a id="reader" href="#notes"><code class="api" title="Exact API">'
+                  'open(path)</code></a>' if inline == 'anchor' else '<code>open(path)</code>')
+        body = f'Call {middle} to read the file.'
+        blocks = [_block(1, 1, [1], 'prose', 'Call')]
+        expected = ['Call ⟦WT:000000⟧ to read the file.']
+        if inline == 'anchor':
+            expected = ['Call ⟦WT:000000⟧⟦WT:000001⟧⟦WT:000002⟧ to read the file.']
+    else:
+        body = 'Run the command below.\n  printf  "hello"  \nThen inspect the output.'
+        blocks = [_block(1, 1, [1], 'prose', 'Run the command below.'),
+                  _block(2, 1, [2], 'literal-code', 'printf  "hello"'),
+                  _block(3, 1, [3], 'prose', 'Then inspect the output.')]
+        expected = ['Run the command below.\n', 'Then inspect the output.']
+    source = ('<!doctype html><html><head><meta charset="utf-8"></head><body>'
+              f'<pre id="notes">{body}</pre></body></html>').encode()
+    run, output = _generic_run(tmp_path, source)
+    assert _command('prepare-preformatted', run) == 0
+    _generic_review(run, blocks)
+    assert _command('materialize-preformatted', run) == 0
+    assert _command('extract', run) == 0
+    segments = [s for s in read_segments(run / 'segments.jsonl') if s.target]
+    assert [s.source_text for s in segments] == expected
+    assert _command('plan-zones', run) == 0
+    (run / 'glossary.json').write_text('{}\n', encoding='utf-8')
+    (run / 'document-summary.txt').write_text('Read the file or inspect the command output.\n', encoding='utf-8')
+    assert _command('prepare-assignments', run) == 0
+    (run / 'translations').mkdir()
+    translated = [s.source_text.replace('Call ', '호출: ').replace(' to read the file.', ' 파일을 읽습니다.')
+                  .replace('Run the command below.', '아래 명령을 실행합니다.')
+                  .replace('Then inspect the output.', '그런 다음 출력을 확인합니다.') for s in segments]
+    (run / 'translations/zone-001.jsonl').write_text(''.join(json.dumps({
+        'segment_id': s.id, 'text': text, 'notes': None, 'glossary_observations': {}
+    }, ensure_ascii=False) + '\n' for s, text in zip(segments, translated, strict=True)), encoding='utf-8')
+    (run / 'review.json').write_text(json.dumps({
+        'unresolved_required': [], 'retries': {'zone-001': 0},
+        'section_findings': {'zone-001': [
+            {'dimension': name, 'verdict': 'pass', 'evidence': 'Authored fixture review: prose translated, code exact.'}
+            for name in DIMENSIONS]}}), encoding='utf-8')
+    assert _command('validate-translations', run) == 0
+    assert _command('assemble', run, output) == 0
+    assert _command('qa', run, output) == 0
+    soup = BeautifulSoup((output / 'index.html').read_bytes().decode('utf-8'), 'html.parser')
+    if inline:
+        assert soup.code.get_text() == 'open(path)'
+        assert '호출: ' in soup.get_text() and '파일을 읽습니다.' in soup.get_text()
+        if inline == 'anchor':
+            assert soup.code.attrs == {'class': ['api'], 'title': 'Exact API'}
+            assert soup.find(id='reader')['href'] == '#notes'
+        analysis = json.loads((run / 'preformatted/analysis.json').read_bytes())
+        evidence = json.loads((run / 'preformatted/provenance.json').read_bytes())['evidence']
+        assert evidence['constraints'][0]['path'] == analysis['constraints'][0]['path']
+    else:
+        assert soup.select_one('[data-wt-preformatted-literal]').get_text() == '  printf  "hello"  \n'
+        assert '아래 명령을 실행합니다.' in soup.get_text()
+        assert '그런 다음 출력을 확인합니다.' in soup.get_text()
+    assert (run / 'source.html').read_bytes() == source
+    assert json.loads((output / 'manifest.json').read_bytes())['qa_status'] == 'passed'
+    assert len(list((run / 'qa-screenshots').glob('*.png'))) == 2
+
+
 def test_generic_code_only_preparation_is_exact_noop(tmp_path):
     # Reclassifying explicit code or publishing unnecessary state breaks this.
     source = b'<html><body><p>Compile the sample.</p><pre><code>x = 1\r\nprint(x)</code></pre></body></html>'
