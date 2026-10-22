@@ -540,6 +540,111 @@ def test_ordinary_neighbor_anchor_attribute_translation_remains_valid(tmp_path):
     _api()[2](artifact, rendered)
 
 
+def test_extracted_id_targets_have_source_bound_markers_and_unchanged_attributes(tmp_path):
+    # Catches treating ordinary extractor metadata as an authored attribute change.
+    from web_translator.extract import extract_segments
+
+    source = ('<html><head></head><body><pre id="article">Reviewed prose</pre>'
+              '<input id="query" type="text" aria-label="Search documents" '
+              'placeholder="Find a document" data-ajax-url="/lookup">'
+              '<a id="manual" href="/manual" title="Read manual">Open manual</a>'
+              '</body></html>')
+    analysis, review = _review(source, [
+        {"line_ids": ["line-000001"], "role": "prose", "evidence": "Reviewed prose"},
+    ])
+    artifact = _api()[0](source, analysis, review)
+    staged = tmp_path / "derived.html"
+    staged.write_text(artifact.unmarked_html, encoding="utf-8")
+    segments = extract_segments(staged, tmp_path / "segments.jsonl")
+    marked = staged.read_text(encoding="utf-8")
+    soup = BeautifulSoup(marked, "html.parser")
+    input_tag, link_tag = soup.find(id="query"), soup.find(id="manual")
+    assert input_tag is not None and link_tag is not None
+    assert input_tag["data-wt-segment"] in {segment.id for segment in segments}
+    assert link_tag["data-wt-segment"] in {segment.id for segment in segments}
+    assert input_tag["data-ajax-url"] == "/lookup"
+    assert link_tag["href"] == "/manual"
+    _api()[2](artifact, marked, segments=segments)
+
+    for changed in (
+        marked.replace('data-ajax-url="/lookup"', 'data-ajax-url="/evil"'),
+        marked.replace('aria-label="Search documents"', 'aria-label="Forged search"'),
+        marked.replace('href="/manual"', 'href="/evil"'),
+        marked.replace('title="Read manual"', 'title="Forged manual"'),
+        marked.replace('data-wt-segment="' + input_tag["data-wt-segment"] + '"',
+                       'data-wt-segment="seg-999999"', 1),
+        marked.replace('data-wt-segment="' + input_tag["data-wt-segment"] + '"',
+                       'data-wt-segment="' + link_tag["data-wt-segment"] + '"', 1),
+        marked.replace('id="query"', 'id="query" data-unrelated="extra"', 1),
+        marked.replace('<body>', '<body data-wt-segment="seg-000001">', 1),
+    ):
+        with pytest.raises(ValueError):
+            _api()[2](artifact, changed, segments=segments)
+
+    moved = BeautifulSoup(marked, "html.parser")
+    query, manual = moved.find(id="query"), moved.find(id="manual")
+    assert query is not None and manual is not None
+    query["data-wt-segment"], manual["data-wt-segment"] = (
+        manual["data-wt-segment"], query["data-wt-segment"])
+    with pytest.raises(ValueError):
+        _api()[2](artifact, str(moved), segments=segments)
+    with pytest.raises(ValueError):
+        _api()[2](artifact, marked)  # unmarked/final contract has no markers
+
+
+def test_raw_source_cannot_supply_extraction_marker():
+    source = ('<html><head></head><body><pre>Reviewed prose</pre>'
+              '<input id="query" aria-label="Search" data-wt-segment="seg-000001">'
+              '</body></html>')
+    analysis, review = _review(source, [
+        {"line_ids": ["line-000001"], "role": "prose", "evidence": "Reviewed prose"},
+    ])
+    with pytest.raises(ValueError, match="reserved extraction marker"):
+        _api()[0](source, analysis, review)
+
+
+@pytest.mark.parametrize("literal_tag", ["kbd", "samp", "var"])
+@pytest.mark.parametrize("with_title", [False, True])
+def test_protected_only_ordinary_neighbor_uses_real_extractor_target_filter(
+    tmp_path, literal_tag, with_title
+):
+    # A text-node candidate with wholly protected markup is not an emitted
+    # segment unless its own translatable attribute supplies a location.
+    from web_translator.extract import extract_segments
+
+    title = ' title="Press Enter"' if with_title else ''
+    source = ('<html><head></head><body><pre>Reviewed prose</pre>'
+              f'<p id="literal"{title}><{literal_tag}>Enter</{literal_tag}></p>'
+              '<p id="ordinary">Neighbor prose</p></body></html>')
+    analysis, review = _review(source, [
+        {"line_ids": ["line-000001"], "role": "prose", "evidence": "Reviewed prose"},
+    ])
+    artifact = _api()[0](source, analysis, review)
+    staged = tmp_path / "derived.html"
+    staged.write_text(artifact.unmarked_html, encoding="utf-8")
+    segments = extract_segments(staged, tmp_path / "segments.jsonl")
+    marked = staged.read_text(encoding="utf-8")
+    soup = BeautifulSoup(marked, "html.parser")
+    literal, ordinary = soup.find(id="literal"), soup.find(id="ordinary")
+    assert literal is not None and ordinary is not None
+    assert len(segments) == (3 if with_title else 2)
+    assert bool(literal.get("data-wt-segment")) is with_title
+    assert ordinary.get("data-wt-segment") == segments[-1].id
+    if with_title:
+        assert "Press Enter" in segments[1].source_text
+        assert literal["title"] == "Press Enter"
+    _api()[2](artifact, marked, segments=segments)
+    if not with_title:
+        forged = BeautifulSoup(marked, "html.parser")
+        forged_literal = forged.find(id="literal")
+        forged_ordinary = forged.find(id="ordinary")
+        assert forged_literal is not None and forged_ordinary is not None
+        del forged_ordinary["data-wt-segment"]
+        forged_literal["data-wt-segment"] = segments[-1].id
+        with pytest.raises(ValueError, match="ownership"):
+            _api()[2](artifact, str(forged), segments=segments)
+
+
 def test_verifier_rejects_opaque_url_moved_outside_owned_block():
     url = "https://example.test"
     source = f'<html><head></head><body><pre>Read {url}</pre></body></html>'

@@ -16,7 +16,12 @@ from web_translator.preformatted_contract import (
     NORMALIZATION_POLICY, SCHEMA_VERSION, NormalizationSummary, PreformattedAnalysis, PreformattedContractError,
     ProjectionArtifact, ReviewedBlocks, canonical_sha256,
 )
-from web_translator.extract import _attribute_targets
+from web_translator.extract import (
+    _attribute_targets, _content_owners, _fragment_without_owned_descendants,
+    _has_translatable_text,
+)
+from web_translator.models import Segment
+from web_translator.protection import protect_fragment
 
 
 _FLOW = {"prose", "heading", "list-item", "caption"}
@@ -231,6 +236,8 @@ def project_preformatted(source_html: str, analysis: PreformattedAnalysis,
     """Project only reviewed blocks, retaining source DOM/attributes and exact literals."""
     _verify_input(source_html, analysis, review)
     soup = BeautifulSoup(source_html, "html.parser")
+    if soup.select_one("[data-wt-segment]") is not None:
+        _fail("raw source uses reserved extraction marker")
     offsets, _ = _text_nodes(soup)
     root_tags = {root.id: next((tag for tag in soup.find_all("pre") if _path(tag) == root.path), None)
                  for root in analysis.roots}
@@ -487,7 +494,8 @@ def encode_projection_transport(marked_html: str, artifact: ProjectionArtifact) 
                                              for item in artifact.evidence["constraints"]))
 
 
-def verify_projected_output(artifact: ProjectionArtifact, output_html: str) -> None:
+def verify_projected_output(artifact: ProjectionArtifact, output_html: str,
+                            *, segments: list[Segment] | None = None) -> None:
     """Check immutable block, anchor and literal identities after downstream assembly."""
     if not isinstance(artifact, ProjectionArtifact) or not isinstance(output_html, str):
         _fail("projection artifact and output HTML are required")
@@ -496,6 +504,46 @@ def verify_projected_output(artifact: ProjectionArtifact, output_html: str) -> N
             or artifact.summary.generated_assets[0]["sha256"] != _digest(artifact.css_bytes)):
         _fail("projection artifact digest mismatch")
     soup = BeautifulSoup(output_html, "html.parser")
+    markers = soup.select("[data-wt-segment]")
+    if segments is None:
+        if markers:
+            _fail("unmarked or final projection contains extraction markers")
+    else:
+        if [tag.get("data-wt-segment") for tag in markers] != [segment.id for segment in segments]:
+            _fail("extraction marker manifest order changed")
+        # Reuse the extractor's own target selection on the held, unmarked
+        # projection. The manifest names markers; source-derived targets own them.
+        source = BeautifulSoup(artifact.unmarked_html, "lxml")
+        source_tags = source.find_all(True)
+        names = _attribute_targets(source)
+        content_owners = _content_owners(source, set(names))
+        target_ids = content_owners | set(names)
+        expected_positions = []
+        for index, tag in enumerate(source_tags):
+            if id(tag) not in target_ids:
+                continue
+            fragment = _fragment_without_owned_descendants(tag, content_owners)
+            protected_fragment, _ = protect_fragment(fragment)
+            if (id(tag) in content_owners and _has_translatable_text(protected_fragment)) or names.get(id(tag)):
+                expected_positions.append(index)
+        marked_tags = BeautifulSoup(output_html, "lxml").find_all(True)
+        if len(marked_tags) != len(source_tags) or len(segments) != len(expected_positions):
+            _fail("extraction marker target count differs from source projection")
+        expected_by_position = {position: (ordinal, segment)
+                                for ordinal, (position, segment) in enumerate(zip(
+                                    expected_positions, segments, strict=True), 1)}
+        if len({segment.id for segment in segments}) != len(segments):
+            _fail("extraction segment IDs duplicated")
+        for position, (original, observed) in enumerate(zip(source_tags, marked_tags, strict=True)):
+            owned = expected_by_position.get(position)
+            segment = owned[1] if owned is not None else None
+            expected_id = segment.id if segment is not None else None
+            if (observed.name != original.name or observed.get("id") != original.get("id")
+                    or observed.get("data-wt-segment") != expected_id):
+                _fail("extraction marker identity or ownership changed")
+            if segment is not None and (not segment.target or segment.id != f"seg-{owned[0]:06d}"
+                                        or segment.locator != f"[data-wt-segment='{segment.id}']"):
+                _fail("extraction segment manifest identity changed")
     blocks = list(evidence["blocks"])
     found = soup.select("[data-wt-preformatted-block]")
     if [tag.get("data-wt-preformatted-block") for tag in found] != [x["id"] for x in blocks]:
@@ -536,9 +584,13 @@ def verify_projected_output(artifact: ProjectionArtifact, output_html: str) -> N
             _fail(f"original anchor ID missing or duplicated: {anchor['id']}")
         tag = matches[0]
         observed_attrs = _attrs(tag)
+        if segments is not None:
+            observed_attrs.pop("data-wt-segment", None)
         if tag.get("data-wt-preformatted-root") == anchor["root_id"]:
             observed_attrs.pop("data-wt-preformatted-root", None)
-        protected = set(anchor["attributes"]) - set(anchor["translated_attributes"])
+        protected = set(anchor["attributes"])
+        if segments is None:
+            protected -= set(anchor["translated_attributes"])
         if (set(observed_attrs) != set(anchor["attributes"])
                 or any(observed_attrs[name] != anchor["attributes"][name] for name in protected)):
             _fail(f"original anchor attributes/href changed: {anchor['id']}")
@@ -561,7 +613,11 @@ def verify_projected_output(artifact: ProjectionArtifact, output_html: str) -> N
     anonymous_positions = {}
     for ordinal, (item, tag) in enumerate(zip(anonymous_expected, anonymous_actual, strict=True)):
         observed = _attrs(tag)
-        protected = set(item["attributes"]) - set(item["translated_attributes"])
+        if segments is not None:
+            observed.pop("data-wt-segment", None)
+        protected = set(item["attributes"])
+        if segments is None:
+            protected -= set(item["translated_attributes"])
         if (set(observed) != set(item["attributes"])
                 or any(observed[name] != item["attributes"][name] for name in protected)):
             _fail("original anonymous anchor attributes/href changed")

@@ -180,6 +180,73 @@ def _block(number, pre, lines, role, evidence, metadata=None, spans=None):
             'evidence': evidence, 'metadata': metadata or {}, 'literal_spans': spans or []}
 
 
+def test_id_bearing_attribute_targets_complete_reviewed_web_pipeline(tmp_path):
+    # A capture-shaped fixture must survive the real extractor and browser QA.
+    source = (b'<!doctype html><html><head><meta charset="utf-8"></head><body>'
+              b'<pre id="article">Reviewed summary.</pre>'
+              b'<input id="query" type="text" aria-label="Search documents" '
+              b'placeholder="Find a document" data-ajax-url="/lookup">'
+              b'<a id="manual" href="/manual" title="Read manual">Open manual</a>'
+              b'</body></html>')
+    run, output = _generic_run(tmp_path, source)
+    assert _command('prepare-preformatted', run) == 0
+    _generic_review(run, [_block(1, 1, [1], 'prose', 'Reviewed summary.')])
+    assert _command('materialize-preformatted', run) == 0
+    assert _command('extract', run) == 0
+    assert (run / 'source.html').read_bytes() == source
+    marked = BeautifulSoup((run / 'preformatted-source.html').read_bytes(), 'html.parser')
+    assert marked.find(id='query')['data-wt-segment']
+    assert marked.find(id='manual')['data-wt-segment']
+    assert marked.find(id='query')['data-ajax-url'] == '/lookup'
+    assert marked.find(id='manual')['href'] == '/manual'
+    from web_translator.preformatted_runtime import hold_processing_source, verify_preformatted_output
+    marked_copy = tmp_path / 'held-marked-copy.html'
+    marked_bytes = (run / 'preformatted-source.html').read_bytes()
+    marked_copy.write_bytes(marked_bytes)
+    with hold_processing_source(run, phase='assemble') as held:
+        verify_preformatted_output(held, marked_copy)
+        marked_copy.write_bytes(marked_bytes.replace(
+            marked.find(id='query')['data-wt-segment'].encode(), b'seg-999999', 1))
+        with pytest.raises(ValueError):
+            verify_preformatted_output(held, marked_copy)
+    assert _command('plan-zones', run) == 0
+    (run / 'glossary.json').write_text('{}\n', encoding='utf-8')
+    (run / 'document-summary.txt').write_text('Reviewed summary and search controls.\n', encoding='utf-8')
+    assert _command('prepare-assignments', run) == 0
+    segments = [segment for segment in read_segments(run / 'segments.jsonl') if segment.target]
+    assert any('Search documents' in segment.source_text for segment in segments)
+    assert any('Read manual' in segment.source_text for segment in segments)
+    translations = [segment.source_text.replace('Reviewed summary.', '검토한 요약입니다.')
+                    .replace('Search documents', '문서 검색')
+                    .replace('Find a document', '문서 찾기')
+                    .replace('Read manual', '설명서 읽기')
+                    .replace('Open manual', '설명서 열기') for segment in segments]
+    assert any('문서 검색' in text for text in translations)
+    (run / 'translations').mkdir()
+    (run / 'translations/zone-001.jsonl').write_text(''.join(json.dumps({
+        'segment_id': segment.id, 'text': translated, 'notes': None,
+        'glossary_observations': {},
+    }, ensure_ascii=False) + '\n' for segment, translated in zip(segments, translations, strict=True)),
+        encoding='utf-8')
+    (run / 'review.json').write_text(json.dumps({
+        'unresolved_required': [], 'retries': {'zone-001': 0},
+        'section_findings': {'zone-001': [
+            {'dimension': name, 'verdict': 'pass',
+             'evidence': 'Authored fixture review of source and Korean target.'}
+            for name in DIMENSIONS]},
+    }), encoding='utf-8')
+    assert _command('validate-translations', run) == 0
+    assert _command('assemble', run, output) == 0
+    assert _command('qa', run, output) == 0
+    final = BeautifulSoup((output / 'index.html').read_bytes(), 'html.parser')
+    assert final.find(id='query')['aria-label'] == '문서 검색'
+    assert final.find(id='query')['placeholder'] == '문서 찾기'
+    assert final.find(id='query')['data-ajax-url'] == '/lookup'
+    assert final.find(id='manual')['title'] == '설명서 읽기'
+    assert final.find(id='manual')['href'] == '/manual'
+    assert not final.select('[data-wt-segment]')
+
+
 def _inventory_before_state_appears(monkeypatch, module, run, tmp_path):
     """Actually remove every state indicator for the released inventory."""
     real = module._has_preformatted_state

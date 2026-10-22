@@ -207,14 +207,15 @@ def _load(held: _HeldRun, *, phase: str | None = None) -> None:
         derived = held.read("preformatted-source.html")
         if _digest(derived) != (record.marked_sha256 or record.unmarked_sha256):
             _fail("derived source changed")
+        verified_segments = None
         if record.phase == "extracted":
             segments = held.read("segments.jsonl")
             if _digest(segments) != record.segments_sha256:
                 _fail("segments changed")
-            read_segments_stream(io.StringIO(segments.decode("utf-8")))
+            verified_segments = read_segments_stream(io.StringIO(segments.decode("utf-8")))
         elif "segments.jsonl" in root_names:
             _fail("projected run has orphan extraction segments")
-        verify_projected_output(artifact, derived.decode("utf-8"))
+        verify_projected_output(artifact, derived.decode("utf-8"), segments=verified_segments)
         held.record, held.artifact = record, artifact
     held.sets.update({"": root_names, "preformatted": names,
                       "preformatted/packages": expected_packages})
@@ -285,7 +286,15 @@ def verify_preformatted_output(source: ProcessingSource, output_html: Path) -> N
     output = _HeldRun(path.parent)
     try:
         payload = output.read(path.name)
-        verify_projected_output(source._held.artifact, payload.decode("utf-8"))
+        # A held marked-source snapshot is a valid verifier input, but only
+        # when its bytes are exactly the already verified extracted source.
+        # All ordinary assembled outputs remain marker-free final outputs.
+        segments = None
+        if (source._held.record is not None and source._held.record.phase == "extracted"
+                and payload == source._held.read("preformatted-source.html")):
+            segments = read_segments_stream(io.StringIO(
+                source._held.read("segments.jsonl").decode("utf-8")))
+        verify_projected_output(source._held.artifact, payload.decode("utf-8"), segments=segments)
         output.verify()
         source.verify()
     except (anchored.PdfAssemblyError, OSError, UnicodeError) as error:
@@ -496,8 +505,8 @@ def extract_preformatted_run(run_dir: Path) -> None:
                     anchored._read_opened_utf8(staged["source.html"], stage.path / "source.html", "marked projection"), held.artifact)
                 staged["segments.jsonl"].stream.seek(0)
                 segments = staged["segments.jsonl"].stream.read()
-                read_segments_stream(io.StringIO(segments.decode("utf-8")))
-                verify_projected_output(held.artifact, marked)
+                verified_segments = read_segments_stream(io.StringIO(segments.decode("utf-8")))
+                verify_projected_output(held.artifact, marked, segments=verified_segments)
                 _verify_staged_extraction(stage, staged)
             finally:
                 for opened in staged.values():
