@@ -422,22 +422,46 @@ def _check_tokens(
             expected: Counter[str] = Counter()
             kinds: dict[str, set[str]] = {}
             guarded: Counter[tuple[str, str, str | None]] = Counter()
+            url_contexts = {token.token: _url_token_context(text, token, tokens)
+                            for token in regular if token.kind == "url"}
+            if any(context is None for context in url_contexts.values()):
+                changed.add(segment_id)
+                break
+            url_literals: dict[str, Counter[tuple[str, tuple[str, str] | None]]] = {}
             for token in regular:
-                value = unescape(token.value)
+                if token.kind == "url":
+                    value, literal, guard, following = url_contexts[token.token]
+                    anchor = None
+                    if following is not None:
+                        if following not in regular:
+                            changed.add(segment_id)
+                            break
+                        next_value = (url_contexts[following.token][0] if following.kind == "url"
+                                      else unescape(following.value))
+                        anchor = (next_value, following.kind)
+                    url_literals.setdefault(value, Counter())[(literal, anchor)] += 1
+                else:
+                    value = unescape(token.value)
+                    guard = _following_token_guard(semantic_text, token.token, guard_tokens)
                 if not value:
                     changed.add(segment_id)
                     break
                 expected[value] += 1
                 kinds.setdefault(value, set()).add(token.kind)
-                guarded[(value, token.kind, _following_token_guard(
-                    semantic_text, token.token, guard_tokens
-                ))] += 1
+                guarded[(value, token.kind, guard)] += 1
             if segment_id in changed:
                 break
             source_matches = _nonoverlapping_protected_matches(source_parts, kinds)
-            output_matches = _nonoverlapping_protected_matches(output_parts, kinds)
+            output_matches = _nonoverlapping_protected_matches(output_parts, kinds, url_literals)
             if (Counter(value for _, _, value in source_matches) != expected
                 or Counter(value for _, _, value in output_matches) != expected
+                or any(
+                    sum(_matches_url_literal(part, end, literal, anchor, output_matches)
+                        for part, end, matched_value in output_matches if matched_value == value) != count
+                    for value, contexts in url_literals.items()
+                    for (literal, anchor), count in contexts.items()
+                    if literal and not literal[0].isascii() and not literal[0].isspace()
+                )
                 or any(
                     sum(
                         _matches_following_guard(part, end, kind, guard)
@@ -537,7 +561,8 @@ def _owned_location_fragments(
 
 
 def _nonoverlapping_protected_matches(
-    parts: list[str], kinds: dict[str, set[str]]
+    parts: list[str], kinds: dict[str, set[str]],
+    url_literals: dict[str, Counter[tuple[str, tuple[str, str] | None]]] | None = None,
 ) -> list[tuple[str, int, str]]:
     selected: list[tuple[str, int, str]] = []
     urls = {value for value, value_kinds in kinds.items() if "url" in value_kinds}
@@ -566,12 +591,50 @@ def _nonoverlapping_protected_matches(
             value = part[start:value_end]
             if value in urls:
                 candidates.add((start, value_end, value))
+            else:
+                # A non-ASCII character can be URL path data, not a delimiter.
+                # Cut only at an exact held token/literal boundary, matching the
+                # entire following literal rather than a particle or first letter.
+                owned = [
+                    url for url, literals in (url_literals or {}).items()
+                    if part.startswith(url, start)
+                    and any(literal and not literal[0].isascii() and not literal[0].isspace()
+                            and _matches_url_literal(part, start + len(url), literal, anchor)
+                            for literal, anchor in literals)
+                ]
+                if owned:
+                    url = max(owned, key=len)
+                    candidates.add((start, start + len(url), url))
+                    # The held literal can be followed immediately by another
+                    # URL; do not skip that owned occurrence with the greedy span.
+                    cursor = start + len(url)
+                elif any(value.startswith(url) for url in urls):
+                    # Do not silently discard an altered/duplicate prefix when
+                    # another intact occurrence could satisfy the expected count.
+                    candidates.add((start, value_end, value))
         previous_end = 0
         for start, end, value in sorted(candidates, key=lambda item: (item[0], -item[1], item[2])):
             if start >= previous_end:
                 selected.append((part, end, value))
                 previous_end = end
     return selected
+
+
+def _matches_url_literal(
+    part: str, end: int, literal: str, anchor: tuple[str, str] | None,
+    matches: list[tuple[str, int, str]] | None = None,
+) -> bool:
+    if not part.startswith(literal, end):
+        return False
+    boundary = end + len(literal)
+    if anchor is None:
+        return boundary == len(part)
+    value, kind = anchor
+    if matches is not None:
+        # The final ownership check uses the selected exact occurrence, not a
+        # prefix regex (notably for overlapping non-ASCII URL paths).
+        return (part, boundary + len(value), value) in matches
+    return bool(value) and re.compile(_exact_fragment_pattern(value, kind)).match(part, boundary) is not None
 
 
 def _matches_following_guard(part: str, end: int, kind: str, guard: str | None) -> bool:
@@ -631,6 +694,41 @@ def _following_token_guard(
         return normalized_next[0] if normalized_next else None
     literal = unescape(after)
     return literal[0] if literal else _END_GUARD
+
+
+def _url_token_context(
+    text: str, token: ProtectedToken, tokens: list[ProtectedToken]
+) -> tuple[str, str, str | None, ProtectedToken | None] | None:
+    """Decode the complete held URL/literal representation across its boundary."""
+    after = text[text.index(token.token) + len(token.token):]
+    next_match = _TOKEN_PATTERN.search(after)
+    literal = after[:next_match.start()] if next_match else after
+    raw = token.value + literal
+    boundary = len(token.value)
+    # The producer may trim the final semicolon of a character reference.
+    # Attribute and body DOM decoding consume that literal into the same entity.
+    for match in re.finditer(r"&(?:\#[xX][0-9a-fA-F]+|\#[0-9]+|[A-Za-z][A-Za-z0-9]*);?", raw):
+        if match.start() < boundary < match.end() and unescape(match.group()) != match.group():
+            boundary = match.end()
+            break
+    value = unescape(raw[:boundary])
+    decoded = unescape(raw)
+    if not decoded.startswith(value):
+        return None
+    literal = decoded[len(value):]
+    following = next((t for t in tokens if next_match and t.token == next_match.group()), None)
+    next_regular = (following if following is not None
+                    and following.kind not in {"location", "segment", "tag", "code", "excluded"} else None)
+    if literal:
+        return value, literal, literal[0], next_regular
+    if following:
+        if following.kind in {"location", "segment"}:
+            return value, literal, _END_GUARD, next_regular
+        if following.kind in {"tag", "code", "excluded"}:
+            return value, literal, _TAG_BOUNDARY_GUARD, next_regular
+        normalized = unescape(following.value)
+        return value, literal, normalized[0] if normalized else None, next_regular
+    return value, literal, _END_GUARD, next_regular
 
 
 def _corresponding_output_element(

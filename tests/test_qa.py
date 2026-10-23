@@ -24,6 +24,355 @@ from web_translator.report import write_manifest, write_review_report
 TOKEN = "⟦WT:000000⟧"
 
 
+def _producer_url_boundary_result(tmp_path, source_fragment, translation, output_fragment,
+                                  expected_urls, in_title=False):
+    prefix = "<!--wt-location:attribute:title-->" if in_title else ""
+    _, raw_tokens = protect_fragment(prefix + source_fragment)
+    assert [t.value for t in raw_tokens if t.kind == "url"] == expected_urls
+    tokens = [ProtectedToken(t.token, "location" if t.value == prefix and prefix else t.kind,
+                             t.value) for t in raw_tokens]
+    if in_title:
+        source_body = f'<main><p data-wt-segment="a" title="{source_fragment}">Hello</p></main>'
+        output_body = f'<main><p title="{output_fragment}">안녕</p></main>'
+        translation = "⟦WT:000000⟧" + translation.replace("⟦WT:000000⟧", "⟦WT:000001⟧")
+    else:
+        source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
+        output_body = f'<main><p>{output_fragment}</p></main>'
+    source, output = _write_pages(tmp_path, source_body=source_body, output_body=output_body)
+    return run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                          translated_texts={"a": translation}))
+
+
+@pytest.mark.parametrize("in_title", [False, True], ids=["body", "title"])
+@pytest.mark.parametrize("source_fragment,translation,output_fragment,expected_urls", [
+    ("Read https://example.com/doc today.", "⟦WT:000000⟧에서 확인하세요.",
+     "https://example.com/doc에서 확인하세요.", ["https://example.com/doc"]),
+    ("Read https://example.com/안내 today.", "⟦WT:000000⟧로 이동합니다.",
+     "https://example.com/안내로 이동합니다.", ["https://example.com/안내"]),
+    ("Read &lt;https://example.com/doc&gt;.", "참조 &lt;⟦WT:000000⟧;.",
+     "참조 &lt;https://example.com/doc&gt;.", ["https://example.com/doc&gt"]),
+    ("Read &lt;https://example.com/doc?r=1&amp;s=2&gt;.",
+     "참조 &lt;⟦WT:000000⟧;.", "참조 &lt;https://example.com/doc?r=1&amp;s=2&gt;.",
+     ["https://example.com/doc?r=1&amp;s=2&gt"]),
+    ("Read https://example.com/doc&rarr;.", "참조 ⟦WT:000000⟧;.",
+     "참조 https://example.com/doc&rarr;.", ["https://example.com/doc&rarr"]),
+], ids=["korean-adjacency", "korean-path", "split-gt", "query-and-split-gt", "split-nonlegacy-entity"])
+def test_source_bound_url_boundary_accepts_owned_prose_and_complete_entity(
+    tmp_path, in_title, source_fragment, translation, output_fragment, expected_urls,
+):
+    # Catch lexical overconsumption and decoding each side of a producer boundary separately.
+    result = _producer_url_boundary_result(tmp_path, source_fragment, translation,
+                                           output_fragment, expected_urls, in_title)
+    assert result.passed
+    assert result.required_findings == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize("in_title", [False, True], ids=["body", "title"])
+@pytest.mark.parametrize("output_fragment", [
+    "https://example.com/doc/extra에서 확인하세요.",
+    "https://example.com/doc?q=2에서 확인하세요.",
+    "https://example.com/doc#extra에서 확인하세요.",
+    "https://other.example/doc에서 확인하세요.",
+    "https://example.com/docX에서 확인하세요.",
+    "https://example.com/doc한글에서 확인하세요.",
+    "https://example.com/doc에서추가 확인하세요.",
+    "https://example.com/doc에서 확인하세요. https://example.com/doc로 이동합니다.",
+    "https://example.com/doc에서 확인하세요. https://example.com/doc 문서.",
+], ids=["path", "query", "fragment", "host", "ascii-suffix", "unicode-suffix",
+         "partial-prose-prefix", "duplicate-other-particle", "duplicate-spaced"])
+def test_source_bound_url_boundary_rejects_extensions_and_duplicate_particles(
+    tmp_path, in_title, output_fragment,
+):
+    # A prefix or just the first Korean guard character cannot establish token ownership.
+    result = _producer_url_boundary_result(
+        tmp_path, "Read https://example.com/doc today.", "⟦WT:000000⟧에서 확인하세요.",
+        output_fragment, ["https://example.com/doc"], in_title)
+    assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment", [
+    "https://example.com/안내서로 이동합니다.",
+    "https://example.com/안내/다음로 이동합니다.",
+    "https://example.com/안로 이동합니다.",
+])
+def test_source_bound_url_boundary_does_not_terminate_at_nonascii_path(tmp_path, output_fragment):
+    result = _producer_url_boundary_result(
+        tmp_path, "Read https://example.com/안내 today.", "⟦WT:000000⟧로 이동합니다.",
+        output_fragment, ["https://example.com/안내"])
+    assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment", ["https://example.com/doc에서/extra", "https://example.com/doc에서추가"])
+def test_source_bound_url_boundary_rejects_extension_after_entire_adjacent_literal(tmp_path, output_fragment):
+    # Even the entire held literal is only evidence if its end boundary is preserved.
+    result = _producer_url_boundary_result(
+        tmp_path, "Read https://example.com/doc today.", "⟦WT:000000⟧에서",
+        output_fragment, ["https://example.com/doc"])
+    assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("following,kind", [
+    ("MUST", "keyword"), ("git status", "command"), ("https://example.com/next", "url"),
+])
+@pytest.mark.parametrize("gap,accepted", [("", True), ("추가", False), ("/extra", False)])
+def test_source_bound_url_literal_anchors_following_regular_token(tmp_path, following, kind, gap, accepted):
+    # The literal's far edge must be the held next token, not arbitrary added URL/prose data.
+    _, tokens = protect_fragment(f"Read https://example.com/doc then {following}")
+    assert [(t.kind, t.value) for t in tokens] == [
+        ("url", "https://example.com/doc"), (kind, following),
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body=f'<main><p data-wt-segment="a">Read https://example.com/doc then {following}</p></main>',
+        output_body=f'<main><p>https://example.com/doc에서{gap}{following}</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                           translated_texts={"a": "⟦WT:000000⟧에서⟦WT:000001⟧"}))
+    if accepted:
+        assert result.passed
+        assert result.required_findings == []
+    else:
+        assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment,accepted", [
+    ("https://example.com/doc에서MUST 및 https://example.com/doc에서추가MAY", True),
+    ("https://example.com/doc에서추가MUST 및 https://example.com/doc에서MAY", False),
+])
+def test_source_bound_url_literal_keeps_its_following_token_pair(tmp_path, output_fragment, accepted):
+    # Repeated URLs cannot swap literal/token pairs merely because all first letters agree.
+    source_fragment = "Read https://example.com/doc then MUST and https://example.com/doc then MAY"
+    _, tokens = protect_fragment(source_fragment)
+    assert [(t.kind, t.value) for t in tokens] == [
+        ("url", "https://example.com/doc"), ("keyword", "MUST"),
+        ("url", "https://example.com/doc"), ("keyword", "MAY"),
+    ]
+    source, output = _write_pages(
+        tmp_path, source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>{output_fragment}</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens}, translated_texts={
+        "a": "⟦WT:000000⟧에서⟦WT:000001⟧ 및 ⟦WT:000002⟧에서추가⟦WT:000003⟧",
+    }))
+    if accepted:
+        assert result.passed
+    else:
+        assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment,accepted", [
+    ("https://example.com/doc에서MUST. https://example.com/doc에서MAY. MUST.", True),
+    ("https://example.com/doc에서MUST. https://example.com/doc에서MUST. MAY.", False),
+])
+def test_source_bound_url_literal_keeps_repeated_next_token_multiplicity(tmp_path, output_fragment, accepted):
+    # Matching any known pair is insufficient when an unrelated keyword copy masks a lost pair.
+    source_fragment = "Read https://example.com/doc then MUST. Read https://example.com/doc then MAY. MUST."
+    _, tokens = protect_fragment(source_fragment)
+    assert [(t.kind, t.value) for t in tokens] == [
+        ("url", "https://example.com/doc"), ("keyword", "MUST"),
+        ("url", "https://example.com/doc"), ("keyword", "MAY"), ("keyword", "MUST"),
+    ]
+    source, output = _write_pages(
+        tmp_path, source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>{output_fragment}</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens}, translated_texts={
+        "a": "⟦WT:000000⟧에서⟦WT:000001⟧. ⟦WT:000002⟧에서⟦WT:000003⟧. ⟦WT:000004⟧.",
+    }))
+    if accepted:
+        assert result.passed
+    else:
+        assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment,accepted", [
+    ("https://example.com/doc에서https://example.com/안. https://example.com/안내.", True),
+    ("https://example.com/doc에서https://example.com/안내. https://example.com/안.", False),
+])
+def test_source_bound_url_literal_requires_exact_following_url_occurrence(tmp_path, output_fragment, accepted):
+    # A next-URL anchor cannot accept a Unicode path prefix while an intact copy lives elsewhere.
+    source_fragment = "Read https://example.com/doc then https://example.com/안. Read https://example.com/안내."
+    _, tokens = protect_fragment(source_fragment)
+    assert [(t.kind, t.value) for t in tokens] == [
+        ("url", "https://example.com/doc"), ("url", "https://example.com/안"),
+        ("url", "https://example.com/안내"),
+    ]
+    source, output = _write_pages(
+        tmp_path, source_body=f'<main><p data-wt-segment="a">{source_fragment}</p></main>',
+        output_body=f'<main><p>{output_fragment}</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens}, translated_texts={
+        "a": "⟦WT:000000⟧에서⟦WT:000001⟧. ⟦WT:000002⟧.",
+    }))
+    if accepted:
+        assert result.passed
+    else:
+        assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("source_fragment,translation,output_fragment,accepted", [
+    ("Read <em>https://example.com/doc</em> today.",
+     "⟦WT:000000⟧⟦WT:000001⟧에서 확인하세요.⟦WT:000002⟧",
+     "<em>https://example.com/doc에서 확인하세요.</em>", True),
+    ("Read https://example.com/doc today. <code>https://example.com/doc</code>",
+     "⟦WT:000000⟧에서 확인하세요. ⟦WT:000001⟧",
+     "https://example.com/changed에서 확인하세요. <code>https://example.com/doc</code>", False),
+    ('Read <a href="https://example.com/doc">https://example.com/doc</a> today.',
+     "⟦WT:000000⟧⟦WT:000001⟧에서 확인하세요.⟦WT:000002⟧",
+     '<a href="https://example.com/doc">https://example.com/changed에서 확인하세요.</a>', False),
+], ids=["inline-tag", "opaque-code-not-owned", "href-not-owned"])
+def test_source_bound_url_boundary_respects_inline_and_opaque_ownership(
+    tmp_path, source_fragment, translation, output_fragment, accepted,
+):
+    result = _producer_url_boundary_result(
+        tmp_path, source_fragment, translation, output_fragment, ["https://example.com/doc"])
+    assert ("protected-token-integrity" not in {f.code for f in result.required_findings}) == accepted
+
+
+def test_source_bound_url_boundary_cannot_count_title_url_as_content_occurrence(tmp_path):
+    producer = ("<!--wt-location:attribute:title-->Read https://example.com/doc today."
+                "<!--wt-location:content-->Read https://example.com/doc today.")
+    _, raw_tokens = protect_fragment(producer)
+    tokens = [ProtectedToken(t.token, "location" if t.value.startswith("<!--wt-location:") else t.kind,
+                             t.value) for t in raw_tokens]
+    source, output = _write_pages(
+        tmp_path,
+        source_body='<main><p data-wt-segment="a" title="Read https://example.com/doc today.">'
+                    'Read https://example.com/doc today.</p></main>',
+        output_body='<main><p title="https://example.com/doc로 이동합니다. '
+                    'https://example.com/doc에서 확인하세요.">'
+                    'https://example.com/changed에서 확인하세요.</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens}, translated_texts={
+        "a": "⟦WT:000000⟧⟦WT:000001⟧로 이동합니다.⟦WT:000002⟧⟦WT:000003⟧에서 확인하세요.",
+    }))
+    assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("translation,accepted", [
+    ("⟦WT:000000⟧⟦WT:000001⟧에서 확인하세요.⟦WT:000002⟧⟦WT:000003⟧로 이동합니다.", True),
+    ("⟦WT:000000⟧⟦WT:000001⟧에서⟦WT:000003⟧⟦WT:000002⟧", False),
+], ids=["correct-location-order", "cross-location-next-url"])
+def test_source_bound_url_cross_location_next_anchor_fails_closed(tmp_path, translation, accepted):
+    # Exact placeholder counts do not authorize a next URL owned by another location.
+    producer = ("<!--wt-location:attribute:title-->Read https://example.com/title today."
+                "<!--wt-location:content-->Read https://example.com/body today.")
+    _, raw_tokens = protect_fragment(producer)
+    tokens = [ProtectedToken(t.token, "location" if t.value.startswith("<!--wt-location:") else t.kind,
+                             t.value) for t in raw_tokens]
+    assert [(t.kind, t.value) for t in tokens] == [
+        ("location", "<!--wt-location:attribute:title-->"), ("url", "https://example.com/title"),
+        ("location", "<!--wt-location:content-->"), ("url", "https://example.com/body"),
+    ]
+    source, output = _write_pages(
+        tmp_path,
+        source_body='<main><p data-wt-segment="a" title="Read https://example.com/title today.">'
+                    'Read https://example.com/body today.</p></main>',
+        output_body='<main><p title="https://example.com/title에서 확인하세요.">'
+                    'https://example.com/body로 이동합니다.</p></main>',
+    )
+    result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
+                           translated_texts={"a": translation}))
+    if accepted:
+        assert result.passed
+        assert result.required_findings == []
+    else:
+        assert {f.code for f in result.required_findings} == {"protected-token-integrity"}
+
+
+@pytest.mark.parametrize("in_title", [False, True], ids=["body", "title"])
+@pytest.mark.parametrize("output_fragment", [
+    "참조 &lt;https://example.com/doc&lt;.",
+    "참조 &lt;https://example.com/doc&gt;;.",
+    "참조 &lt;https://example.com/doc&gt;,",
+    "참조 &lt;https://example.com/doc/extra&gt;.",
+    "참조 &lt;https://example.com/doc?q=2&gt;.",
+    "참조 &lt;https://example.com/doc&gt;. https://example.com/doc&gt;.",
+    "참조 &lt;https://example.com/doc&amp;gt;.",
+], ids=["changed-delimiter", "extra-semicolon", "changed-terminator", "path", "query",
+         "duplicate", "no-double-decode"])
+def test_source_bound_url_boundary_keeps_entity_delimiter_and_terminator_guards(
+    tmp_path, in_title, output_fragment,
+):
+    result = _producer_url_boundary_result(
+        tmp_path, "Read &lt;https://example.com/doc&gt;.", "참조 &lt;⟦WT:000000⟧;.",
+        output_fragment, ["https://example.com/doc&gt"], in_title)
+    assert "protected-token-integrity" in {f.code for f in result.required_findings}
+
+
+@pytest.mark.parametrize("output_fragment,accepted", [
+    ("https://example.com/doc에서 읽고 https://example.com/doc로 이동합니다.", True),
+    ("https://example.com/doc에서 읽고 https://example.com/doc에서 읽고 "
+     "https://example.com/doc로 이동합니다.", False),
+    ("https://example.com/doc에서 읽고 https://example.com/doc/next로 이동합니다.", False),
+])
+def test_source_bound_url_boundary_keeps_repeated_occurrence_counts(tmp_path, output_fragment, accepted):
+    result = _producer_url_boundary_result(
+        tmp_path, "Read https://example.com/doc and https://example.com/doc today.",
+        "⟦WT:000000⟧에서 읽고 ⟦WT:000001⟧로 이동합니다.", output_fragment,
+        ["https://example.com/doc", "https://example.com/doc"])
+    assert ("protected-token-integrity" not in {f.code for f in result.required_findings}) == accepted
+
+
+@pytest.mark.parametrize("output_fragment,accepted", [
+    ("https://example.com/doc에서 읽고 https://example.com/doc/next로 이동합니다.", True),
+    ("https://example.com/doc/next에서 읽고 https://example.com/doc/next로 이동합니다.", False),
+    ("https://example.com/doc에서 읽고 https://example.com/doc로 이동합니다.", False),
+])
+def test_source_bound_url_boundary_keeps_overlapping_value_ownership(tmp_path, output_fragment, accepted):
+    result = _producer_url_boundary_result(
+        tmp_path, "Read https://example.com/doc and https://example.com/doc/next today.",
+        "⟦WT:000000⟧에서 읽고 ⟦WT:000001⟧로 이동합니다.", output_fragment,
+        ["https://example.com/doc", "https://example.com/doc/next"])
+    assert ("protected-token-integrity" not in {f.code for f in result.required_findings}) == accepted
+
+
+def test_source_bound_url_boundaries_survive_normal_extraction_assembly_and_qa(tmp_path):
+    # Catch a unit-only fix that fails with real extracted location metadata and restored HTML.
+    from web_translator.assemble import assemble_page
+    from web_translator.extract import extract_segments
+    from web_translator.models import Translation
+
+    captured = tmp_path / "capture" / "source.html"
+    captured.parent.mkdir()
+    captured.write_text('<!doctype html><html><head><meta charset="utf-8"></head><body><main>'
+                        '<p id="prose" title="Read https://example.com/안내 today.">'
+                        'Read https://example.com/doc today.</p>'
+                        '<p id="citation">Read &lt;https://example.com/ref&gt;.</p>'
+                        '</main></body></html>', encoding="utf-8")
+    segments = extract_segments(captured, captured.parent / "segments.jsonl")
+    authored = {
+        "prose": ("https://example.com/doc에서 확인하세요.", "https://example.com/안내로 이동합니다."),
+        "citation": ("참조 <https://example.com/ref>.", None),
+    }
+    source_dom = BeautifulSoup(captured.read_text(encoding="utf-8"), "html.parser")
+    translations = {}
+    for segment in segments:
+        owner = source_dom.select_one(segment.locator)["id"]
+        if owner == "prose":
+            translated = segment.source_text.replace("Read ", "").replace(" today.", "로 이동합니다.", 1)
+            translated = translated.replace(" today.", "에서 확인하세요.")
+        else:
+            translated = segment.source_text.replace("Read ", "참조 ")
+        translations[segment.id] = Translation(segment.id, translated, None, {})
+    index = assemble_page(captured, {s.id: s for s in segments}, translations, {},
+                          tmp_path / "output", "https://example.com/")
+    final = BeautifulSoup(index.read_text(encoding="utf-8"), "html.parser")
+    for owner, (body, title) in authored.items():
+        assert final.find(id=owner).get_text() == body
+        if title is not None:
+            assert final.find(id=owner)["title"] == title
+    result = run_qa(_inputs(
+        captured, index, source_segment_ids={s.id for s in segments},
+        translated_segment_ids=set(translations),
+        protected_tokens={s.id: s.protected for s in segments},
+        translated_texts={sid: t.text for sid, t in translations.items()},
+    ))
+    assert result.passed
+    assert result.required_findings == []
+
+
 def _write_pages(
     root: Path,
     *,
