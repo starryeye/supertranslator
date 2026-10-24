@@ -11,8 +11,8 @@ from PIL import Image
 from reportlab.pdfgen.canvas import Canvas
 
 from tests.pdf_fixtures import make_pdf_source_record
-from web_translator.pdf_media import render_pdf_pages
-from web_translator.pdf_models import PdfBlock, PdfBlockStyle, PdfDocument, PdfPage, PdfTranslationUnit
+from supertranslator.pdf_media import render_pdf_pages
+from supertranslator.pdf_models import PdfBlock, PdfBlockStyle, PdfDocument, PdfPage, PdfTranslationUnit
 
 FIGURE_ID = "pdf:page-0001:block-0002"
 LABEL_LINES = {
@@ -30,7 +30,7 @@ _RENDERED_PAGES: dict[bytes, bytes] = {}
 
 
 def make_figure_review_run(tmp_path: Path, *, case: str = "diagram") -> tuple[Path, Path]:
-    run = tmp_path / ".web-translator" / "runs" / "그림 검토 with spaces"
+    run = tmp_path / ".supertranslator" / "runs" / "그림 검토 with spaces"
     output = tmp_path / "translated-pdfs" / run.name
     run.mkdir(parents=True)
     output.parent.mkdir()

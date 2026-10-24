@@ -15,8 +15,8 @@ import zlib
 from PIL import Image
 
 from tests import pdf_fixtures
-import web_translator.pdf_figure_review as figure_review
-from web_translator.pdf_media import find_poppler
+import supertranslator.pdf_figure_review as figure_review
+from supertranslator.pdf_media import find_poppler
 
 
 def _sha256(payload: bytes) -> str:

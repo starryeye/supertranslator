@@ -8,10 +8,10 @@ from importlib.resources import files
 from bs4 import BeautifulSoup
 import pytest
 
-from web_translator.preformatted_analysis import (
+from supertranslator.preformatted_analysis import (
     analyze_preformatted, build_classification_packages, validate_review,
 )
-from web_translator.preformatted_contract import canonical_sha256
+from supertranslator.preformatted_contract import canonical_sha256
 
 
 def _review(source: str, specifications: list[dict[str, object]]):
@@ -42,7 +42,7 @@ def _span(kind: str, start_line: str, start: int, end_line: str, end: int, text:
 
 
 def _api():
-    from web_translator.preformatted_projection import (
+    from supertranslator.preformatted_projection import (
         project_preformatted, verify_projection, verify_projected_output,
     )
     return project_preformatted, verify_projection, verify_projected_output
@@ -112,7 +112,7 @@ def test_projection_preserves_literal_islands_and_all_source_coverage():
         verify_output(artifact, artifact.unmarked_html.replace("x  y", "x y"))
     changed = review.to_dict()
     changed["analysis_sha256"] = "0" * 64
-    from web_translator.preformatted_contract import ReviewedBlocks
+    from supertranslator.preformatted_contract import ReviewedBlocks
     with pytest.raises(ValueError, match="review|hash"):
         project(source, analysis, ReviewedBlocks.from_dict(changed))
     changed = review.to_dict()
@@ -200,7 +200,7 @@ def test_scoped_css_preserves_grid_and_narrow_flow(tmp_path):
     ])
     project, _, _ = _api()
     artifact = project(source, analysis, review)
-    assert artifact.css_bytes == files("web_translator").joinpath("web_assets", "preformatted-flow.css").read_bytes()
+    assert artifact.css_bytes == files("supertranslator").joinpath("web_assets", "preformatted-flow.css").read_bytes()
     assert artifact.css_path.startswith("assets/wt-preformatted-")
     assert artifact.css_path.endswith(".css")
     css = artifact.css_bytes.decode()
@@ -244,9 +244,9 @@ def test_scoped_css_preserves_grid_and_narrow_flow(tmp_path):
 
 def test_projection_crlf_and_opaque_url_survive_extract_and_assemble(tmp_path):
     # Catches a source-only proof that misses lxml/read_text newline normalization.
-    from web_translator.extract import extract_segments
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation
+    from supertranslator.extract import extract_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation
 
     url = "https://exam\r\nple.test/x"
     source = ('<html><head></head><body><pre id="manual">Read https://exam\r\n'
@@ -266,7 +266,7 @@ def test_projection_crlf_and_opaque_url_survive_extract_and_assemble(tmp_path):
     segments = extract_segments(source_dir / "preformatted-source.html", source_dir / "segments.jsonl")
     assert [segment.semantic_type for segment in segments] == ["paragraph"]
     assert any(token.kind == "code" and url in token.value for token in segments[0].protected)
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.preformatted_projection import encode_projection_transport
     marked = (source_dir / "preformatted-source.html").read_bytes().decode("utf-8")
     transported = encode_projection_transport(marked, artifact)
     assert "&#13;" in transported
@@ -330,7 +330,7 @@ def test_multiple_opaque_urls_and_anchor_block_owner_are_verified():
 
 def test_transport_encodes_only_generated_text_not_comments_or_attributes():
     # Catches a blind CR substitution that corrupts markup or source comments.
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.preformatted_projection import encode_projection_transport
     source = '<html><head></head><body><pre>Alpha\r\nBeta</pre></body></html>'
     analysis, review = _review(source, [
         {"line_ids": ["line-000001", "line-000002"], "role": "literal-layout", "evidence": "Alpha"},
@@ -350,7 +350,7 @@ def test_transport_encodes_only_generated_text_not_comments_or_attributes():
 
 def test_projection_records_round_trip_and_reject_tampered_css_or_summary():
     # Catches noncanonical resource identity or mutable evidence escaping records.
-    from web_translator.preformatted_contract import ProjectionArtifact
+    from supertranslator.preformatted_contract import ProjectionArtifact
     source = '<html><head></head><body><pre>Alpha</pre></body></html>'
     analysis, review = _review(source, [
         {"line_ids": ["line-000001"], "role": "prose", "evidence": "Alpha"},
@@ -448,10 +448,10 @@ def test_projection_leaves_exterior_raw_text_and_comments_unchanged():
 
 
 def test_retained_explicit_code_crlf_survives_real_consumers(tmp_path):
-    from web_translator.extract import extract_segments
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.extract import extract_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation
+    from supertranslator.preformatted_projection import encode_projection_transport
 
     source = ('<html><head></head><body><pre>Read this</pre>'
               '<pre><code>A\r\nB</code></pre></body></html>')
@@ -474,10 +474,10 @@ def test_retained_explicit_code_crlf_survives_real_consumers(tmp_path):
 
 
 def test_flow_anchor_approved_attribute_translation_survives_real_consumers(tmp_path):
-    from web_translator.extract import extract_segments
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.extract import extract_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation
+    from supertranslator.preformatted_projection import encode_projection_transport
 
     source = ('<html><head></head><body><pre>Read '
               '<a id="guide" href="/safe" title="English title" aria-label="English label">docs</a>'
@@ -509,10 +509,10 @@ def test_flow_anchor_approved_attribute_translation_survives_real_consumers(tmp_
 
 
 def test_ordinary_neighbor_anchor_attribute_translation_remains_valid(tmp_path):
-    from web_translator.extract import extract_segments
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.extract import extract_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation
+    from supertranslator.preformatted_projection import encode_projection_transport
 
     source = ('<html><head></head><body><p><a id="outside" href="/manual" '
               'title="Read manual">Manual</a></p><pre>Reviewed prose</pre>'
@@ -542,7 +542,7 @@ def test_ordinary_neighbor_anchor_attribute_translation_remains_valid(tmp_path):
 
 def test_extracted_id_targets_have_source_bound_markers_and_unchanged_attributes(tmp_path):
     # Catches treating ordinary extractor metadata as an authored attribute change.
-    from web_translator.extract import extract_segments
+    from supertranslator.extract import extract_segments
 
     source = ('<html><head></head><body><pre id="article">Reviewed prose</pre>'
               '<input id="query" type="text" aria-label="Search documents" '
@@ -610,7 +610,7 @@ def test_protected_only_ordinary_neighbor_uses_real_extractor_target_filter(
 ):
     # A text-node candidate with wholly protected markup is not an emitted
     # segment unless its own translatable attribute supplies a location.
-    from web_translator.extract import extract_segments
+    from supertranslator.extract import extract_segments
 
     title = ' title="Press Enter"' if with_title else ''
     source = ('<html><head></head><body><pre>Reviewed prose</pre>'
@@ -696,10 +696,10 @@ def test_doctype_retained_code_path_survives_real_consumers_and_rejects_relocati
     tmp_path, document_prefix, source_path, projected_path
 ):
     # Catches recording the retained pre's path before serialization inserts a doctype newline.
-    from web_translator.extract import extract_segments
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation
-    from web_translator.preformatted_projection import encode_projection_transport
+    from supertranslator.extract import extract_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation
+    from supertranslator.preformatted_projection import encode_projection_transport
 
     source = (document_prefix + '<html><head></head><body><pre>Reviewed prose</pre>'
               '<pre id="code"><code>A\r\nB</code></pre></body></html>')

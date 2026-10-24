@@ -5,10 +5,10 @@ from dataclasses import replace
 import pytest
 
 from tests.pdf_unit_fixtures import make_flow_case, make_observed_flow, make_unit_document
-from web_translator import pdf_extract
-from web_translator.pdf_models import PdfContractError, PdfDocument, PdfFlowFinding, upgrade_pdf_document_to_units
-from web_translator.pdf_units import project_unit_text, unit_for_block, validate_unit_membership
-from web_translator import pdf_units
+from supertranslator import pdf_extract
+from supertranslator.pdf_models import PdfContractError, PdfDocument, PdfFlowFinding, upgrade_pdf_document_to_units
+from supertranslator.pdf_units import project_unit_text, unit_for_block, validate_unit_membership
+from supertranslator import pdf_units
 
 
 @pytest.mark.parametrize("mixed,note", [(False, True), (True, False), (True, True)])
@@ -93,7 +93,7 @@ def test_final_owner_and_sequential_context_preserve_complete_continuation(
 def test_structural_exclusion_needs_actual_complete_unique_owner(problem):
     # Excluding by raw kind, containing bbox or ID alone would emit a frame.
     from tests.pdf_unit_fixtures import make_observed_owned_context
-    from web_translator.pdf_layout import group_words_into_lines
+    from supertranslator.pdf_layout import group_words_into_lines
     blocks, pages, lines = make_observed_owned_context(mixed=False)
     owned = pdf_extract.collect_owned_flow_lines(blocks, pages, lines)
     note = blocks[-1]
@@ -150,7 +150,7 @@ def test_mixed_nonanchor_context_cannot_authorize_unproved_flow(problem):
     # Blanket font/pitch waivers or promoting a split run to an anchor would
     # turn these into accepted frames and unsafe cross-page targets.
     from tests.pdf_unit_fixtures import make_observed_owned_context
-    from web_translator.pdf_layout import build_text_blocks
+    from supertranslator.pdf_layout import build_text_blocks
     blocks, pages, lines = make_observed_owned_context(note=False)
     page_lines = lines[2]
     def change(index, *, top=None, x0=None, x1=None, font=None):
@@ -346,7 +346,7 @@ def test_paragraph_region_rejects_known_noncanonical_contributing_owner(kind, ro
     # Checking only body owners lets a known structural owner contaminate the
     # emitted frame, although neither canonical ownership nor region proves it.
     from tests.pdf_unit_fixtures import make_observed_region_flow
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines, find_clear_gutter
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines, find_clear_gutter
     blocks, pages, lines = make_observed_region_flow()
     original = [b.to_dict() for b in blocks]
     structural = replace(group_words_into_lines([dict(
@@ -601,8 +601,8 @@ def build_flow(case, *, scale=1.0):
 
 def _observed_edge_items(*, scale=1.0, x=530, labels=("Opaque alpha", "Unrelated beta"), problem=None):
     """Real line grouping/ownership, with no footer vocabulary classification."""
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
-    from web_translator.pdf_models import PdfPage
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_models import PdfPage
     pages = [PdfPage(n, 612 * scale, 792 * scale, 0) for n in (1, 2)]
     blocks, lines = [], {}
     for page in pages:
@@ -755,7 +755,7 @@ def test_nonhyphen_join_requires_filled_tail(case, status):
 
 @pytest.mark.parametrize("field,value", [("line_pitch", 0), ("line_pitch", float("nan")), ("line_pitch", -1), ("column_count", 0), ("column_index", 1)])
 def test_boundary_rejects_invalid_observed_context(field, value):
-    from web_translator.pdf_models import PdfBlockBoundary
+    from supertranslator.pdf_models import PdfBlockBoundary
     data = make_unit_document().translation_units[0].joins[0].evidence.left.to_dict()
     data.update(line_pitch=18, column_index=0, column_count=1)
     data[field] = value
@@ -764,7 +764,7 @@ def test_boundary_rejects_invalid_observed_context(field, value):
 
 
 def test_boundary_roundtrip_retains_optional_observed_context():
-    from web_translator.pdf_models import PdfBlockBoundary
+    from supertranslator.pdf_models import PdfBlockBoundary
     data = make_unit_document().translation_units[0].joins[0].evidence.left.to_dict()
     data.update(line_pitch=18, column_index=1, column_count=2)
     assert PdfBlockBoundary.from_dict(data).to_dict() == data
@@ -775,7 +775,7 @@ def test_boundary_roundtrip_retains_optional_observed_context():
 @pytest.mark.parametrize("columns", [1, 2])
 @pytest.mark.parametrize("scale", [0.75, 1.0, 1.7])
 def test_collected_owned_lines_supply_real_column_and_pitch_evidence(columns, scale):
-    from web_translator import pdf_extract
+    from supertranslator import pdf_extract
     assert hasattr(pdf_extract, "collect_flow_boundaries"), "boundary producer is missing"
     blocks, pages, lines = make_observed_flow(columns=columns, scale=scale)
     boundaries = pdf_extract.collect_flow_boundaries(blocks, pages, lines)
@@ -906,7 +906,7 @@ def test_page_local_frames_retain_required_conflicting_evidence(problem, reason)
 
 @pytest.mark.parametrize("problem", ["duplicate-owner", "wrong-text", "missing-lines", "sparse-frame"])
 def test_collector_does_not_invent_unproven_boundaries(problem):
-    from web_translator import pdf_extract
+    from supertranslator import pdf_extract
     assert hasattr(pdf_extract, "collect_flow_boundaries"), "boundary producer is missing"
     blocks, pages, lines = make_observed_flow()
     target = blocks[0]
@@ -1065,8 +1065,8 @@ def test_potential_competitor_without_provable_boundary_prevents_join():
 
 
 def test_collector_does_not_mistake_paragraph_spacing_for_line_pitch():
-    from web_translator.pdf_extract import collect_flow_boundaries
-    from web_translator.pdf_layout import build_text_blocks
+    from supertranslator.pdf_extract import collect_flow_boundaries
+    from supertranslator.pdf_layout import build_text_blocks
     blocks, pages, lines = make_observed_flow()
     selected = []
     for line, top in zip(lines[1][:3], (72, 200, 328)):
@@ -1097,7 +1097,7 @@ def test_observed_frame_needs_four_line_pitches(height, status):
 
 
 def test_observed_list_continuation_uses_marker_body_word_margin():
-    from web_translator.pdf_extract import collect_flow_boundaries
+    from supertranslator.pdf_extract import collect_flow_boundaries
     blocks, pages, lines = make_observed_flow(list_item=True)
     boundaries = collect_flow_boundaries(blocks, pages, lines)
     tail = next(b for b in blocks if b.kind == "list-item")
@@ -1112,7 +1112,7 @@ def test_observed_list_continuation_uses_marker_body_word_margin():
 
 
 def test_raw_head_discretionary_line_matches_page_local_normalized_block():
-    from web_translator.pdf_extract import collect_flow_boundaries
+    from supertranslator.pdf_extract import collect_flow_boundaries
     blocks, pages, lines = make_observed_flow(head_discretionary=True)
     boundaries = collect_flow_boundaries(blocks, pages, lines)
     tail = next(b for b in blocks if b.source_text.endswith("A para‐"))
@@ -1132,7 +1132,7 @@ def test_raw_head_discretionary_line_matches_page_local_normalized_block():
 
 
 def test_observed_sentence_boundary_overflow_has_required_finding():
-    from web_translator.pdf_extract import collect_flow_boundaries
+    from supertranslator.pdf_extract import collect_flow_boundaries
     blocks, pages, lines = make_observed_flow(sentence_boundary=True)
     boundaries = collect_flow_boundaries(blocks, pages, lines)
     tail = next(b for b in blocks if b.source_text.endswith("A sentence ends."))
@@ -1147,7 +1147,7 @@ def test_observed_sentence_boundary_overflow_has_required_finding():
 
 @pytest.mark.parametrize("mismatch", ["ascii-hyphen", "changed-word", "inserted-space", "single-line"])
 def test_normalized_head_matching_does_not_allow_unrelated_text_changes(mismatch):
-    from web_translator.pdf_extract import collect_flow_boundaries
+    from supertranslator.pdf_extract import collect_flow_boundaries
     blocks, pages, lines = make_observed_flow(head_discretionary=True)
     boundaries = collect_flow_boundaries(blocks, pages, lines)
     tail = next(b for b in blocks if b.source_text.endswith("A para‐"))
@@ -1177,7 +1177,7 @@ def test_semantic_boundary_stays_separate(role):
 
 @pytest.mark.parametrize("field,value", [("column_index", None), ("column_count", None), ("column_index", -1), ("column_count", True), ("line_pitch", True)])
 def test_observed_context_rejects_unpaired_or_wrong_types(field, value):
-    from web_translator.pdf_models import PdfBlockBoundary
+    from supertranslator.pdf_models import PdfBlockBoundary
     data = make_flow_case("discretionary")[2]["pdf:page-0001:block-0001"].to_dict()
     data[field] = value
     with pytest.raises(PdfContractError):
@@ -1208,7 +1208,7 @@ def test_unit_segments_have_one_target_and_all_member_mappings():
 
 
 def test_unit_segments_keep_heading_paths_and_neighbor_context_in_unit_order():
-    from web_translator.pdf_models import PdfTranslationUnit
+    from supertranslator.pdf_models import PdfTranslationUnit
     doc = make_unit_document(("Scope", "The body follows"), operation="space")
     blocks = [replace(doc.blocks[0], kind="heading"), doc.blocks[1]]
     units = [
@@ -1223,7 +1223,7 @@ def test_unit_segments_keep_heading_paths_and_neighbor_context_in_unit_order():
 
 
 def test_oversized_logical_unit_is_not_split():
-    from web_translator.zones import ZoneContractError, build_zones
+    from supertranslator.zones import ZoneContractError, build_zones
     doc = make_unit_document(("A" * 6001, "B" * 6000), operation="space")
     _, _, segments = pdf_extract.build_pdf_unit_segments(doc.blocks, doc.translation_units)
     with pytest.raises(PdfContractError, match="12002") as error:
@@ -1235,7 +1235,7 @@ def test_oversized_logical_unit_is_not_split():
 
 
 def test_joined_product_and_protected_spans_keep_source_offsets():
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     doc = make_unit_document(("Use Postgre‐", "SQL at https://example.org/2024."))
     blocks, units, segments = pdf_extract.build_pdf_unit_segments(doc.blocks, doc.translation_units)
     segment = segments[0]
@@ -1252,7 +1252,7 @@ def test_joined_product_and_protected_spans_keep_source_offsets():
 
 
 def test_protected_token_crossing_removed_mark_retains_both_physical_spans():
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     doc = make_unit_document(("Go to https://exam‐", "ple.org/path now"))
     blocks, units, segments = pdf_extract.build_pdf_unit_segments(doc.blocks, doc.translation_units)
     occurrence = pdf_units.project_protected_occurrences(units[0], {b.id: b for b in blocks})[0]
@@ -1268,7 +1268,7 @@ def test_protected_token_crossing_removed_mark_retains_both_physical_spans():
 
 
 def test_number_after_removed_mark_keeps_physical_offset():
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     doc = make_unit_document(("Postgre‐", "SQL 2024 is ready"))
     blocks, units, segments = pdf_extract.build_pdf_unit_segments(doc.blocks, doc.translation_units)
     occurrence = pdf_units.project_protected_occurrences(units[0], {b.id: b for b in blocks})[0]
@@ -1280,7 +1280,7 @@ def test_number_after_removed_mark_keeps_physical_offset():
 
 
 def test_recognized_literal_code_crossing_join_restores_exact_text():
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     doc = make_unit_document(("Run <code>SELECT‐", "1</code> now"))
     blocks, units, segments = pdf_extract.build_pdf_unit_segments(doc.blocks, doc.translation_units)
     occurrence = pdf_units.project_protected_occurrences(units[0], {b.id: b for b in blocks})[0]
@@ -1290,7 +1290,7 @@ def test_recognized_literal_code_crossing_join_restores_exact_text():
 
 
 def test_reference_singletons_keep_existing_core_protection():
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     citation = '[1] A. Writer: "Data replication", Press, 2024.'
     doc = make_unit_document((citation + " Note: Use https://example.org/2025.",))
     doc.blocks[0] = replace(doc.blocks[0], semantic_role="reference-entry")
@@ -1331,7 +1331,7 @@ def test_joined_reference_unit_is_rejected_at_every_entry_point():
 
 
 def test_repeated_visible_note_markers_keep_distinct_occurrences():
-    from web_translator.pdf_models import PdfTranslationUnit
+    from supertranslator.pdf_models import PdfTranslationUnit
     doc = make_unit_document(("First i appears", "and second i appears"), operation="space")
     owners = [replace(block, destination=f"pdf:page-{index + 1:04d}:block-0002")
               for index, block in enumerate(doc.blocks)]
@@ -1366,7 +1366,7 @@ def test_shared_protection_uses_actual_match_not_earlier_unprotected_substring()
 
 
 def test_footnote_leading_marker_retains_physical_owner_and_note_identity():
-    from web_translator.pdf_models import PdfTranslationUnit
+    from supertranslator.pdf_models import PdfTranslationUnit
     doc = make_unit_document(("A note i",))
     owner = replace(doc.blocks[0], destination="pdf:page-0001:block-0002")
     note = replace(owner, id=owner.destination, order=1, kind="footnote",

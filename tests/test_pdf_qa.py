@@ -23,10 +23,10 @@ from pypdf.generic import (
 )
 from reportlab.pdfgen.canvas import Canvas
 
-from web_translator.models import ProtectedToken, Segment, Translation, write_segments
-from web_translator.pdf_assemble import assemble_pdf
-from web_translator.pdf_flowables import PdfTocResolution
-from web_translator.pdf_models import (
+from supertranslator.models import ProtectedToken, Segment, Translation, write_segments
+from supertranslator.pdf_assemble import assemble_pdf
+from supertranslator.pdf_flowables import PdfTocResolution
+from supertranslator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
     PdfDocument,
@@ -34,16 +34,16 @@ from web_translator.pdf_models import (
     PdfSourceRecord,
     PdfTableCell,
 )
-from web_translator.pdf_qa import (
+from supertranslator.pdf_qa import (
     PdfQAFailure,
     PdfQAResult,
     finalize_pdf_output,
     prepare_pdf_qa,
     read_pdf_layout_review,
 )
-from web_translator.pdf_media import build_contact_sheets, render_pdf_pages
-from web_translator.pdf_review import build_pdf_semantic_review_input
-import web_translator.pdf_qa as pdf_qa_module
+from supertranslator.pdf_media import build_contact_sheets, render_pdf_pages
+from supertranslator.pdf_review import build_pdf_semantic_review_input
+import supertranslator.pdf_qa as pdf_qa_module
 from tests.pdf_fixtures import make_text_pdf
 from tests.pdf_fixtures import write_test_empty_artwork_approval
 from tests.pdf_unit_fixtures import write_native_singleton_fixture, rebind_native_fixture
@@ -52,9 +52,9 @@ from tests.pdf_unit_fixtures import write_native_singleton_fixture, rebind_nativ
 def make_native_unit_qa_run(tmp_path, *, case="joined"):
     """Generated test-only evidence through the native unit and assembly paths."""
     from tests.pdf_unit_fixtures import make_render_unit_run
-    from web_translator.cli import _zone_payload
-    from web_translator.pdf_unit_bindings import build_pdf_unit_binding
-    from web_translator.zones import build_zones
+    from supertranslator.cli import _zone_payload
+    from supertranslator.pdf_unit_bindings import build_pdf_unit_binding
+    from supertranslator.zones import build_zones
 
     run, document, segments, translations = make_render_unit_run(tmp_path, case=case)
     for zone in build_zones(segments):
@@ -74,7 +74,7 @@ def make_native_unit_qa_run(tmp_path, *, case="joined"):
     _write_review(run)
     output = tmp_path / "output"
     assemble_pdf(run, translations, glossary, output)
-    from web_translator.pdf_flowables import PdfAssemblyLayout
+    from supertranslator.pdf_flowables import PdfAssemblyLayout
     layout = PdfAssemblyLayout.from_dict(json.loads((run / "layout.json").read_bytes()))
     return PdfQARun(run, output), document, layout
 
@@ -266,7 +266,7 @@ def test_unit_qa_reader_rejects_logical_count_larger_than_physical(tmp_path):
 
 def test_unit_layout_rejects_unresolved_required_flow_findings(tmp_path):
     from dataclasses import replace
-    from web_translator.pdf_models import PdfFlowFinding
+    from supertranslator.pdf_models import PdfFlowFinding
     _run, document, layout = make_native_unit_qa_run(tmp_path)
     finding = PdfFlowFinding("ambiguous-page-continuation", document.blocks[0].id,
                              document.blocks[1].id, "required", "Unresolved boundary")
@@ -387,7 +387,7 @@ def _write_passing_layout_review(run_dir: Path, *, staged_sha256: str | None = N
 
 @pytest.fixture
 def assembled_pdf_run(tmp_path: Path) -> PdfQARun:
-    run_dir = tmp_path / ".web-translator" / "runs" / "result"
+    run_dir = tmp_path / ".supertranslator" / "runs" / "result"
     run_dir.mkdir(parents=True)
     (tmp_path / "translated-pdfs").mkdir()
     source_pdf = make_text_pdf(run_dir / "source.pdf")
@@ -2415,7 +2415,7 @@ def test_prepare_pdf_qa_rejects_render_failure_without_publishing(
     assembled_pdf_run: PdfQARun,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     def fail_render(*args: object, **kwargs: object) -> list[Path]:
         raise PdfMediaError("Poppler render failed")
@@ -2435,7 +2435,7 @@ def test_prepare_pdf_qa_removes_empty_owned_render_destination_after_immediate_f
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     def fail_immediately(*args: object, **kwargs: object) -> list[Path]:
         del args, kwargs
@@ -2469,7 +2469,7 @@ def test_prepare_pdf_qa_preserves_posix_cleanup_replacement_races(
     if os.name == "nt":
         pytest.skip("POSIX dirfd-relative cleanup regression")
 
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     held_original = tmp_path / "racer-held-original"
     held_identity: tuple[int, int] | None = None
@@ -2556,7 +2556,7 @@ def test_prepare_pdf_qa_cleans_owned_destination_after_render_failure(
     partial_page: bool,
     failure: str,
 ) -> None:
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     racer = assembled_pdf_run.run_dir / "unrelated-render-racer"
     racer.mkdir()
@@ -2633,7 +2633,7 @@ def test_prepare_pdf_qa_quarantines_failed_render_filename_racers(
     racer_name: str,
     failure: str,
 ) -> None:
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     racer_bytes = f"racer:{racer_name}:{failure}".encode()
 
@@ -3349,7 +3349,7 @@ def test_render_pdf_pages_uses_empty_existing_owned_destination(
 def test_render_pdf_pages_never_follows_existing_destination_symlink(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_media import PdfMediaError
+    from supertranslator.pdf_media import PdfMediaError
 
     source = make_text_pdf(tmp_path / "source.pdf")
     outside = tmp_path / "outside"
@@ -3372,8 +3372,8 @@ def test_render_pdf_pages_rejects_non_page_output_in_owned_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import PdfMediaError
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import PdfMediaError
 
     source = make_text_pdf(tmp_path / "source.pdf")
     destination = tmp_path / "rendered"
@@ -3405,8 +3405,8 @@ def test_render_pdf_pages_rechecks_output_after_name_normalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import PdfMediaError
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import PdfMediaError
 
     source = make_text_pdf(tmp_path / "source.pdf")
     destination = tmp_path / "rendered"

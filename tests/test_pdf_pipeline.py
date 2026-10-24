@@ -16,19 +16,19 @@ import pytest
 from pypdf import PdfReader
 from reportlab.pdfgen.canvas import Canvas
 
-import web_translator.pdf_assemble as pdf_assemble_module
-import web_translator.pdf_qa as pdf_qa_module
-import web_translator.pdf_report as pdf_report_module
-import web_translator.network as network_module
-import web_translator.pdf_media as pdf_media_module
-from web_translator.cli import main
+import supertranslator.pdf_assemble as pdf_assemble_module
+import supertranslator.pdf_qa as pdf_qa_module
+import supertranslator.pdf_report as pdf_report_module
+import supertranslator.network as network_module
+import supertranslator.pdf_media as pdf_media_module
+from supertranslator.cli import main
 from tests import pdf_fixtures
 from tests.pdf_fixtures import make_many_pages_pdf, make_oversized_pdf
 from tests.test_pdf_extract import _column_pdf, _ruled_table_pdf
 from tests.test_pdf_assemble import _assert_pdf_text_style
-from web_translator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
-from web_translator.pdf_media import PdfMediaError
-from web_translator.pdf_report import (
+from supertranslator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
+from supertranslator.pdf_media import PdfMediaError
+from supertranslator.pdf_report import (
     PdfFinalManifest,
     build_pdf_manifest,
     render_pdf_review_report,
@@ -54,8 +54,8 @@ _TEST_FIGURE_DECISIONS = {
 @pytest.mark.parametrize("stage", ["assembly", "review", "qa", "plan"])
 def test_native_unit_gates_reject_legacy_diagnostics(tmp_path, origin, stage):
     from tests.test_pdf_qa import make_native_unit_qa_run
-    from web_translator.pdf_review import build_pdf_semantic_review_input, PdfSemanticReviewError
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_review import build_pdf_semantic_review_input, PdfSemanticReviewError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, _document, _layout = make_native_unit_qa_run(tmp_path)
     path = run.run_dir / "document.json"
     value = json.loads(path.read_bytes())
@@ -252,7 +252,7 @@ _LATIN_ALPHABET = re.compile(r"[A-Za-z]")
 
 
 def _pdf_cli_paths(tmp_path: Path, run_id: str = "run") -> tuple[Path, Path]:
-    run_dir = tmp_path / ".web-translator" / "runs" / run_id
+    run_dir = tmp_path / ".supertranslator" / "runs" / run_id
     output_dir = tmp_path / "translated-pdfs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -281,7 +281,7 @@ def test_source_emphasis_variants_preserve_actual_size_ratios_and_weight(
     tmp_path: Path, font_family: str, scale: float,
 ) -> None:
     from tests.test_pdf_qa import _write_review, _write_passing_layout_review
-    from web_translator.models import read_segments
+    from supertranslator.models import read_segments
 
     source = tmp_path / "independent-source.pdf"
     _make_source_emphasis_pdf(source, font_family=font_family, scale=scale)
@@ -937,7 +937,7 @@ def test_test_fixture_figure_review_binds_exact_inventory_without_mutating_maste
 @pytest.mark.parametrize("case", ["missing", "extra", "selectable", "noncanonical"])
 def test_test_fixture_figure_review_refuses_unknown_or_selectable_inventory(tmp_path: Path, case: str) -> None:
     from tests.pdf_fixture_probe import capture_figure_fixture_inventory
-    from web_translator.pdf_figure_review import canonical_figure_text_input_bytes, parse_pdf_figure_text_input
+    from supertranslator.pdf_figure_review import canonical_figure_text_input_bytes, parse_pdf_figure_text_input
 
     summary = capture_figure_fixture_inventory(tmp_path / "capture")
     payload = (tmp_path / "capture" / summary["inventory"]["path"]).read_bytes()
@@ -1017,7 +1017,7 @@ def test_figure_fixture_probe_retains_exact_inventory_and_artwork(
     import sys
     import zlib
     from PIL import Image
-    import web_translator.pdf_figure_review as figure_review
+    import supertranslator.pdf_figure_review as figure_review
     from tests.pdf_fixture_probe import capture_figure_fixture_inventory
 
     committed_before = {
@@ -1328,7 +1328,7 @@ def test_committed_pdf_acceptance_fixtures_complete_local_reviewed_pipeline(
 def test_fresh_fixture_figure_review_rejects_changed_consumed_evidence(
     tmp_path: Path, mutation: str, capsys,
 ) -> None:
-    from web_translator.pdf_figure_review import canonical_figure_text_input_bytes
+    from supertranslator.pdf_figure_review import canonical_figure_text_input_bytes
 
     fixture = PDF_FIXTURE_ROOT / "figures-captions-v1"
     run, output = _pdf_cli_paths(tmp_path)

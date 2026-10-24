@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from web_translator.capture import capture_page
-from web_translator.extract import extract_segments
+from supertranslator.capture import capture_page
+from supertranslator.extract import extract_segments
 
 
 SAMPLES = (

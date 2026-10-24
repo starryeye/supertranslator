@@ -42,6 +42,7 @@ jobs:
         if: runner.os == 'Windows'
       - run: >-
           python -m pytest tests/test_pdf_pipeline.py tests/test_plugin_layout.py
+          tests/test_renamed_identity.py
           tests/test_pdf_utf8_fixtures.py
           tests/test_poppler_bootstrap.py
           tests/test_pdf_acquire.py::test_windows_run_anchor_requests_only_directory_list_access

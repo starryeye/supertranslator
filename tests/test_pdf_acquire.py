@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-import web_translator.pdf_acquire as acquire_module
-from web_translator.pdf_acquire import MAX_PDF_BYTES, PdfAcquireError, acquire_pdf
+import supertranslator.pdf_acquire as acquire_module
+from supertranslator.pdf_acquire import MAX_PDF_BYTES, PdfAcquireError, acquire_pdf
 
 
 FIXED_TIME = datetime(2026, 8, 21, 1, 2, 3, tzinfo=UTC)

@@ -8,9 +8,9 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pytest
 
-import web_translator.cli as cli
-from web_translator.models import read_segments
-from web_translator.preformatted_contract import canonical_bytes, canonical_sha256
+import supertranslator.cli as cli
+from supertranslator.models import read_segments
+from supertranslator.preformatted_contract import canonical_bytes, canonical_sha256
 
 
 SOURCE = (b'<!doctype html><html><head><meta charset="utf-8"></head><body>'
@@ -22,7 +22,7 @@ DIMENSIONS = ('semantic_fidelity', 'qualification_preservation', 'naturalness',
 
 
 def _run(tmp_path):
-    run = tmp_path / '작업 공간' / '.web-translator/runs/검토 run'
+    run = tmp_path / '작업 공간' / '.supertranslator/runs/검토 run'
     output = tmp_path / '작업 공간' / 'translated-pages/검토 run'
     run.mkdir(parents=True)
     output.parent.mkdir(parents=True)
@@ -107,7 +107,7 @@ def _no_pass(output):
 
 def _compatible_file_snapshot(path):
     """Use the existing read primitive compatible with retained native handles."""
-    import web_translator.pdf_assemble as storage
+    import supertranslator.pdf_assemble as storage
     root = storage._open_directory_anchor(path.parent, 'test replacement snapshot')
     opened = None
     try:
@@ -199,7 +199,7 @@ def test_id_bearing_attribute_targets_complete_reviewed_web_pipeline(tmp_path):
     assert marked.find(id='manual')['data-wt-segment']
     assert marked.find(id='query')['data-ajax-url'] == '/lookup'
     assert marked.find(id='manual')['href'] == '/manual'
-    from web_translator.preformatted_runtime import hold_processing_source, verify_preformatted_output
+    from supertranslator.preformatted_runtime import hold_processing_source, verify_preformatted_output
     marked_copy = tmp_path / 'held-marked-copy.html'
     marked_bytes = (run / 'preformatted-source.html').read_bytes()
     marked_copy.write_bytes(marked_bytes)
@@ -320,8 +320,8 @@ def test_qa_inventory_to_selected_source_race_never_leaves_owned_pass(
 def test_direct_qa_absent_inventory_cannot_bypass_new_state(
     tmp_path, monkeypatch, source_name
 ):
-    from web_translator.models import QAInputs, MasterReview
-    import web_translator.qa as qa
+    from supertranslator.models import QAInputs, MasterReview
+    import supertranslator.qa as qa
     run, output = _assembled(tmp_path)
     observed = _inventory_before_state_appears(monkeypatch, qa, run, tmp_path)
     result = qa.run_qa(QAInputs(
@@ -667,7 +667,7 @@ def test_preformatted_qa_changes_at_acceptance_boundaries_leave_no_pass(
         else:
             path.write_bytes(path.read_bytes() + b'\n')
     if boundary == 'after-browser':
-        import web_translator.qa as qa
+        import supertranslator.qa as qa
         real = qa._run_browser_checks
         def change(*args):
             result = real(*args)
@@ -722,8 +722,8 @@ def test_legacy_web_and_pdf_contracts_need_no_preformatted_files(tmp_path):
 
 
 def test_direct_qa_cannot_omit_normalization_for_known_preformatted_state(tmp_path):
-    from web_translator.models import QAInputs, MasterReview
-    from web_translator.qa import run_qa
+    from supertranslator.models import QAInputs, MasterReview
+    from supertranslator.qa import run_qa
     run, output = _assembled(tmp_path)
     result = run_qa(QAInputs(run / 'preformatted-source.html', output / 'index.html',
                             'https://example.com/', {'s'}, {'s'}, [], [],
@@ -780,10 +780,10 @@ def test_empty_preformatted_extraction_is_not_successful_translation(tmp_path):
     assert _command('assemble', run, output) != 0
     # A caller can use the old low-level assembler, but neither public QA nor
     # direct typed QA may certify this zero-target extraction as a translation.
-    from web_translator.assemble import assemble_page
-    from web_translator.models import QAInputs, MasterReview
-    from web_translator.preformatted_contract import NormalizationSummary
-    from web_translator.qa import run_qa
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import QAInputs, MasterReview
+    from supertranslator.preformatted_contract import NormalizationSummary
+    from supertranslator.qa import run_qa
     assemble_page(run / 'preformatted-source.html', {}, {}, {}, output, 'https://example.com/')
     assert _command('qa', run, output) == 6
     summary = NormalizationSummary.from_dict(json.loads((run / 'preformatted/provenance.json').read_bytes())['summary'])
@@ -822,7 +822,7 @@ def test_foreign_report_replacement_survives_failed_postpublication_check(tmp_pa
 
 
 def test_recovery_snapshot_failure_does_not_delete_prior_evidence(tmp_path, monkeypatch):
-    import web_translator.pdf_extract_transaction as transaction
+    import supertranslator.pdf_extract_transaction as transaction
     run, output = _assembled(tmp_path)
     prior = {'manifest.json': b'{"qa_status":"failed"}\n',
              'review-report.md': b'# Previous FAIL evidence\n'}
@@ -839,8 +839,8 @@ def test_recovery_snapshot_failure_does_not_delete_prior_evidence(tmp_path, monk
 
 
 def test_dangling_preformatted_state_cannot_leave_prior_pass_or_omit_provenance(tmp_path):
-    from web_translator.models import QAInputs, MasterReview
-    from web_translator.qa import run_qa
+    from supertranslator.models import QAInputs, MasterReview
+    from supertranslator.qa import run_qa
     run, output = _assembled(tmp_path)
     prior = {'manifest.json': b'{"qa_status":"passed"}\n',
              'review-report.md': b'# Prior result\n**PASS**\n'}
@@ -896,8 +896,8 @@ def test_orphan_qa_quarantines_prior_pass_using_the_runtime_state_indicators(tmp
 
 @pytest.mark.parametrize('kind', ['orphan-css', 'interrupted', 'interrupted-link', 'sibling-derived'])
 def test_direct_qa_requires_normalization_for_each_lexical_orphan_indicator(tmp_path, kind):
-    from web_translator.models import QAInputs, MasterReview
-    from web_translator.qa import run_qa
+    from supertranslator.models import QAInputs, MasterReview
+    from supertranslator.qa import run_qa
     run, output = _run(tmp_path)
     _orphan_state(run, kind)
     output.mkdir()
@@ -915,7 +915,7 @@ def test_direct_qa_requires_normalization_for_each_lexical_orphan_indicator(tmp_
 def test_recovery_tampering_resecures_exact_owned_bytes_before_original_cleanup(
     tmp_path, boundary, mutation
 ):
-    from web_translator.models import MasterReview, QAResult
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     prior = {'manifest.json': b'{"qa_status":"failed","original":true}\n',
@@ -951,7 +951,7 @@ def test_recovery_tampering_resecures_exact_owned_bytes_before_original_cleanup(
 
 
 def test_failed_resecuring_of_edited_backup_preserves_the_unbacked_original(tmp_path, monkeypatch):
-    import web_translator.pdf_assemble as storage
+    import supertranslator.pdf_assemble as storage
     output = tmp_path / 'output'
     output.mkdir()
     prior = {'manifest.json': b'{"qa_status":"failed","original":true}\n',
@@ -974,7 +974,7 @@ def test_failed_resecuring_of_edited_backup_preserves_the_unbacked_original(tmp_
 
 @pytest.mark.parametrize('later_mutation', ['in-place-edit', 'same-byte-replacement'])
 def test_recovery_can_repair_again_after_its_first_fresh_snapshot_is_changed(tmp_path, later_mutation):
-    from web_translator.models import MasterReview, QAResult
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     original = b'{"qa_status":"failed","exact_original":true}\n'
@@ -1014,8 +1014,8 @@ def test_prior_evidence_handles_close_before_real_no_clobber_publication(
 ):
     # A live old descriptor leaves the destination delete-pending on Windows.
     # Observe real descriptor state at the real publisher, without OS simulation.
-    import web_translator.pdf_assemble as storage
-    from web_translator.models import MasterReview, QAResult
+    import supertranslator.pdf_assemble as storage
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     prior = {'manifest.json': b'{"qa_status":"failed","original":true}\n',
@@ -1082,8 +1082,8 @@ def test_repeated_real_preformatted_qa_replaces_legitimate_prior_evidence(tmp_pa
 
 @pytest.mark.parametrize('failure_type', [None, OSError, KeyboardInterrupt])
 def test_qa_stage_cleanup_preserves_foreign_children_and_closes_anchor(tmp_path, monkeypatch, failure_type):
-    import web_translator.pdf_assemble as storage
-    from web_translator.models import MasterReview, QAResult
+    import supertranslator.pdf_assemble as storage
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     stages = []
@@ -1119,7 +1119,7 @@ def test_qa_stage_cleanup_preserves_foreign_children_and_closes_anchor(tmp_path,
 
 
 def test_qa_stage_cleanup_preserves_foreign_directory_identity(tmp_path):
-    from web_translator.models import MasterReview, QAResult
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     failure = ValueError('stop after stage directory replacement')
@@ -1154,9 +1154,9 @@ def test_qa_stage_cleanup_preserves_foreign_directory_identity(tmp_path):
 
 @pytest.mark.skipif(os.name != 'nt', reason='requires native Windows checked DELETE-directory handles')
 def test_native_windows_qa_removes_empty_owned_stages_and_closes_mutation_handles(tmp_path, monkeypatch):
-    import web_translator.pdf_assemble as storage
-    import web_translator.pdf_qa as pdf_qa
-    from web_translator.models import MasterReview, QAResult
+    import supertranslator.pdf_assemble as storage
+    import supertranslator.pdf_qa as pdf_qa
+    from supertranslator.models import MasterReview, QAResult
     output = tmp_path / 'output'
     output.mkdir()
     (output / 'manifest.json').write_bytes(b'{"qa_status":"failed","old":true}\n')

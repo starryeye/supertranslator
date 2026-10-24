@@ -17,7 +17,7 @@ def test_detect_figure_regions_excludes_selectable_text_inside_vector_box(
 ) -> None:
     import pdfplumber
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_media import detect_figure_regions
+    from supertranslator.pdf_media import detect_figure_regions
 
     source = make_decorated_callout_pdf(tmp_path / "callout.pdf", border=border)
     with pdfplumber.open(source) as document:
@@ -30,7 +30,7 @@ def test_detect_figure_regions_excludes_selectable_text_inside_vector_box(
 def test_raster_chart_preserves_labels_in_source_pixels(tmp_path: Path) -> None:
     import pdfplumber
     from PIL import ImageDraw
-    from web_translator.pdf_media import crop_figure_regions, detect_figure_regions
+    from supertranslator.pdf_media import crop_figure_regions, detect_figure_regions
 
     raster = Image.new("RGB", (200, 100), "white")
     ImageDraw.Draw(raster).text((15, 60), "Time 0 10 20", fill="black")
@@ -53,7 +53,7 @@ def test_graphic_partition_records_only_artwork_character_ownership(
 ) -> None:
     import pdfplumber
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_media import partition_graphic_regions
+    from supertranslator.pdf_media import partition_graphic_regions
 
     source = make_decorated_callout_pdf(tmp_path / "partition.pdf", border=border)
     with pdfplumber.open(source) as document:
@@ -70,7 +70,7 @@ def test_short_callout_with_styled_title_and_one_prose_line_is_not_a_figure(
     tmp_path: Path,
 ) -> None:
     import pdfplumber
-    from web_translator.pdf_media import detect_figure_regions
+    from supertranslator.pdf_media import detect_figure_regions
 
     source = tmp_path / "short-callout.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -92,7 +92,7 @@ def test_short_body_only_bordered_callout_is_never_rasterized(
     tmp_path: Path, border: str,
 ) -> None:
     import pdfplumber
-    from web_translator.pdf_media import partition_graphic_regions
+    from supertranslator.pdf_media import partition_graphic_regions
 
     source = tmp_path / "short-body.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -114,7 +114,7 @@ def test_short_body_only_bordered_callout_is_never_rasterized(
 def test_labeled_icon_inside_callout_retains_its_selectable_artwork_label(tmp_path: Path) -> None:
     import pdfplumber
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_media import partition_graphic_regions
+    from supertranslator.pdf_media import partition_graphic_regions
 
     source = make_decorated_callout_pdf(tmp_path / "labeled.pdf", labeled_icon=True)
     with pdfplumber.open(source) as document:
@@ -128,7 +128,7 @@ def test_labeled_icon_inside_callout_retains_its_selectable_artwork_label(tmp_pa
 def test_graphic_partition_rejects_prose_mixed_with_substantial_artwork(tmp_path: Path) -> None:
     import pdfplumber
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_media import PdfMediaError, partition_graphic_regions
+    from supertranslator.pdf_media import PdfMediaError, partition_graphic_regions
 
     source = make_decorated_callout_pdf(tmp_path / "mixed.pdf")
     # Overlay a substantial connected drawing through the prose container.
@@ -203,7 +203,7 @@ def _nonzero_origin_vector_pdf(path: Path) -> Path:
 
 
 def test_find_poppler_returns_absolute_executable_paths() -> None:
-    from web_translator.pdf_media import find_poppler
+    from supertranslator.pdf_media import find_poppler
 
     tools = find_poppler()
 
@@ -216,8 +216,8 @@ def test_find_poppler_returns_absolute_executable_paths() -> None:
 def test_find_poppler_reports_both_required_commands_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import PdfMediaError
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import PdfMediaError
 
     monkeypatch.setattr(media_module.shutil, "which", lambda name: None)
 
@@ -229,8 +229,8 @@ def test_find_poppler_wraps_stale_path_evidence_in_media_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import PdfMediaError
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import PdfMediaError
 
     monkeypatch.setattr(
         media_module.shutil,
@@ -243,7 +243,7 @@ def test_find_poppler_wraps_stale_path_evidence_in_media_error(
 
 
 def test_render_pdf_pages_uses_fixed_dpi_and_returns_png_pages(tmp_path: Path) -> None:
-    from web_translator.pdf_media import render_pdf_pages
+    from supertranslator.pdf_media import render_pdf_pages
 
     pages = render_pdf_pages(
         _graphic_pdf(tmp_path / "graphic.pdf"),
@@ -279,14 +279,14 @@ def test_render_budget_rejects_one_unit_above_each_exact_limit(
     encoded_bytes: list[int],
     message: str,
 ) -> None:
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     with pytest.raises(media_module.PdfMediaError, match=message):
         media_module._validate_render_budget_counts(pixels, encoded_bytes)
 
 
 def test_render_budget_accepts_exact_limits_and_one_unit_below() -> None:
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     media_module._validate_render_budget_counts(
         [36_000_000] * 55 + [20_000_000],
@@ -312,7 +312,7 @@ def test_poppler_render_timeout_allows_ten_minutes(
 ) -> None:
     import subprocess
 
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     class TimedOutProcess:
         returncode = None
@@ -346,7 +346,7 @@ def test_render_rejects_oversized_geometry_before_locating_poppler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     source = tmp_path / "oversized.pdf"
     canvas = Canvas(str(source), pagesize=(14_401, 792))
@@ -365,7 +365,7 @@ def test_render_rejects_oversized_geometry_before_locating_poppler(
 def test_render_geometry_normalizes_strict_pdf_parser_failures(
     tmp_path: Path,
 ) -> None:
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     source = tmp_path / "malformed.pdf"
     source.write_bytes(b"not a PDF")
@@ -381,7 +381,7 @@ def test_render_rejects_oversized_user_unit_before_locating_poppler(
     from pypdf import PdfReader, PdfWriter
     from pypdf.generic import FloatObject, NameObject
 
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     source = tmp_path / "oversized-user-unit.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -410,7 +410,7 @@ def test_render_preflight_budgets_default_poppler_media_box_not_crop_box(
     from pypdf import PdfReader, PdfWriter
     from pypdf.generic import ArrayObject, FloatObject, NameObject
 
-    import web_translator.pdf_media as media_module
+    import supertranslator.pdf_media as media_module
 
     source = tmp_path / "media-box-over-budget.pdf"
     canvas = Canvas(str(source), pagesize=(100, 100))
@@ -441,7 +441,7 @@ def test_render_preflight_budgets_default_poppler_media_box_not_crop_box(
 def test_crop_figure_regions_keeps_rendered_pixels_and_exact_dimensions(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_media import FigureRegion, crop_figure_regions
+    from supertranslator.pdf_media import FigureRegion, crop_figure_regions
 
     crops = crop_figure_regions(
         _graphic_pdf(tmp_path / "source.pdf"),
@@ -468,7 +468,7 @@ def test_detected_raster_crop_normalizes_nonzero_page_box_origin(
 ) -> None:
     import pdfplumber
 
-    from web_translator.pdf_media import crop_figure_regions, detect_figure_regions
+    from supertranslator.pdf_media import crop_figure_regions, detect_figure_regions
 
     source = _nonzero_origin_raster_pdf(tmp_path / "nonzero-origin.pdf")
     with pdfplumber.open(source) as document:
@@ -484,7 +484,7 @@ def test_detected_raster_crop_normalizes_nonzero_page_box_origin(
 def test_raster_crop_includes_one_connected_vector_object(tmp_path: Path) -> None:
     import pdfplumber
 
-    from web_translator.pdf_media import crop_figure_regions, detect_figure_regions
+    from supertranslator.pdf_media import crop_figure_regions, detect_figure_regions
 
     source = _raster_with_single_attached_vector_pdf(tmp_path / "attached-vector.pdf")
     with pdfplumber.open(source) as document:
@@ -501,7 +501,7 @@ def test_detected_vector_crop_normalizes_nonzero_page_box_origin(
 ) -> None:
     import pdfplumber
 
-    from web_translator.pdf_media import crop_figure_regions, detect_figure_regions
+    from supertranslator.pdf_media import crop_figure_regions, detect_figure_regions
 
     source = _nonzero_origin_vector_pdf(tmp_path / "nonzero-vector.pdf")
     with pdfplumber.open(source) as document:
@@ -516,7 +516,7 @@ def test_detected_vector_crop_normalizes_nonzero_page_box_origin(
 def test_crop_figure_regions_rejects_a_region_outside_the_rendered_page(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_media import FigureRegion, PdfMediaError, crop_figure_regions
+    from supertranslator.pdf_media import FigureRegion, PdfMediaError, crop_figure_regions
 
     with pytest.raises(PdfMediaError, match="cannot crop figure region"):
         crop_figure_regions(
@@ -539,8 +539,8 @@ def test_crop_figure_regions_cleans_first_root_when_second_allocation_fails(
 ) -> None:
     import tempfile
 
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import FigureRegion, PdfMediaError
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import FigureRegion, PdfMediaError
 
     real_mkdtemp = tempfile.mkdtemp
     calls = 0
@@ -572,8 +572,8 @@ def test_crop_figure_regions_cleans_first_root_when_second_allocation_is_interru
 ) -> None:
     import tempfile
 
-    import web_translator.pdf_media as media_module
-    from web_translator.pdf_media import FigureRegion
+    import supertranslator.pdf_media as media_module
+    from supertranslator.pdf_media import FigureRegion
 
     real_mkdtemp = tempfile.mkdtemp
     calls = 0

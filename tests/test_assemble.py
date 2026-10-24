@@ -5,10 +5,10 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pytest
 
-from web_translator.assemble import AssemblyError, assemble_page
-from web_translator.extract import extract_segments
-from web_translator.models import ProtectedToken, Segment, Translation
-from web_translator.terminology import (
+from supertranslator.assemble import AssemblyError, assemble_page
+from supertranslator.extract import extract_segments
+from supertranslator.models import ProtectedToken, Segment, Translation
+from supertranslator.terminology import (
     TerminologyError,
     normalize_first_use,
     normalize_terminology,

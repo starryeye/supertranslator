@@ -5,7 +5,7 @@ import socket
 import httpx
 import pytest
 
-from web_translator.network import (
+from supertranslator.network import (
     NetworkBudget,
     NetworkError,
     build_public_client,

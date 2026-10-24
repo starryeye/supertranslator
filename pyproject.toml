@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "web-translator"
-version = "0.7.0"
+name = "supertranslator"
+version = "0.8.0"
 description = "Translate public webpages and PDFs into reviewed offline Korean artifacts."
 requires-python = ">=3.11"
 dependencies = [
@@ -29,7 +29,7 @@ test = [
 ]
 
 [project.scripts]
-web-translator = "web_translator.cli:console_main"
+supertranslator = "supertranslator.cli:console_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -38,7 +38,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-web_translator = [
+supertranslator = [
     "font_assets/*.ttf",
     "font_assets/OFL.txt",
     "font_assets/NotoSans-OFL.txt",

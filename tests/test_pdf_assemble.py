@@ -24,17 +24,17 @@ from reportlab.pdfbase.ttfonts import TTFont as ReportLabTTFont
 from reportlab.pdfgen import canvas
 
 import scripts.vendor_pdf_fonts as font_vendor
-import web_translator.pdf_assemble as pdf_assemble_module
-from web_translator.models import (
+import supertranslator.pdf_assemble as pdf_assemble_module
+from supertranslator.models import (
     ProtectedToken,
     Segment,
     Translation,
     read_segments,
     write_segments,
 )
-from web_translator.pdf_assemble import PdfAssemblyError, assemble_pdf
-from web_translator.pdf_flowables import PdfPageSize, read_pdf_layout
-from web_translator.pdf_models import (
+from supertranslator.pdf_assemble import PdfAssemblyError, assemble_pdf
+from supertranslator.pdf_flowables import PdfPageSize, read_pdf_layout
+from supertranslator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
     PdfDocument,
@@ -147,7 +147,7 @@ def test_member_anchors_resolve_to_reported_unit_start(rendered_unit_case):
 
 @pytest.mark.parametrize("rendered_unit_case", ["multiple-note"], indirect=True)
 def test_joined_unit_preserves_two_equal_visible_note_markers(rendered_unit_case):
-    from web_translator.pdf_units import project_protected_occurrences
+    from supertranslator.pdf_units import project_protected_occurrences
     document, layout, text, _pdf, segments = rendered_unit_case()
     occurrences = project_protected_occurrences(document.translation_units[0],
         {block.id: block for block in document.blocks})
@@ -241,7 +241,7 @@ def test_joined_unit_link_collision_preserves_protected_note_identity(tmp_path):
 
 @pytest.mark.parametrize("mutation", ["missing", "wrong-first", "different-split-unit", "different-split-members", "duplicate-unit"])
 def test_joined_unit_layout_rejects_invalid_provenance(tmp_path, mutation):
-    from web_translator.pdf_flowables import PdfAssemblyLayout
+    from supertranslator.pdf_flowables import PdfAssemblyLayout
     _document, layout, _text, _pdf, _segments = _render_unit_case(tmp_path, "multiple-note")
     data = layout.to_dict()
     if mutation == "missing":
@@ -259,7 +259,7 @@ def test_joined_unit_layout_rejects_invalid_provenance(tmp_path, mutation):
 
 
 def test_native_singleton_units_retain_rich_rendering(tmp_path):
-    from web_translator.pdf_extract import build_pdf_unit_segments
+    from supertranslator.pdf_extract import build_pdf_unit_segments
     run, _translations, _glossary, _ids = _rich_assembly_run(tmp_path, table_columns=2, table_rows=3)
     document = PdfDocument.from_dict(json.loads((run / "document.json").read_text()))
     blocks, units, segments = build_pdf_unit_segments(document.blocks, document.translation_units)
@@ -791,7 +791,7 @@ def _assert_pdf_text_style(path: Path, label: str, size: float, *, bold: bool) -
 
 
 def test_pdf_text_style_oracle_checks_actual_selected_glyphs(tmp_path: Path) -> None:
-    font_root = files("web_translator").joinpath("font_assets")
+    font_root = files("supertranslator").joinpath("font_assets")
     pdfmetrics.registerFont(ReportLabTTFont("Oracle-Regular", str(font_root.joinpath("NotoSansKR-Regular.ttf"))))
     pdfmetrics.registerFont(ReportLabTTFont("Oracle-Bold", str(font_root.joinpath("NotoSansKR-Bold.ttf"))))
     sample = tmp_path / "font-oracle.pdf"
@@ -1081,7 +1081,7 @@ def _assemble_publication(run_dir: Path, output: Path) -> Path:
 
 def test_extracted_roman_toc_resolves_to_supplied_heading_and_output_anchor(tmp_path: Path) -> None:
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     source = tmp_path / "roman-contents.pdf"
     canvas = Canvas(str(source), pagesize=(504, 661.5))
@@ -1165,7 +1165,7 @@ def test_toc_prints_output_anchor_page_after_korean_reflow(tmp_path: Path) -> No
 def test_toc_render_preserves_terminal_title_punctuation(
     tmp_path: Path, punctuation: str, source_leaders: str,
 ) -> None:
-    from web_translator.pdf_qa import _selectable_translation_matches
+    from supertranslator.pdf_qa import _selectable_translation_matches
 
     run_dir = _publication_assembly_run(tmp_path, [
         (1, "toc-title", "Contents"),
@@ -1568,8 +1568,8 @@ def test_source_composition_fence_ends_when_body_resumes(
 
 
 def test_resumed_cross_page_unit_keeps_following_body_on_its_last_output_page(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import build_pdf_unit_segments
-    from web_translator.pdf_models import (
+    from supertranslator.pdf_extract import build_pdf_unit_segments
+    from supertranslator.pdf_models import (
         PdfBlockBoundary, PdfBoundaryLine, PdfJoinEvidence, PdfTextJoin,
     )
 
@@ -1838,7 +1838,7 @@ def test_callout_without_artwork_keeps_korean_text_selectable(tmp_path: Path, wi
 
 
 def test_font_resources_are_pinned_static_subsets_with_exact_provenance() -> None:
-    asset_root = files("web_translator").joinpath("font_assets")
+    asset_root = files("supertranslator").joinpath("font_assets")
     provenance = json.loads(asset_root.joinpath("PROVENANCE.json").read_text("utf-8"))
 
     assert set(provenance) == {
@@ -1913,7 +1913,7 @@ def test_font_resources_are_pinned_static_subsets_with_exact_provenance() -> Non
 
 
 def test_bundled_fonts_preserve_extended_latin_names_in_both_weights() -> None:
-    root = files("web_translator").joinpath("font_assets")
+    root = files("supertranslator").joinpath("font_assets")
     for filename in ("NotoSansKR-Regular.ttf", "NotoSansKR-Bold.ttf"):
         with as_file(root.joinpath(filename)) as path:
             font = TTFont(path)
@@ -2016,7 +2016,7 @@ def test_vendoring_refuses_tampered_license_hash_without_outputs(
     )
     license_path = tmp_path / "OFL.txt"
     license_path.write_bytes(
-        files("web_translator").joinpath("font_assets/OFL.txt").read_bytes()
+        files("supertranslator").joinpath("font_assets/OFL.txt").read_bytes()
         + b"\ntampered\n"
     )
     destination = tmp_path / "font-assets"
@@ -2039,7 +2039,7 @@ def test_vendoring_refuses_tampered_supplemental_inputs_without_outputs(
     source.write_bytes(b"controlled primary source")
     monkeypatch.setattr(font_vendor, "FONT_SOURCE_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
     license_path = tmp_path / "OFL.txt"
-    license_path.write_bytes(files("web_translator").joinpath("font_assets/OFL.txt").read_bytes())
+    license_path.write_bytes(files("supertranslator").joinpath("font_assets/OFL.txt").read_bytes())
     supplemental_source = tmp_path / "supplemental.ttf"
     supplemental_source.write_bytes(b"controlled supplemental source")
     supplemental_license = tmp_path / "supplemental-OFL.txt"
@@ -2062,8 +2062,8 @@ def test_assemble_pdf_rejects_tampered_supplemental_license_without_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered: str
 ) -> None:
     run_dir, translations, glossary = _assembly_run(tmp_path)
-    package_root = tmp_path / "installed" / "web_translator"
-    with as_file(files("web_translator").joinpath("font_assets")) as original:
+    package_root = tmp_path / "installed" / "supertranslator"
+    with as_file(files("supertranslator").joinpath("font_assets")) as original:
         shutil.copytree(original, package_root / "font_assets")
     asset_root = package_root / "font_assets"
     if tampered == "license-file":
@@ -2085,8 +2085,8 @@ def test_assemble_pdf_rejects_tampered_bundled_license_without_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, translations, glossary = _assembly_run(tmp_path)
-    package_root = tmp_path / "installed" / "web_translator"
-    with as_file(files("web_translator").joinpath("font_assets")) as original:
+    package_root = tmp_path / "installed" / "supertranslator"
+    with as_file(files("supertranslator").joinpath("font_assets")) as original:
         shutil.copytree(original, package_root / "font_assets")
     (package_root / "font_assets" / "OFL.txt").write_text(
         "tampered license", encoding="utf-8"

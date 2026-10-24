@@ -12,7 +12,7 @@ import pdfplumber
 import pytest
 from reportlab.pdfgen.canvas import Canvas
 
-from web_translator.models import read_segments
+from supertranslator.models import read_segments
 
 from tests.pdf_fixtures import (
     make_dimension_pdf,
@@ -35,8 +35,8 @@ from tests.pdf_fixtures import (
     make_string_pages_type_pdf,
     make_zero_page_pdf,
 )
-from web_translator.pdf_acquire import MAX_PDF_BYTES
-from web_translator.pdf_extract import (
+from supertranslator.pdf_acquire import MAX_PDF_BYTES
+from supertranslator.pdf_extract import (
     PdfExtractionError,
     PdfInspection,
     _validate_character_assignment,
@@ -44,7 +44,7 @@ from web_translator.pdf_extract import (
     inspect_pdf,
     reject_unsupported_pdf,
 )
-from web_translator.pdf_models import PdfBlock, PdfBlockStyle, PdfPageEvidence
+from supertranslator.pdf_models import PdfBlock, PdfBlockStyle, PdfPageEvidence
 
 
 @pytest.mark.parametrize("scale", [.65, 1.6])
@@ -55,11 +55,11 @@ from web_translator.pdf_models import PdfBlock, PdfBlockStyle, PdfPageEvidence
 def test_native_owned_paragraph_region_writes_one_complete_continuation(tmp_path, monkeypatch, scale, margin, font, discretionary, opaque, problem):
     # Native grouping and writer must propagate span proof, not lose a source clause.
     from tests.pdf_unit_fixtures import make_native_region_pdf, REGION_PARAGRAPHS, REGION_INSET
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_units import project_unit_text
-    from web_translator.pdf_unit_bindings import require_assignable_pdf
-    from web_translator.protection import restore_tokens
-    from web_translator import pdf_extract
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_units import project_unit_text
+    from supertranslator.pdf_unit_bindings import require_assignable_pdf
+    from supertranslator.protection import restore_tokens
+    from supertranslator import pdf_extract
     physical_before = []
     collector = pdf_extract.collect_flow_boundaries
     def record_physical(blocks, pages, lines, **kwargs):
@@ -123,10 +123,10 @@ def test_native_final_owner_mixed_context_writes_complete_target(
         tmp_path, monkeypatch, scale, margin, font, label, spacing, label_first):
     # Loss of either proof must surface as a required native writer finding.
     from tests.pdf_unit_fixtures import make_native_owned_context_pdf, CONTEXT_PROSE, CONTEXT_NOTE
-    from web_translator import pdf_extract
-    from web_translator.pdf_unit_bindings import require_assignable_pdf
-    from web_translator.pdf_units import project_unit_text
-    from web_translator.protection import restore_tokens
+    from supertranslator import pdf_extract
+    from supertranslator.pdf_unit_bindings import require_assignable_pdf
+    from supertranslator.pdf_units import project_unit_text
+    from supertranslator.protection import restore_tokens
     physical = []
     observed = {}
     collector = pdf_extract.collect_flow_boundaries
@@ -190,8 +190,8 @@ def test_native_final_owner_mixed_context_writes_complete_target(
 @pytest.mark.parametrize("scale,margin,font", [(.7, 48, "Helvetica"), (1.5, 90, "Times-Roman")])
 def test_native_paragraph_region_keeps_competing_flow_assignment_blocked(tmp_path, problem, scale, margin, font):
     from tests.pdf_unit_fixtures import make_native_region_pdf
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
     source = make_native_region_pdf(tmp_path / "source.pdf", scale=scale, margin=margin, font=font, problem=problem)
     document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
     assert document.flow_findings and all(f.severity == "required" for f in document.flow_findings)
@@ -206,8 +206,8 @@ def test_native_paragraph_region_keeps_competing_flow_assignment_blocked(tmp_pat
 @pytest.mark.parametrize("scale,font", [(.8, "Times-Roman"), (1.3, "Helvetica")])
 def test_native_mixed_context_keeps_required_planning_refusal(tmp_path, problem, scale, font):
     from tests.pdf_unit_fixtures import make_native_owned_context_pdf
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
     source = make_native_owned_context_pdf(tmp_path / "source.pdf", problem=problem, scale=scale, font=font)
     document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
     assert document.flow_findings and all(f.severity == "required" for f in document.flow_findings)
@@ -221,7 +221,7 @@ def test_native_mixed_context_keeps_required_planning_refusal(tmp_path, problem,
 @pytest.mark.parametrize("scale,margin,font", [(0.65, 48, "Helvetica"), (1, 72, "Times-Roman"), (1.6, 90, "Helvetica")])
 def test_native_justified_terminal_paragraphs_write_two_complete_targets(tmp_path, scale, margin, font):
     from tests.pdf_unit_fixtures import make_native_terminal_pdf
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
     source = make_native_terminal_pdf(tmp_path / "source.pdf", scale=scale, margin=margin, font=font)
     document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
     assert not document.flow_findings
@@ -242,7 +242,7 @@ def test_native_justified_terminal_paragraphs_write_two_complete_targets(tmp_pat
 
 def test_native_normalized_terminal_paragraph_preserves_complete_source(tmp_path):
     from tests.pdf_unit_fixtures import make_native_terminal_pdf
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
     source = make_native_terminal_pdf(tmp_path / "source.pdf", normalized=True)
     document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
     assert document.blocks[0].source_text == (
@@ -261,7 +261,7 @@ def test_native_normalized_terminal_paragraph_preserves_complete_source(tmp_path
 
 def test_native_unit_extraction_collects_real_boundary_evidence(tmp_path):
     from tests.pdf_unit_fixtures import make_native_flow_pdf
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
     source = make_native_flow_pdf(tmp_path / "source.pdf")
     doc = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
     assert doc.schema_version == doc.extracted_schema_version == "1.2"
@@ -286,8 +286,8 @@ def test_qualifying_edge_items_do_not_hide_full_frame_body_boundary(tmp_path, am
     from reportlab.pdfbase.pdfmetrics import stringWidth
     from pypdf import PdfReader, PdfWriter
     from tests.pdf_unit_fixtures import make_native_flow_pdf
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_unit_bindings import require_assignable_pdf, PdfUnitBindingError
     source = make_native_flow_pdf(tmp_path / "control.pdf", ambiguous=ambiguous)
     control = extract_pdf(source, tmp_path / "control.json", tmp_path / "control.jsonl", tmp_path / "control-media")
     writer = PdfWriter()
@@ -330,7 +330,7 @@ def test_qualifying_edge_items_do_not_hide_full_frame_body_boundary(tmp_path, am
 
 @pytest.mark.parametrize("scale,x,labels", [(0.6, 54, ("Alpha", "Gamma")), (1.0, 290, ("North", "South")), (1.8, 530, ("Page 1", "Page 2"))])
 def test_native_extraction_preserves_observed_edge_items_as_physical_targets(tmp_path, scale, x, labels):
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
     from reportlab.pdfgen.canvas import Canvas
     from reportlab.pdfbase.pdfmetrics import stringWidth
     source = tmp_path / "source.pdf"
@@ -370,7 +370,7 @@ def test_extract_callout_prose_and_wrapped_caption_have_exact_ownership(
     tmp_path: Path, border: str,
 ) -> None:
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     source = make_decorated_callout_pdf(tmp_path / "callout.pdf", border=border)
     document = extract_pdf(
@@ -411,7 +411,7 @@ def test_extract_callout_prose_and_wrapped_caption_have_exact_ownership(
 def test_extract_rejects_a_word_with_characters_on_both_sides_of_figure_boundary(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import _extract_page_materials
+    from supertranslator.pdf_extract import _extract_page_materials
 
     source = tmp_path / "boundary.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -429,7 +429,7 @@ def test_extract_rejects_a_word_with_characters_on_both_sides_of_figure_boundary
 def test_extract_rejects_single_glyph_crossing_figure_boundary(
     tmp_path: Path, glyph_x: float, graphic_right: float,
 ) -> None:
-    from web_translator.pdf_extract import _extract_page_materials
+    from supertranslator.pdf_extract import _extract_page_materials
 
     source = tmp_path / "partial-glyph.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -447,7 +447,7 @@ def test_extract_rejects_single_glyph_crossing_figure_boundary(
 def test_extract_preserves_single_glyph_touching_figure_edge_without_crossing(
     tmp_path: Path, glyph_x: float, owned: int,
 ) -> None:
-    from web_translator.pdf_extract import _extract_page_materials
+    from supertranslator.pdf_extract import _extract_page_materials
 
     source = tmp_path / "edge-glyph.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -463,7 +463,7 @@ def test_extract_preserves_single_glyph_touching_figure_edge_without_crossing(
 
 def test_labeled_callout_icon_and_prose_have_disjoint_character_owners(tmp_path: Path) -> None:
     from tests.pdf_fixtures import make_decorated_callout_pdf
-    from web_translator.pdf_extract import _extract_page_materials
+    from supertranslator.pdf_extract import _extract_page_materials
 
     source = make_decorated_callout_pdf(tmp_path / "labeled.pdf", labeled_icon=True)
     evidence = inspect_pdf(source)
@@ -478,7 +478,7 @@ def test_labeled_callout_icon_and_prose_have_disjoint_character_owners(tmp_path:
 
 
 def test_callout_line_classification_keeps_original_word_and_geometry_evidence() -> None:
-    from web_translator.pdf_layout import classify_graphic_text_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_graphic_text_lines, group_words_into_lines
 
     lines = group_words_into_lines([
         _word("Note", x0=90, x1=120, top=100, bottom=112, size=12, fontname="Helvetica-Bold"),
@@ -492,8 +492,8 @@ def test_callout_line_classification_keeps_original_word_and_geometry_evidence()
 
 
 def test_decorated_prose_is_excluded_before_text_table_detection(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import _extract_page_materials
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_extract import _extract_page_materials
+    from supertranslator.pdf_layout import detect_tables
 
     source = tmp_path / "false-table.pdf"
     canvas = Canvas(str(source), pagesize=(612, 792))
@@ -612,7 +612,7 @@ def _heading_hierarchy_pdf(path: Path) -> Path:
 
 
 def test_group_words_uses_the_sixty_percent_vertical_overlap_boundary() -> None:
-    from web_translator.pdf_layout import group_words_into_lines
+    from supertranslator.pdf_layout import group_words_into_lines
 
     at_boundary = group_words_into_lines(
         [
@@ -632,7 +632,7 @@ def test_group_words_uses_the_sixty_percent_vertical_overlap_boundary() -> None:
 
 
 def test_order_page_lines_uses_an_eighteen_point_gutter_boundary() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     exact_lines = group_words_into_lines(
         [
@@ -692,7 +692,7 @@ def test_order_page_lines_detects_asymmetric_clear_gutters(
     left_bounds: tuple[float, float],
     right_bounds: tuple[float, float],
 ) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -712,7 +712,7 @@ def test_order_page_lines_detects_asymmetric_clear_gutters(
 
 
 def test_order_page_lines_places_spanning_headings_before_column_regions() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -742,7 +742,7 @@ def test_order_page_lines_places_spanning_headings_before_column_regions() -> No
 
 
 def test_order_page_lines_sections_columns_around_a_spanning_rich_region() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -764,7 +764,7 @@ def test_order_page_lines_sections_columns_around_a_spanning_rich_region() -> No
 
 
 def test_order_page_lines_rejects_crossing_non_heading_evidence() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -781,7 +781,7 @@ def test_order_page_lines_rejects_crossing_non_heading_evidence() -> None:
 
 
 def test_order_page_lines_rejects_ambiguous_three_column_evidence() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -806,7 +806,7 @@ def test_order_page_lines_rejects_ambiguous_three_column_evidence() -> None:
 def test_order_page_lines_rejects_unbalanced_three_column_evidence(
     column_counts: tuple[int, int, int],
 ) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     words = []
     for column, (x0, x1, count) in enumerate(
@@ -831,7 +831,7 @@ def test_order_page_lines_rejects_unbalanced_three_column_evidence(
 
 @pytest.mark.parametrize("gap", [2.1, 8.1])
 def test_paragraph_boundaries_follow_same_font_column_spacing_evidence(gap: float) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     tops = [100, 112.6, 125.2, 143.8, 156.4, 169.0] if gap == 2.1 else [100, 118.6, 137.2, 155.8, 174.4, 193.0]
     lines = group_words_into_lines([
@@ -845,7 +845,7 @@ def test_paragraph_boundaries_follow_same_font_column_spacing_evidence(gap: floa
 
 
 def test_build_text_blocks_merges_only_contiguous_paragraph_lines() -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     lines = group_words_into_lines(
         [
@@ -869,7 +869,7 @@ def test_build_text_blocks_merges_only_contiguous_paragraph_lines() -> None:
 def test_hanging_list_owns_wrapped_lines_and_stops_at_boundary(
     scale: float, marker: str, size: float, text_left: float, ending: str,
 ) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     specs = [
         (marker, text_left-10, text_left-6, 100),
@@ -903,7 +903,7 @@ def test_hanging_list_owns_wrapped_lines_and_stops_at_boundary(
 def test_hanging_list_longer_continuation_respects_evidenced_column_boundary(
     scale: float, marker: str, right_edge: float, neighbor: bool,
 ) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     specs = [
         (marker, 40, 44, 100),
@@ -945,7 +945,7 @@ def test_hanging_list_longer_continuation_respects_evidenced_column_boundary(
 def test_hanging_list_producer_path_checks_peer_overlapping_candidate(
     scale: float, marker: str, right_edge: float, peer_top: float,
 ) -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, group_words_into_lines,
         order_page_lines,
     )
@@ -990,7 +990,7 @@ def test_hanging_list_producer_path_checks_peer_overlapping_candidate(
     "leading-drift",
 ])
 def test_hanging_list_does_not_own_unproven_following_text(case: str) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     first = ([_word("•", x0=40, x1=44, top=100, bottom=110),
               _word("An established item.", x0=50, x1=180, top=100, bottom=110)]
@@ -1034,7 +1034,7 @@ def test_hanging_list_does_not_own_unproven_following_text(case: str) -> None:
 def test_hanging_list_continuation_requires_observed_inline_font(
     fonts: tuple[str, str], scale: float, margin: float, evidence: str,
 ) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     regular, alternate = fonts
     specs = [
@@ -1065,7 +1065,7 @@ def test_hanging_list_continuation_requires_observed_inline_font(
 
 @pytest.mark.parametrize("scale", [0.75, 1.5])
 def test_hanging_list_reuses_inline_run_from_an_owned_continuation(scale: float) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     # A style observed in an already owned second line is evidence for line 3.
     specs = [
@@ -1094,8 +1094,8 @@ def test_hanging_list_inline_emphasis_real_pdf_retains_complete_logical_item(
     tmp_path: Path, regular: str, italic: str, scale: float, margin: float,
 ) -> None:
     from reportlab.pdfbase.pdfmetrics import stringWidth
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.models import read_segments
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.models import read_segments
 
     source = tmp_path / "inline-hanging-list.pdf"
     canvas = Canvas(str(source), pagesize=(500*scale, 500*scale))
@@ -1121,7 +1121,7 @@ def test_hanging_list_inline_emphasis_real_pdf_retains_complete_logical_item(
     assert len(units) == 2
     assert units[0].source_block_ids == (document.blocks[0].id,)
     segments = read_segments(run_dir / "segments.jsonl")
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     assert [restore_tokens(segment.source_text, segment.protected) for segment in segments] == [
         "1. An ordinary opening with emphasis continues in the same inline style and ends as one item.",
         "Independent prose remains outside the list.",
@@ -1131,8 +1131,8 @@ def test_hanging_list_inline_emphasis_real_pdf_retains_complete_logical_item(
 def test_hanging_list_real_pdf_extracts_and_assembles_one_complete_item(tmp_path: Path) -> None:
     from pypdf import PdfReader
     from tests.test_pdf_assemble import _assembly_run, _assemble_publication
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_flowables import read_pdf_layout
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_flowables import read_pdf_layout
 
     source = tmp_path / "hanging-list.pdf"
     canvas = Canvas(str(source), pagesize=(400, 400))
@@ -1165,7 +1165,7 @@ def test_hanging_list_real_pdf_extracts_and_assembles_one_complete_item(tmp_path
 
 
 def test_paragraph_spacing_evidence_does_not_cross_font_families() -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     words = [
         _word("Compact prose", x0=72, x1=396, top=top, bottom=top + 10.5,
@@ -1182,7 +1182,7 @@ def test_paragraph_spacing_evidence_does_not_cross_font_families() -> None:
 
 
 def test_build_text_blocks_does_not_merge_a_side_by_side_row_into_prior_prose() -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     lines = group_words_into_lines(
         [
@@ -1207,7 +1207,7 @@ def test_build_text_blocks_does_not_merge_a_side_by_side_row_into_prior_prose() 
     ["-", "1.", "1.2)", "A.", "A)", "iv)", "‣", "◦", "⁃", "∙"],
 )
 def test_list_marker_families_share_extraction_classification(marker: str) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     source_text = f"{marker} Item"
     lines = group_words_into_lines(
@@ -1222,7 +1222,7 @@ def test_list_marker_families_share_extraction_classification(marker: str) -> No
 
 
 def test_numbered_heading_classification_consumes_style_and_vertical_spacing() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1297,7 +1297,7 @@ def test_numbered_heading_classification_consumes_style_and_vertical_spacing() -
 
 
 def test_heading_classification_ignores_subpixel_font_size_jitter() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1334,7 +1334,7 @@ def test_heading_classification_ignores_subpixel_font_size_jitter() -> None:
 def test_body_font_estimation_excludes_only_owned_smaller_edge_notes(
     body_size: int, note_size: int, page_height: int, owned: bool,
 ) -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     words = [
         _word("A real heading", x0=20, x1=160, top=10, bottom=10 + body_size + 4, size=body_size + 4, fontname="Helvetica-Bold"),
@@ -1361,7 +1361,7 @@ def test_body_font_estimation_excludes_only_owned_smaller_edge_notes(
 def test_styled_ordered_list_edge_uses_tight_same_indent_peer_context(
     styled_position: str,
 ) -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1437,7 +1437,7 @@ def test_styled_ordered_list_edge_skips_interleaved_opposite_column_lines(
     list_bounds: tuple[float, float],
     opposite_bounds: tuple[float, float],
 ) -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1515,7 +1515,7 @@ def test_styled_ordered_list_edge_skips_interleaved_opposite_column_lines(
 
 
 def test_distant_same_indent_numbered_line_does_not_suppress_heading() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1556,7 +1556,7 @@ def test_distant_same_indent_numbered_line_does_not_suppress_heading() -> None:
 
 
 def test_repeated_band_classification_accepts_exactly_sixty_percent() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1593,7 +1593,7 @@ def test_repeated_band_classification_accepts_exactly_sixty_percent() -> None:
 
 @pytest.mark.parametrize("scale", [0.75, 1.5])
 def test_roman_page_tokens_require_same_family_edge_sequence(scale: float) -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     pages = []
     for token in ["v", "vi", "7", "iiv"]:
@@ -1623,7 +1623,7 @@ def test_roman_page_tokens_require_same_family_edge_sequence(scale: float) -> No
 def test_singleton_footer_requires_bracketed_geometry_and_distinct_typography(
     scale: float, footer_font: str, missing_evidence: str | None,
 ) -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     pages = []
     for index, text in enumerate(["12 | Shared chapter", "Local section | 13", "14 | Shared chapter"]):
@@ -1663,7 +1663,7 @@ def test_singleton_footer_requires_bracketed_geometry_and_distinct_typography(
 
 
 def test_singleton_footer_candidates_cannot_confirm_each_other() -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     pages = []
     for text in ["Shared chapter | 12", "First local section | 13",
@@ -1683,7 +1683,7 @@ def test_singleton_footer_candidates_cannot_confirm_each_other() -> None:
 
 
 def test_running_band_classification_handles_alternating_page_number_sides() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -1734,7 +1734,7 @@ def test_running_band_classification_handles_alternating_page_number_sides() -> 
 
 
 def test_running_band_inherits_one_missing_composite_page_from_neighbors() -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     footer_texts = [
         "26 | Chapter 2: Data Models and Query Languages",
@@ -1760,7 +1760,7 @@ def test_running_band_inherits_one_missing_composite_page_from_neighbors() -> No
 
 
 def test_running_band_inherits_one_page_token_free_label_from_neighbors() -> None:
-    from web_translator.pdf_layout import classify_document_lines, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, group_words_into_lines
 
     footer_texts = [
         "26 | Chapter 2: Data Models and Query Languages",
@@ -1790,7 +1790,7 @@ def test_running_band_inherits_one_page_token_free_label_from_neighbors() -> Non
 
 
 def _bounded_band_lines(*, scale=1.0, gutter=15.0, left_end=135.0, tail=True):
-    from web_translator.pdf_layout import group_words_into_lines
+    from supertranslator.pdf_layout import group_words_into_lines
 
     specs = [
         ("Surrounding prose before the local region.", 20, 280, 20),
@@ -1822,7 +1822,7 @@ def _bounded_band_lines(*, scale=1.0, gutter=15.0, left_end=135.0, tail=True):
 def test_bounded_columns_preserve_surrounding_flow_and_normalize_final_adjacency(
     scale: float, gutter: float, left_end: float,
 ) -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, classify_semantic_roles,
         order_page_lines,
     )
@@ -1855,7 +1855,7 @@ def test_bounded_columns_preserve_surrounding_flow_and_normalize_final_adjacency
     "wrong-font", "table", "toc", "numeric", "furniture", "artwork",
 ])
 def test_bounded_columns_do_not_invent_order_for_contradictory_regions(case: str) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = _bounded_band_lines(gutter=25, tail=False)
     if case == "interior-crossing":
@@ -1894,7 +1894,7 @@ def test_bounded_columns_do_not_invent_order_for_contradictory_regions(case: str
 
 @pytest.mark.parametrize(("ending", "continuation"), [("‐", "TION"), ("\u00ad", "TION"), ("‐", "tion")])
 def test_fragment_repair_accepts_tiny_jitter_and_proven_uppercase(ending, continuation) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines
 
     lines = group_words_into_lines([
         _word("A complete PRODUC" + ending, x0=20, x1=135, top=40, bottom=48, size=8),
@@ -1906,7 +1906,7 @@ def test_fragment_repair_accepts_tiny_jitter_and_proven_uppercase(ending, contin
 
 @pytest.mark.parametrize("case", ["ascii", "dash", "unrelated-capitals", "font", "leading", "stale"])
 def test_fragment_repair_requires_current_predecessor_and_positive_typography(case: str) -> None:
-    from web_translator.pdf_layout import build_text_blocks, group_words_into_lines, repair_line_fragments
+    from supertranslator.pdf_layout import build_text_blocks, group_words_into_lines, repair_line_fragments
 
     first = {"ascii": "PRODUC-", "dash": "PRODUC—", "unrelated-capitals": "Notice ‐"}.get(case, "PRODUC‐")
     lines = group_words_into_lines([
@@ -1925,7 +1925,7 @@ def test_fragment_repair_requires_current_predecessor_and_positive_typography(ca
 
 @pytest.mark.parametrize("case", ["font", "leading"])
 def test_fragment_repair_jitter_does_not_relax_typography_for_lowercase(case: str) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, repair_line_fragments
+    from supertranslator.pdf_layout import group_words_into_lines, repair_line_fragments
 
     lines = group_words_into_lines([
         _word("produc‐", x0=20, x1=135, top=40, bottom=48, size=8),
@@ -1938,7 +1938,7 @@ def test_fragment_repair_jitter_does_not_relax_typography_for_lowercase(case: st
 
 @pytest.mark.parametrize("case", ["single-column", "short-tail", "right-tail", "paired-tail", "wide-word-spacing"])
 def test_bounded_columns_observe_local_extent_and_spacing(case: str) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = _bounded_band_lines()
     if case == "single-column":
@@ -1976,10 +1976,10 @@ def test_bounded_columns_real_pdf_extracts_and_assembles_one_complete_word(tmp_p
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     from tests.test_pdf_assemble import _assembly_run, _assemble_publication
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     pdfmetrics.registerFont(TTFont("LocalBandFixture", str(
-        Path(__file__).parents[1] / "src/web_translator/font_assets/NotoSansKR-Regular.ttf")))
+        Path(__file__).parents[1] / "src/supertranslator/font_assets/NotoSansKR-Regular.ttf")))
     source = tmp_path / "local-band.pdf"
     canvas = Canvas(str(source), pagesize=(360, 400))
     canvas.setFont("LocalBandFixture", 8)
@@ -2015,7 +2015,7 @@ def test_bounded_columns_real_pdf_extracts_and_assembles_one_complete_word(tmp_p
 
 
 def test_repair_line_fragments_marks_discretionary_hyphen_without_mutating_evidence() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks,
         group_words_into_lines,
         repair_line_fragments,
@@ -2080,7 +2080,7 @@ def test_repair_line_fragments_marks_discretionary_hyphen_without_mutating_evide
 def test_repair_line_fragments_preserves_noncontinuations(
     lines: list[dict[str, object]],
 ) -> None:
-    from web_translator.pdf_layout import group_words_into_lines, repair_line_fragments
+    from supertranslator.pdf_layout import group_words_into_lines, repair_line_fragments
 
     repaired = repair_line_fragments(group_words_into_lines(lines))
 
@@ -2089,7 +2089,7 @@ def test_repair_line_fragments_preserves_noncontinuations(
 
 
 def test_repair_line_fragments_rejects_same_x0_left_band_to_spanning_row() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, repair_line_fragments
+    from supertranslator.pdf_layout import group_words_into_lines, repair_line_fragments
 
     lines = [
         line.with_page_geometry(200, 200)
@@ -2107,7 +2107,7 @@ def test_repair_line_fragments_rejects_same_x0_left_band_to_spanning_row() -> No
 
 
 def test_repair_line_fragments_keeps_shorter_final_same_column_continuation() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, repair_line_fragments
+    from supertranslator.pdf_layout import group_words_into_lines, repair_line_fragments
 
     lines = [
         line.with_page_geometry(200, 200)
@@ -2125,7 +2125,7 @@ def test_repair_line_fragments_keeps_shorter_final_same_column_continuation() ->
 
 
 def test_running_band_rejects_nonsequential_page_like_notice() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
     )
@@ -2149,7 +2149,7 @@ def test_running_band_rejects_nonsequential_page_like_notice() -> None:
 
 
 def test_order_page_lines_keeps_running_footer_outside_column_assignment() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
         order_page_lines,
@@ -2192,7 +2192,7 @@ def test_order_page_lines_keeps_running_footer_outside_column_assignment() -> No
 
 
 def test_order_page_lines_treats_evidenced_dot_leader_toc_entries_as_spanning_content() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
         order_page_lines,
@@ -2239,7 +2239,7 @@ def test_order_page_lines_treats_evidenced_dot_leader_toc_entries_as_spanning_co
 
 
 def test_order_page_lines_does_not_treat_one_dot_leader_notice_as_toc() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         group_words_into_lines,
         order_page_lines,
@@ -2263,7 +2263,7 @@ def test_order_page_lines_does_not_treat_one_dot_leader_notice_as_toc() -> None:
 
 
 def test_order_page_lines_rejects_column_gutter_without_aligned_rows() -> None:
-    from web_translator.pdf_layout import group_words_into_lines, order_page_lines
+    from supertranslator.pdf_layout import group_words_into_lines, order_page_lines
 
     lines = group_words_into_lines(
         [
@@ -2285,7 +2285,7 @@ def test_order_page_lines_rejects_column_gutter_without_aligned_rows() -> None:
 
 
 def test_find_clear_gutter_precomputes_vertical_alignment_once(monkeypatch) -> None:
-    from web_translator.pdf_layout import PdfLine, find_clear_gutter, group_words_into_lines
+    from supertranslator.pdf_layout import PdfLine, find_clear_gutter, group_words_into_lines
 
     words = []
     for row in range(40):
@@ -2312,7 +2312,7 @@ def test_find_clear_gutter_precomputes_vertical_alignment_once(monkeypatch) -> N
 
 
 def test_group_words_keeps_one_monospaced_code_row_across_alignment_spaces() -> None:
-    from web_translator.pdf_layout import group_words_into_lines
+    from supertranslator.pdf_layout import group_words_into_lines
 
     words = [
         _word(
@@ -2341,7 +2341,7 @@ def test_group_words_keeps_one_monospaced_code_row_across_alignment_spaces() -> 
 
 
 def test_group_words_rejoins_mixed_font_fragments_on_one_visual_row() -> None:
-    from web_translator.pdf_layout import group_words_into_lines
+    from supertranslator.pdf_layout import group_words_into_lines
 
     words = [
         _word("identifier,", x0=10, x1=50, top=12, bottom=22),
@@ -2460,7 +2460,7 @@ def test_peer_overlap_accepts_tight_leading_between_consecutive_rows() -> None:
 
 
 def test_extract_pdf_emits_heading_context_and_opaque_locators(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     source = _structured_pdf(tmp_path / "structured.pdf")
 
@@ -2502,7 +2502,7 @@ def test_extract_pdf_emits_heading_context_and_opaque_locators(tmp_path: Path) -
 def test_extract_pdf_classifies_repeated_bands_and_sequential_page_numbers(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         _repeated_bands_pdf(tmp_path / "bands.pdf"),
@@ -2525,7 +2525,7 @@ def test_extract_pdf_classifies_repeated_bands_and_sequential_page_numbers(
 
 
 def test_extract_pdf_preserves_publication_semantic_roles(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         make_publication_structure_pdf(tmp_path / "publication.pdf"),
@@ -2575,7 +2575,7 @@ def test_extract_pdf_preserves_publication_semantic_roles(tmp_path: Path) -> Non
 
 
 def test_reference_inline_and_adjacent_markers_keep_exact_text_geometry(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
     from reportlab.pdfgen.canvas import Canvas
 
     path = tmp_path / "references.pdf"
@@ -2601,8 +2601,8 @@ def test_reference_inline_and_adjacent_markers_keep_exact_text_geometry(tmp_path
 @pytest.mark.parametrize("check", ["headings", "section-boundary"])
 def test_reference_inline_expansion_keeps_multiple_headings_and_section_boundaries(tmp_path: Path, check: str) -> None:
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.protection import restore_tokens
 
     path = tmp_path / "reference-sections.pdf"
     canvas = Canvas(str(path), pagesize=(612, 792))
@@ -2656,10 +2656,10 @@ def test_reference_inline_expansion_keeps_multiple_headings_and_section_boundari
 def test_reference_core_is_opaque_before_translation_and_normalization(citation: str) -> None:
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_block
-    from web_translator.pdf_extract import _build_segments
-    from web_translator.models import Translation
-    from web_translator.protection import restore_tokens
-    from web_translator.terminology import normalize_terminology
+    from supertranslator.pdf_extract import _build_segments
+    from supertranslator.models import Translation
+    from supertranslator.protection import restore_tokens
+    from supertranslator.terminology import normalize_terminology
 
     raw = citation + " Note: replication reduces risk."
     _, segments = _build_segments([replace(make_pdf_block(semantic_role="reference-entry"), source_text=raw)])
@@ -2680,8 +2680,8 @@ def test_reference_core_is_opaque_before_translation_and_normalization(citation:
 def test_reference_author_suffix_preserves_core_and_annotation(citation: str, annotation: str) -> None:
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_block
-    from web_translator.pdf_extract import _build_segments
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import _build_segments
+    from supertranslator.protection import restore_tokens
 
     block = replace(make_pdf_block(semantic_role="reference-entry"), source_text=citation + annotation)
     blocks, segments = _build_segments([block])
@@ -2696,10 +2696,10 @@ def test_reference_author_suffix_preserves_core_and_annotation(citation: str, an
 
 def test_unit_adapter_preserves_separate_legacy_reference_fragments_and_annotation():
     from tests.pdf_unit_fixtures import make_unit_document
-    from web_translator.pdf_extract import build_pdf_unit_segments
-    from web_translator.pdf_models import PdfDocument, PdfTranslationUnit
-    from web_translator.protection import restore_tokens
-    from web_translator.pdf_units import project_protected_occurrences
+    from supertranslator.pdf_extract import build_pdf_unit_segments
+    from supertranslator.pdf_models import PdfDocument, PdfTranslationUnit
+    from supertranslator.protection import restore_tokens
+    from supertranslator.pdf_units import project_protected_occurrences
 
     first_text = '[1] A. Writer: "Data replication",'
     second_core = "Press, 2024."
@@ -2744,8 +2744,8 @@ def test_reference_author_abbreviation_and_quoted_title_punctuation_preserve_cor
 ) -> None:
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_block
-    from web_translator.pdf_extract import _build_segments
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import _build_segments
+    from supertranslator.protection import restore_tokens
 
     annotation = " Note: Useful replication evidence."
     block = replace(
@@ -2765,8 +2765,8 @@ def test_reference_author_abbreviation_and_quoted_title_punctuation_preserve_cor
 def test_reference_terminal_bare_domain_is_publication_evidence() -> None:
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_block
-    from web_translator.pdf_extract import _build_segments
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import _build_segments
+    from supertranslator.protection import restore_tokens
 
     citation = '[1] Research Group: “A measurement system,” example.org.'
     annotation = " Annotation: Useful replication evidence."
@@ -2786,9 +2786,9 @@ def test_reference_terminal_bare_domain_is_publication_evidence() -> None:
 
 def test_reference_inline_backward_wrap_uses_linked_nonoverlapping_fragments(tmp_path: Path) -> None:
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.models import read_segments
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.models import read_segments
+    from supertranslator.protection import restore_tokens
 
     path = tmp_path / "inline-wrap.pdf"
     canvas = Canvas(str(path), pagesize=(612, 792))
@@ -2820,8 +2820,8 @@ def test_reference_inline_backward_wrap_uses_linked_nonoverlapping_fragments(tmp
 @pytest.mark.parametrize("annotation", ["Note", "Annotation"])
 def test_reference_quoted_annotation_across_physical_fragments(tmp_path: Path, annotation: str) -> None:
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.protection import restore_tokens
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.protection import restore_tokens
 
     path = tmp_path / "quoted-wrap.pdf"
     canvas = Canvas(str(path), pagesize=(612, 792))
@@ -2872,7 +2872,7 @@ def test_reference_quoted_annotation_across_physical_fragments(tmp_path: Path, a
 def test_reference_unmarked_annotation_fails_with_block_evidence(raw: str) -> None:
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_block
-    from web_translator.pdf_extract import _build_segments
+    from supertranslator.pdf_extract import _build_segments
 
     block = replace(make_pdf_block(semantic_role="reference-entry"), source_text=raw)
     with pytest.raises(PdfExtractionError, match="ambiguous bibliography.*page-0001:block-0001"):
@@ -2887,7 +2887,7 @@ def test_reference_unmarked_annotation_fails_with_block_evidence(raw: str) -> No
 ])
 def test_inline_reference_boundaries_do_not_depend_on_author_spelling(tmp_path: Path, second: str) -> None:
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     path = tmp_path / "author-forms.pdf"
     canvas = Canvas(str(path), pagesize=(612, 792))
@@ -2904,7 +2904,7 @@ def test_inline_reference_boundaries_do_not_depend_on_author_spelling(tmp_path: 
 
 
 def test_semantic_classification_preserves_mixed_toc_hierarchy_and_continuation() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks,
         classify_document_lines,
         classify_semantic_roles,
@@ -2966,7 +2966,7 @@ def test_semantic_classification_preserves_mixed_toc_hierarchy_and_continuation(
 
 
 def test_semantic_classification_preserves_paired_and_unpaired_toc_part_evidence() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         classify_document_lines,
         classify_semantic_roles,
         group_words_into_lines,
@@ -3003,7 +3003,7 @@ def test_semantic_classification_preserves_paired_and_unpaired_toc_part_evidence
 
 
 def test_semantic_classification_does_not_treat_numeric_table_as_toc() -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     lines = group_words_into_lines(
         [
@@ -3025,7 +3025,7 @@ def test_semantic_classification_does_not_treat_numeric_table_as_toc() -> None:
 @pytest.mark.parametrize("scale", [0.75, 1.5])
 @pytest.mark.parametrize("paired", [False, True])
 def test_roman_toc_rows_preserve_right_column_and_source_words(scale: float, paired: bool) -> None:
-    from web_translator.pdf_layout import classify_document_lines, classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_document_lines, classify_semantic_roles, group_words_into_lines
 
     rows = [("Contents", 30, 20), ("Introduction", 80, 12), ("1. Foundations", 110, 12)]
     words = []
@@ -3051,7 +3051,7 @@ def test_roman_toc_rows_preserve_right_column_and_source_words(scale: float, pai
 def test_epigraph_rejects_caption_heading_and_inline_emphasis_before_body_dash(
     scale: float, italic_font: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     specs = [
         ("Figure 2. A chart caption", 180, 10, italic_font, "caption"),
@@ -3076,7 +3076,7 @@ def test_epigraph_rejects_caption_heading_and_inline_emphasis_before_body_dash(
 def test_epigraph_accepts_sparse_italic_quote_with_inferred_heading_kind(
     scale: float, quote_kind: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     page = [group_words_into_lines([_word(text, x0=x0*scale, x1=x1*scale,
         top=top*scale, bottom=(top+size)*scale, size=size*scale,
@@ -3097,7 +3097,7 @@ def test_epigraph_accepts_sparse_italic_quote_with_inferred_heading_kind(
 def test_opener_epigraph_requires_inset_and_separation_from_following_body(
     scale: float, layout: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     quote_left = 20 if layout == "full-column" else 45
     body_top = 185 if layout == "body-continuation" else 225
@@ -3130,7 +3130,7 @@ def test_opener_epigraph_requires_inset_and_separation_from_following_body(
 def test_epigraph_preserves_right_aligned_attribution_and_bounds_following_body(
     scale: float, following_kind: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     follow_left = 20 if following_kind == "paragraph" else (105 if following_kind == "alignment-change" else 135)
     follow_right = 175 if following_kind == "alignment-change" else 185
@@ -3162,7 +3162,7 @@ def test_epigraph_preserves_right_aligned_attribution_and_bounds_following_body(
 def test_epigraph_regular_author_allows_same_family_italic_publication(
     scale: float, alignment: str, author_font: str, title_font: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     title_left, title_right = (105, 160) if alignment == "left" else (130, 185)
     specs = [
@@ -3185,7 +3185,7 @@ def test_epigraph_regular_author_allows_same_family_italic_publication(
 def test_epigraph_wrapped_source_title_retains_observed_mixed_attribution_fonts(
     scale: float, alignment: str,
 ) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     continuation_left, continuation_right = (105, 160) if alignment == "left" else (130, 185)
     words = [
@@ -3208,7 +3208,7 @@ def test_epigraph_wrapped_source_title_retains_observed_mixed_attribution_fonts(
 
 @pytest.mark.parametrize("scale", [0.75, 1.5])
 def test_epigraph_bounds_multiline_attribution_before_resumed_body(scale: float) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     specs = [
         ("A thought gives shape to the page", 40, 170, 100, "Book-It"),
@@ -3228,7 +3228,7 @@ def test_epigraph_bounds_multiline_attribution_before_resumed_body(scale: float)
 
 @pytest.mark.parametrize("scale", [0.75, 1.5])
 def test_epigraph_does_not_turn_inline_emphasis_into_quote_evidence(scale: float) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     words = [
         _word("This prose has an emphasized", x0=20*scale, x1=135*scale,
@@ -3244,7 +3244,7 @@ def test_epigraph_does_not_turn_inline_emphasis_into_quote_evidence(scale: float
 
 @pytest.mark.parametrize("following_kind", ["heading", "caption"])
 def test_epigraph_attribution_does_not_absorb_indented_following_structure(following_kind: str) -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     page = [group_words_into_lines([_word(text, x0=x0, x1=190, top=top,
         bottom=top+10, size=10, fontname=font)])[0].with_page_geometry(200, 400)
@@ -3260,7 +3260,7 @@ def test_epigraph_attribution_does_not_absorb_indented_following_structure(follo
 
 
 def test_semantic_classification_recognizes_right_aligned_multiline_opener_and_epigraph() -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     lines = group_words_into_lines(
         [
@@ -3292,7 +3292,7 @@ def test_semantic_classification_recognizes_right_aligned_multiline_opener_and_e
 
 
 def test_semantic_classification_splits_dedication_epigraph_and_attribution_on_one_page() -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     lines = group_words_into_lines(
         [
@@ -3321,8 +3321,8 @@ def test_semantic_classification_splits_dedication_epigraph_and_attribution_on_o
 
 
 def test_extract_pdf_persists_semantic_warning_with_page_identity(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_layout import PdfExtractionWarning
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_layout import PdfExtractionWarning
 
     source = tmp_path / "ambiguous-toc.pdf"
     canvas = Canvas(str(source), pagesize=(200, 300))
@@ -3356,7 +3356,7 @@ def test_extract_pdf_persists_semantic_warning_with_page_identity(tmp_path: Path
 
 
 def test_semantic_classification_warns_on_conflicting_toc_columns() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         PdfExtractionWarning,
         classify_semantic_roles,
         group_words_into_lines,
@@ -3381,7 +3381,7 @@ def test_semantic_classification_warns_on_conflicting_toc_columns() -> None:
 
 
 def test_reference_continuation_keeps_role_across_page_boundary() -> None:
-    from web_translator.pdf_layout import classify_semantic_roles, group_words_into_lines
+    from supertranslator.pdf_layout import classify_semantic_roles, group_words_into_lines
 
     first_page = group_words_into_lines(
         [
@@ -3421,7 +3421,7 @@ def test_reference_continuation_keeps_role_across_page_boundary() -> None:
 
 
 def test_numbered_reference_markers_split_entries_and_keep_wrapped_text() -> None:
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks,
         classify_document_lines,
         classify_semantic_roles,
@@ -3462,7 +3462,7 @@ def test_numbered_reference_markers_split_entries_and_keep_wrapped_text() -> Non
 
 
 def test_extract_pdf_builds_numbered_heading_hierarchy(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     extract_pdf(
         _heading_hierarchy_pdf(tmp_path / "hierarchy.pdf"),
@@ -3483,7 +3483,7 @@ def test_extract_pdf_builds_numbered_heading_hierarchy(tmp_path: Path) -> None:
 def test_extract_pdf_orders_clear_columns_and_rejects_ambiguous_columns(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     clear = extract_pdf(
         _column_pdf(tmp_path / "two-columns.pdf", columns=2),
@@ -4042,7 +4042,7 @@ def test_upright_extraction_staging_preserves_pdf_evidence_and_always_cleans(
 ) -> None:
     from pypdf import PdfReader
 
-    from web_translator import pdf_extract
+    from supertranslator import pdf_extract
 
     normalize = getattr(pdf_extract, "_upright_extraction_source", None)
     assert callable(normalize), "rotated extraction requires isolated upright staging"
@@ -4117,7 +4117,7 @@ def test_upright_extraction_cleans_new_parent_when_root_allocation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from web_translator import pdf_extract
+    from supertranslator import pdf_extract
 
     source = _nonzero_rich_coordinates_pdf(
         tmp_path / "staging-source.pdf",
@@ -4139,7 +4139,7 @@ def test_upright_extraction_cleans_new_parent_when_root_allocation_fails(
 def test_detect_tables_preserves_merged_spans_and_empty_structural_cells(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_layout import detect_tables
 
     with pdfplumber.open(_ruled_table_pdf(tmp_path / "merged.pdf")) as document:
         result = detect_tables(document.pages[0], page_number=1)
@@ -4160,7 +4160,7 @@ def test_detect_tables_preserves_merged_spans_and_empty_structural_cells(
 def test_detect_tables_falls_back_to_aligned_text_without_synthetic_blank_rows(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_layout import detect_tables
 
     with pdfplumber.open(_text_aligned_table_pdf(tmp_path / "aligned.pdf")) as document:
         result = detect_tables(document.pages[0], page_number=1)
@@ -4177,7 +4177,7 @@ def test_detect_tables_falls_back_to_aligned_text_without_synthetic_blank_rows(
 
 
 def test_detect_tables_preserves_sparse_aligned_text_cells(tmp_path: Path) -> None:
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_layout import detect_tables
 
     with pdfplumber.open(
         _sparse_text_aligned_table_pdf(tmp_path / "sparse-aligned.pdf")
@@ -4202,7 +4202,7 @@ def test_detect_tables_preserves_sparse_aligned_text_cells(tmp_path: Path) -> No
 def test_detect_tables_keeps_nonoverlapping_text_table_after_ruled_table(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_layout import detect_tables
 
     with pdfplumber.open(_mixed_table_pdf(tmp_path / "mixed-tables.pdf")) as document:
         result = detect_tables(document.pages[0], page_number=1)
@@ -4216,7 +4216,7 @@ def test_detect_tables_keeps_nonoverlapping_text_table_after_ruled_table(
 def test_extract_pdf_orders_both_columns_around_a_full_width_table(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         _column_rich_order_pdf(tmp_path / "column-rich-order.pdf"),
@@ -4238,7 +4238,7 @@ def test_extract_pdf_orders_both_columns_around_a_full_width_table(
 def test_detect_tables_rejects_character_crossing_an_internal_border(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import detect_tables
+    from supertranslator.pdf_layout import detect_tables
 
     with pdfplumber.open(
         _ruled_table_pdf(tmp_path / "ambiguous.pdf", crossing_border=True)
@@ -4250,7 +4250,7 @@ def test_detect_tables_rejects_character_crossing_an_internal_border(
 def test_extract_pdf_emits_figures_captions_footnotes_tables_and_links(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         _rich_layout_pdf(tmp_path / "rich.pdf"),
@@ -4315,7 +4315,7 @@ def test_extract_pdf_emits_figures_captions_footnotes_tables_and_links(
 def test_extract_pdf_rejects_ambiguous_figure_caption_pairing(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     with pytest.raises(PdfExtractionError, match="ambiguous figure-caption pairing"):
         extract_pdf(
@@ -4329,7 +4329,7 @@ def test_extract_pdf_rejects_ambiguous_figure_caption_pairing(
 def test_extract_pdf_assigns_embedded_table_text_to_its_composite_figure(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         _figure_with_embedded_table_pdf(tmp_path / "composite-figure.pdf"),
@@ -4350,7 +4350,7 @@ def test_extract_pdf_assigns_embedded_table_text_to_its_composite_figure(
 
 
 def test_pair_figure_captions_rejects_caption_like_orphan() -> None:
-    from web_translator.pdf_layout import pair_figure_captions
+    from supertranslator.pdf_layout import pair_figure_captions
 
     orphan = PdfBlock(
         id="pdf:page-0001:block-0001",
@@ -4367,7 +4367,7 @@ def test_pair_figure_captions_rejects_caption_like_orphan() -> None:
 
 
 def test_pair_figure_captions_accepts_one_unique_page_wide_matching() -> None:
-    from web_translator.pdf_layout import pair_figure_captions
+    from supertranslator.pdf_layout import pair_figure_captions
 
     style = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     blocks = [
@@ -4421,7 +4421,7 @@ def test_pair_figure_captions_accepts_one_unique_page_wide_matching() -> None:
 
 
 def test_detect_footnotes_rejects_two_bodies_claiming_one_marker() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 50.0, 4.0)
     small = PdfBlockStyle(7.0, False, "left", 50.0, 2.0)
@@ -4472,7 +4472,7 @@ def test_detect_footnotes_rejects_two_bodies_claiming_one_marker() -> None:
 
 
 def test_detect_footnotes_pairs_a_lowercase_roman_marker() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     marker_style = PdfBlockStyle(5.0, False, "left", 0.0, 0.0)
@@ -4579,7 +4579,7 @@ def _inline_note_case(
 def test_detect_footnotes_pairs_attached_inline_multiglyph_marker(
     marker: str, scale: float,
 ) -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case(marker, scale=scale)
     detected = detect_footnotes(blocks, characters, page_height=200.0 * scale)
@@ -4595,7 +4595,7 @@ def test_detect_footnotes_pairs_attached_inline_multiglyph_marker(
     "ordinary_size", "wide_gap", "misaligned", "wrong_marker", "longer_run", "detached",
 ])
 def test_detect_footnotes_rejects_unattached_inline_multiglyph_marker(change: str) -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     if change == "ordinary_size":
@@ -4628,7 +4628,7 @@ def test_detect_footnotes_rejects_unattached_inline_multiglyph_marker(change: st
 
 
 def test_detect_footnotes_rejects_two_inline_multiglyph_owners() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     second = replace(blocks[0], id="pdf:page-0001:block-0004", order=3,
@@ -4647,7 +4647,7 @@ def test_detect_footnotes_rejects_two_inline_multiglyph_owners() -> None:
 def test_detect_footnotes_rejects_single_marker_inside_longer_superscript_run(
     run: str, short_marker: str,
 ) -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case(run)
     blocks[2] = replace(blocks[2], source_text=f"{short_marker}. Different note marker")
@@ -4665,7 +4665,7 @@ def test_detect_footnotes_rejects_single_marker_inside_longer_superscript_run(
 def test_detect_footnotes_rejects_intervening_source_glyph_inside_marker_run(
     marker: str, intervening: str, size: float,
 ) -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case(marker)
     characters[2]["x0"] = 102.0
@@ -4684,7 +4684,7 @@ def test_detect_footnotes_rejects_intervening_source_glyph_inside_marker_run(
 
 
 def test_detect_footnotes_accepts_contiguous_run_despite_unrelated_space() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     characters.append({
@@ -4699,7 +4699,7 @@ def test_detect_footnotes_accepts_contiguous_run_despite_unrelated_space() -> No
 
 
 def test_detect_footnotes_keeps_ordinary_roman_list_without_owner() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     detected = detect_footnotes(blocks[1:], characters, page_height=200.0)
@@ -4707,7 +4707,7 @@ def test_detect_footnotes_keeps_ordinary_roman_list_without_owner() -> None:
 
 
 def test_detect_footnotes_retains_same_page_nonhanging_note_continuation() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     continuation = replace(
@@ -4728,7 +4728,7 @@ def test_detect_footnotes_retains_same_page_nonhanging_note_continuation() -> No
 
 @pytest.mark.parametrize("change", ["new_marker", "column", "large_gap", "large_font", "other_kind"])
 def test_detect_footnotes_stops_owned_note_at_structural_boundary(change: str) -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     blocks, characters = _inline_note_case()
     candidate = replace(
@@ -4755,8 +4755,8 @@ def test_detect_footnotes_stops_owned_note_at_structural_boundary(change: str) -
 def test_inline_multiglyph_note_real_pdf_extracts_and_assembles_once(tmp_path: Path) -> None:
     from pypdf import PdfReader
     from tests.test_pdf_assemble import _assembly_run, _assemble_publication
-    from web_translator.pdf_extract import extract_pdf
-    from web_translator.pdf_flowables import read_pdf_layout
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_flowables import read_pdf_layout
 
     source = tmp_path / "inline-note.pdf"
     canvas = Canvas(str(source), pagesize=(400, 300))
@@ -4806,7 +4806,7 @@ def test_inline_multiglyph_note_real_pdf_extracts_and_assembles_once(tmp_path: P
 
 
 def test_spaced_superscript_real_pdf_does_not_claim_contiguous_note(tmp_path: Path) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     source = tmp_path / "spaced-inline-note.pdf"
     canvas = Canvas(str(source), pagesize=(400, 300))
@@ -4835,13 +4835,13 @@ def test_spaced_superscript_real_pdf_does_not_claim_contiguous_note(tmp_path: Pa
 
 
 def test_footnote_marker_does_not_treat_roman_letter_words_as_markers() -> None:
-    from web_translator.pdf_layout import _leading_footnote_marker
+    from supertranslator.pdf_layout import _leading_footnote_marker
 
     assert _leading_footnote_marker("XML data remains ordinary prose") is None
 
 
 def test_detect_footnotes_uses_a_trailing_marker_to_resolve_bbox_overlap() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     small = PdfBlockStyle(6.0, False, "left", 0.0, 0.0)
@@ -4920,7 +4920,7 @@ def test_detect_footnotes_uses_a_trailing_marker_to_resolve_bbox_overlap() -> No
 
 
 def test_detect_footnotes_rejects_unrelated_small_glyph_as_trailing_marker() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     small = PdfBlockStyle(6.0, False, "left", 0.0, 0.0)
@@ -4971,7 +4971,7 @@ def test_detect_footnotes_rejects_unrelated_small_glyph_as_trailing_marker() -> 
 
 
 def test_detect_footnotes_rejects_matching_superscript_before_final_marker() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     small = PdfBlockStyle(6.0, False, "left", 0.0, 0.0)
@@ -5018,7 +5018,7 @@ def test_detect_footnotes_rejects_matching_superscript_before_final_marker() -> 
 
 
 def test_detect_footnotes_accepts_raised_marker_on_final_visual_row() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     small = PdfBlockStyle(6.0, False, "left", 0.0, 0.0)
@@ -5063,7 +5063,7 @@ def test_detect_footnotes_accepts_raised_marker_on_final_visual_row() -> None:
 
 
 def test_detect_footnotes_rejects_tight_leading_previous_row_marker() -> None:
-    from web_translator.pdf_layout import detect_footnotes
+    from supertranslator.pdf_layout import detect_footnotes
 
     normal = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     small = PdfBlockStyle(6.0, False, "left", 0.0, 0.0)
@@ -5110,7 +5110,7 @@ def test_detect_footnotes_rejects_tight_leading_previous_row_marker() -> None:
 
 
 def test_build_segments_protects_numeric_and_roman_footnote_markers() -> None:
-    from web_translator.pdf_extract import _build_segments
+    from supertranslator.pdf_extract import _build_segments
 
     style = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     owner = PdfBlock(
@@ -5152,7 +5152,7 @@ def test_build_segments_protects_numeric_and_roman_footnote_markers() -> None:
 
 
 def test_build_segments_rejects_ambiguous_owner_footnote_marker() -> None:
-    from web_translator.pdf_extract import _build_segments
+    from supertranslator.pdf_extract import _build_segments
 
     style = PdfBlockStyle(10.0, False, "left", 0.0, 0.0)
     owner = PdfBlock(
@@ -5196,7 +5196,7 @@ def test_internal_destination_uses_available_coordinates(
         NameObject,
     )
 
-    from web_translator.pdf_layout import _map_internal_destination
+    from supertranslator.pdf_layout import _map_internal_destination
 
     reader = PdfReader(
         make_dimension_pdf(
@@ -5264,7 +5264,7 @@ def test_link_coordinates_match_emitted_blocks_with_nonzero_page_origin(
     from pypdf import PdfReader
     from pypdf.generic import ArrayObject, FloatObject, NameObject
 
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         _map_internal_destination,
         extract_link_evidence,
     )
@@ -5298,7 +5298,7 @@ def test_link_coordinates_match_emitted_blocks_with_nonzero_page_origin(
 def test_extract_pdf_keeps_one_semantic_coordinate_system_for_nonzero_rich_page(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     document = extract_pdf(
         _nonzero_rich_coordinates_pdf(tmp_path / "nonzero-rich.pdf"),
@@ -5332,7 +5332,7 @@ def test_extract_pdf_normalizes_rotated_nonzero_rich_page_end_to_end(
     tmp_path: Path,
     rotation: int,
 ) -> None:
-    from web_translator.pdf_extract import extract_pdf
+    from supertranslator.pdf_extract import extract_pdf
 
     source = _nonzero_rich_coordinates_pdf(
         tmp_path / f"nonzero-rich-{rotation}.pdf",
@@ -5419,7 +5419,7 @@ def test_external_link_maps_rotated_nonzero_annotation_bbox(
     tmp_path: Path,
     rotation: int,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     source = _nonzero_origin_link_pdf(
         tmp_path / f"rotated-uri-{rotation}.pdf",
@@ -5453,7 +5453,7 @@ def test_visible_orphan_link_is_fatal_after_rotation_and_nonzero_origin(
     tmp_path: Path,
     rotation: int,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     source = _nonzero_origin_link_pdf(
         tmp_path / f"rotated-orphan-{rotation}.pdf",
@@ -5483,7 +5483,7 @@ def test_internal_destination_maps_rotated_nonzero_coordinates(
         NameObject,
     )
 
-    from web_translator.pdf_layout import _map_internal_destination
+    from supertranslator.pdf_layout import _map_internal_destination
 
     source = _nonzero_origin_link_pdf(
         tmp_path / f"rotated-destination-{rotation}-{destination_kind}.pdf",
@@ -5566,7 +5566,7 @@ def test_internal_destination_maps_rotated_nonzero_coordinates(
 def test_extract_link_evidence_warns_and_fails_closed_for_ambiguous_source(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     style = PdfBlockStyle(12.0, False, "left", 50.0, 6.0)
     blocks = [
@@ -5602,7 +5602,7 @@ def test_extract_link_evidence_warns_and_fails_closed_for_ambiguous_source(
 def test_extract_link_evidence_preserves_multiple_inline_spans_per_block(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     source = _multiple_inline_links_pdf(tmp_path / "multiple-links.pdf")
     block = PdfBlock(
@@ -5632,7 +5632,7 @@ def test_extract_link_evidence_preserves_multiple_inline_spans_per_block(
 def test_extract_link_evidence_preserves_unresolved_internal_destination(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     block = PdfBlock(
         id="pdf:page-0001:block-0001",
@@ -5662,7 +5662,7 @@ def test_extract_link_evidence_preserves_unresolved_internal_destination(
 def test_extract_link_evidence_rejects_visible_text_without_an_emitted_owner(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     with pytest.raises(PdfExtractionError, match="visible link text has no emitted owner"):
         extract_link_evidence(
@@ -5674,7 +5674,7 @@ def test_extract_link_evidence_rejects_visible_text_without_an_emitted_owner(
 def test_extract_link_evidence_rejects_annotation_without_visible_text(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_layout import extract_link_evidence
+    from supertranslator.pdf_layout import extract_link_evidence
 
     with pytest.raises(PdfExtractionError, match="missing visible link text"):
         extract_link_evidence(

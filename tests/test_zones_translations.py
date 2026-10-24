@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from web_translator.models import ProtectedToken, Segment, Translation
-from web_translator.translations import (
+from supertranslator.models import ProtectedToken, Segment, Translation
+from supertranslator.translations import (
     TranslationContractError,
     merge_translations,
     validate_zone_results,
 )
-from web_translator.zones import Zone, build_zones
+from supertranslator.zones import Zone, build_zones
 
 
 def segment(

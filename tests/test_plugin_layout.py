@@ -8,8 +8,8 @@ import sysconfig
 
 import pytest
 
-from web_translator import __version__
-from web_translator.cli import main
+from supertranslator import __version__
+from supertranslator.cli import main
 
 
 ROOT = Path(__file__).parents[1]
@@ -17,15 +17,15 @@ ROOT = Path(__file__).parents[1]
 
 def test_manifest_discovers_both_translator_skills() -> None:
     manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text("utf-8"))
-    assert manifest["name"] == "web-translator"
+    assert manifest["name"] == "supertranslator"
     assert manifest["version"] == __version__
     assert manifest["skills"] == "./skills/"
-    assert manifest["interface"]["displayName"] == "Web Translator"
-    assert (ROOT / "skills/web-translator").is_dir()
-    assert (ROOT / "skills/pdf-translator").is_dir()
+    assert manifest["interface"]["displayName"] == "supertranslator"
+    assert (ROOT / "skills/supertranslator-web").is_dir()
+    assert (ROOT / "skills/supertranslator-pdf").is_dir()
     assert {
         path.name for path in (ROOT / "skills").iterdir() if path.is_dir()
-    } == {"web-translator", "pdf-translator"}
+    } == {"supertranslator-web", "supertranslator-pdf"}
 
     searchable_metadata = " ".join(
         (
@@ -47,7 +47,7 @@ def test_cli_help_returns_success(capsys) -> None:
 
 
 def test_pdf_fonts_are_exposed_as_package_resources() -> None:
-    assets = files("web_translator").joinpath("font_assets")
+    assets = files("supertranslator").joinpath("font_assets")
 
     assert assets.joinpath("NotoSansKR-Regular.ttf").is_file()
     assert assets.joinpath("NotoSansKR-Bold.ttf").is_file()
@@ -56,8 +56,8 @@ def test_pdf_fonts_are_exposed_as_package_resources() -> None:
 
 
 def test_preformatted_flow_css_is_exposed_as_package_resource() -> None:
-    packaged = files("web_translator").joinpath("web_assets", "preformatted-flow.css")
-    source = ROOT / "src/web_translator/web_assets/preformatted-flow.css"
+    packaged = files("supertranslator").joinpath("web_assets", "preformatted-flow.css")
+    source = ROOT / "src/supertranslator/web_assets/preformatted-flow.css"
 
     assert packaged.is_file()
     assert packaged.read_bytes() == source.read_bytes()
@@ -66,14 +66,14 @@ def test_preformatted_flow_css_is_exposed_as_package_resource() -> None:
 
 def test_installed_web_resources_are_consumed_without_checkout_fallback(tmp_path) -> None:
     """Missing wheel CSS or source-tree module fallback must fail the installed gate."""
-    import web_translator
-    from web_translator.preformatted_analysis import analyze_preformatted, build_classification_packages, validate_review
-    from web_translator.preformatted_contract import canonical_sha256
-    from web_translator.preformatted_projection import project_preformatted
+    import supertranslator
+    from supertranslator.preformatted_analysis import analyze_preformatted, build_classification_packages, validate_review
+    from supertranslator.preformatted_contract import canonical_sha256
+    from supertranslator.preformatted_projection import project_preformatted
 
-    checkout = os.environ.get("WEB_TRANSLATOR_FORBID_SOURCE_ROOT")
-    module = Path(web_translator.__file__).resolve()
-    resource = Path(str(files("web_translator").joinpath("web_assets", "preformatted-flow.css"))).resolve()
+    checkout = os.environ.get("SUPERTRANSLATOR_FORBID_SOURCE_ROOT")
+    module = Path(supertranslator.__file__).resolve()
+    resource = Path(str(files("supertranslator").joinpath("web_assets", "preformatted-flow.css"))).resolve()
     if checkout:
         forbidden = Path(checkout).resolve()
         installed = Path(sysconfig.get_paths()['purelib']).resolve()
@@ -103,7 +103,7 @@ def test_installed_web_resources_are_consumed_without_checkout_fallback(tmp_path
 
 
 def test_font_license_is_marked_binary_to_preserve_pinned_bytes_on_windows() -> None:
-    assert "src/web_translator/font_assets/OFL.txt -text" in (
+    assert "src/supertranslator/font_assets/OFL.txt -text" in (
         ROOT / ".gitattributes"
     ).read_text("utf-8")
 

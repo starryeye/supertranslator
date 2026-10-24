@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show, validate, and update Web Translator release versions."""
+"""Show, validate, and update supertranslator release versions."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class VersionFiles:
         return cls(
             manifest=root / ".codex-plugin" / "plugin.json",
             pyproject=root / "pyproject.toml",
-            package=root / "src" / "web_translator" / "__init__.py",
+            package=root / "src" / "supertranslator" / "__init__.py",
         )
 
 

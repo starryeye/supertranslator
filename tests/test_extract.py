@@ -4,13 +4,13 @@ import re
 from bs4 import BeautifulSoup
 import pytest
 
-from web_translator.extract import (
+from supertranslator.extract import (
     TRANSLATABLE_ATTRIBUTES,
     ExtractionError,
     extract_segments,
 )
-from web_translator.models import read_segments
-from web_translator.protection import ProtectionError, protect_fragment, restore_tokens
+from supertranslator.models import read_segments
+from supertranslator.protection import ProtectionError, protect_fragment, restore_tokens
 
 
 def write_html(tmp_path: Path, html: str) -> Path:
@@ -81,7 +81,7 @@ def test_protects_complete_code_like_elements(element: str) -> None:
 
 
 def test_protects_urls_commands_and_rfc_keywords_with_fixed_width_tokens() -> None:
-    fragment = "MUST run npm install web-translator; see https://example.com/docs."
+    fragment = "MUST run npm install supertranslator; see https://example.com/docs."
 
     protected, tokens = protect_fragment(fragment)
 

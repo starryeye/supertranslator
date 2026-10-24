@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from web_translator import pdf_assemble as storage
+from supertranslator import pdf_assemble as storage
 
 
 @pytest.fixture

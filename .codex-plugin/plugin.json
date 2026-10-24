@@ -1,14 +1,14 @@
 {
-  "name": "web-translator",
-  "version": "0.7.0",
+  "name": "supertranslator",
+  "version": "0.8.0",
   "description": "Translate one public static HTML page or one local or public text-selectable PDF into reviewed Korean output.",
   "author": {
     "name": "starryeye"
   },
-  "repository": "https://github.com/starryeye/web-translator",
+  "repository": "https://github.com/starryeye/supertranslator",
   "skills": "./skills/",
   "interface": {
-    "displayName": "Web Translator",
+    "displayName": "supertranslator",
     "shortDescription": "Translate public HTML or local/public PDFs into reviewed Korean output.",
     "longDescription": "Provides separate workflows for a public static HTML page and a local or public text-selectable PDF while sharing contextual translation and master-review contracts.",
     "developerName": "starryeye",

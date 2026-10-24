@@ -15,8 +15,8 @@ from tests.pdf_fixtures import (
     make_pdf_source_record,
     make_pdf_table_cell,
 )
-from web_translator.paths import create_pdf_run_paths
-from web_translator.pdf_models import (
+from supertranslator.paths import create_pdf_run_paths
+from supertranslator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
     PdfContractError,
@@ -380,7 +380,7 @@ def test_pdf_run_paths_return_lexically_absolute_paths_without_resolving_links(
     assert paths.work_dir == (
         tmp_path
         / "workspace"
-        / ".web-translator"
+        / ".supertranslator"
         / "runs"
         / "report-20260821-010203"
     )
@@ -400,7 +400,7 @@ def test_pdf_run_paths_reject_linked_workspace_run_and_output_roots(
         else:
             workspace.mkdir()
             if linked_component == "runs":
-                control = workspace / ".web-translator"
+                control = workspace / ".supertranslator"
                 control.mkdir()
                 (control / "runs").symlink_to(target, target_is_directory=True)
             elif linked_component == "output":
@@ -474,8 +474,8 @@ def test_pdf_run_paths_reject_workspace_replacement_during_allocation(
             replaced = True
             workspace.rename(held_workspace)
             real_mkdir(workspace)
-            real_mkdir(workspace / ".web-translator")
-            real_mkdir(workspace / ".web-translator" / "runs")
+            real_mkdir(workspace / ".supertranslator")
+            real_mkdir(workspace / ".supertranslator" / "runs")
             real_mkdir(workspace / "translated-pdfs")
         if dir_fd is None:
             real_mkdir(path, mode)
@@ -492,13 +492,13 @@ def test_pdf_run_paths_reject_workspace_replacement_during_allocation(
         )
 
     assert replaced is True
-    assert not (workspace / ".web-translator" / "runs" / run_id).exists()
+    assert not (workspace / ".supertranslator" / "runs" / run_id).exists()
 
 
 def test_pdf_run_contract_requires_matching_exact_allocator_children(
     tmp_path: Path,
 ) -> None:
-    from web_translator.paths import hold_allocated_run_paths
+    from supertranslator.paths import hold_allocated_run_paths
 
     workspace = tmp_path / "workspace"
     paths = create_pdf_run_paths(
@@ -518,7 +518,7 @@ def test_pdf_run_contract_requires_matching_exact_allocator_children(
 
 
 def test_pdf_run_contract_retains_held_workspace_identity(tmp_path: Path) -> None:
-    from web_translator.paths import hold_allocated_run_paths
+    from supertranslator.paths import hold_allocated_run_paths
 
     if os.name == "nt":
         pytest.skip("native Windows identity injection is covered separately")

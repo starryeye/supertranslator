@@ -10,11 +10,11 @@ import pytest
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from tests.pdf_figure_review_fixtures import FIGURE_ID, LABEL_LINES, make_figure_review_run
-from web_translator.pdf_models import PdfDocument
+from supertranslator.pdf_models import PdfDocument
 
 
 def api():
-    return importlib.import_module("web_translator.pdf_figure_review")
+    return importlib.import_module("supertranslator.pdf_figure_review")
 
 
 def build(run):
@@ -29,14 +29,14 @@ def publication_case(root, *, case="diagram", evidence=True):
     """TEST ONLY fixed synthetic artwork decisions, not a semantic classifier."""
     from tests.pdf_unit_fixtures import rebind_native_fixture
     from tests.test_pdf_qa import PdfQARun, _write_review
-    from web_translator.models import Segment, Translation, write_segments
-    from web_translator.cli import _zone_payload
-    from web_translator.zones import build_zones
+    from supertranslator.models import Segment, Translation, write_segments
+    from supertranslator.cli import _zone_payload
+    from supertranslator.zones import build_zones
     run, output = make_figure_review_run(root, case=case)
     document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
     if case != "figure-free":
         from PIL import Image
-        from web_translator.pdf_media import render_pdf_pages
+        from supertranslator.pdf_media import render_pdf_pages
         page = render_pdf_pages(run / "source.pdf", root / "publication-source-views", dpi=144)[0]
         with Image.open(page) as image:
             image.crop((144, 164, 1080, 384)).save(run / "media/figure-0001.png")
@@ -77,7 +77,7 @@ def publication_case(root, *, case="diagram", evidence=True):
 
 
 def test_figure_input_is_in_semantic_digest(tmp_path):
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     run, _ = publication_case(tmp_path)
     first = build_pdf_semantic_review_input(run.run_dir)
     record = next((f for f in first.files if f.path == "figure-text-input.json"), None)
@@ -90,8 +90,8 @@ def test_figure_input_is_in_semantic_digest(tmp_path):
 
 @pytest.mark.parametrize("entry", ["direct", "cli"])
 def test_figure_review_missing_inventory_refuses_assembly(tmp_path, entry):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
-    from web_translator.cli import main
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.cli import main
     run, translations = publication_case(tmp_path, evidence=False)
     if entry == "direct":
         with pytest.raises(PdfAssemblyError, match="figure|inventory"):
@@ -105,7 +105,7 @@ def test_figure_review_missing_inventory_refuses_assembly(tmp_path, entry):
 
 def mutate_figure_evidence(run, case):
     from tests.pdf_unit_fixtures import rebind_native_fixture
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     master_path = run / "review.json"
     master = json.loads(master_path.read_bytes())
     inventory_path = run / "figure-text-input.json"
@@ -141,7 +141,7 @@ INVALID_PUBLICATION = ["missing-inventory", "missing-review", "foreign-figure", 
 
 @pytest.mark.parametrize("case", INVALID_PUBLICATION)
 def test_figure_review_direct_assembly_refuses_invalid_evidence(tmp_path, case):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path)
     mutate_figure_evidence(run.run_dir, case)
     with pytest.raises(PdfAssemblyError):
@@ -153,8 +153,8 @@ def test_figure_review_direct_assembly_refuses_invalid_evidence(tmp_path, case):
 
 @pytest.mark.parametrize("case", ["diagram", "sentence-labels", "empty-figure", "figure-free"])
 def test_figure_review_prepare_accepts_only_explicit_fixed_approval(tmp_path, case):
-    from web_translator.pdf_assemble import assemble_pdf
-    from web_translator.pdf_qa import prepare_pdf_qa
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa
     run, translations = publication_case(tmp_path, case=case)
     assemble_pdf(run.run_dir, translations, {}, run.output_dir)
     qa = prepare_pdf_qa(run.run_dir, run.output_dir)
@@ -167,7 +167,7 @@ def test_figure_review_prepare_accepts_only_explicit_fixed_approval(tmp_path, ca
 
 
 def test_figure_review_report_parser_retains_exact_groups(tmp_path):
-    from web_translator.pdf_report import _semantic_review_from_value
+    from supertranslator.pdf_report import _semantic_review_from_value
     run, _ = publication_case(tmp_path)
     master = json.loads((run.run_dir / "review.json").read_bytes())
     result = _semantic_review_from_value(master, {"zone-001"}, {"zone-001": 0})
@@ -181,8 +181,8 @@ def test_figure_review_report_parser_retains_exact_groups(tmp_path):
 @pytest.fixture
 def prepared_figure_publication(tmp_path):
     from tests.test_pdf_qa import _write_passing_layout_review
-    from web_translator.pdf_assemble import assemble_pdf
-    from web_translator.pdf_qa import prepare_pdf_qa
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa
     run, translations = publication_case(tmp_path)
     assemble_pdf(run.run_dir, translations, {}, run.output_dir)
     prepare_pdf_qa(run.run_dir, run.output_dir)
@@ -192,8 +192,8 @@ def prepared_figure_publication(tmp_path):
 
 @pytest.mark.parametrize("change", ["reason", "evidence", "verdict", "whitespace"])
 def test_figure_review_changed_review_refuses_unchanged_pdf(prepared_figure_publication, change):
-    from web_translator.pdf_qa import finalize_pdf_output, PdfQAFailure
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_qa import finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     run = prepared_figure_publication
     staged = run.run_dir / "staged-output/translated.pdf"
     original = staged.read_bytes()
@@ -216,9 +216,9 @@ def test_figure_review_changed_review_refuses_unchanged_pdf(prepared_figure_publ
 @pytest.mark.parametrize("evidence", [False, True])
 def test_figure_free_legacy_or_optional_empty_review_round_trips(tmp_path, evidence):
     from tests.test_pdf_qa import _write_passing_layout_review
-    from web_translator.pdf_assemble import assemble_pdf
-    from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output
-    from web_translator.pdf_report import PdfFinalManifest, _semantic_review_from_value
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output
+    from supertranslator.pdf_report import PdfFinalManifest, _semantic_review_from_value
     run, translations = publication_case(tmp_path, case="figure-free", evidence=evidence)
     master = json.loads((run.run_dir / "review.json").read_bytes())
     expected = _semantic_review_from_value(master, {"zone-001"}, {"zone-001": 0})
@@ -238,10 +238,10 @@ def test_figure_free_legacy_or_optional_empty_review_round_trips(tmp_path, evide
 @pytest.mark.parametrize("entry", ["direct", "lifecycle"])
 def test_native_immutable_attempt_preserves_actual_retry_history(tmp_path, retry, entry):
     from tests.test_pdf_qa import _write_passing_layout_review
-    from web_translator.pdf_assemble import assemble_pdf
-    from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
-    from web_translator.pdf_report import PdfFinalManifest
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_report import PdfFinalManifest
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
 
     run, translations = publication_case(
         tmp_path, case="diagram" if entry == "direct" else "figure-free",
@@ -294,8 +294,8 @@ def test_native_immutable_attempt_preserves_actual_retry_history(tmp_path, retry
 @pytest.mark.parametrize("attempt", ["missing", False, True, "extra", -1, 3, 0.5])
 def test_native_direct_assembly_validates_immutable_zone_attempt(tmp_path, attempt):
     from tests.pdf_unit_fixtures import rebind_native_fixture
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     run, translations = publication_case(tmp_path, case="figure-free")
     path = run.run_dir / "zones/zone-001.json"
     zone = json.loads(path.read_bytes())
@@ -324,7 +324,7 @@ def test_native_direct_assembly_validates_immutable_zone_attempt(tmp_path, attem
     {"zone-001": 3}, {"zone-001": 0.5}, {"zone-001": "1"},
 ])
 def test_native_actual_retry_mapping_remains_strict(tmp_path, retries):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path, case="figure-free")
     path = run.run_dir / "review.json"
     master = json.loads(path.read_bytes())
@@ -337,8 +337,8 @@ def test_native_actual_retry_mapping_remains_strict(tmp_path, retries):
 
 @pytest.mark.parametrize("retry", [1, 2])
 def test_legacy_semantic_review_retains_expected_attempt_equality(tmp_path, retry):
-    from web_translator.pdf_report import _semantic_review_from_value
-    from web_translator.pdf_qa import PdfQAFailure
+    from supertranslator.pdf_report import _semantic_review_from_value
+    from supertranslator.pdf_qa import PdfQAFailure
     run, _ = publication_case(tmp_path, case="figure-free")
     master = json.loads((run.run_dir / "review.json").read_bytes())
     master["retries"] = {"zone-001": retry}
@@ -349,7 +349,7 @@ def test_legacy_semantic_review_retains_expected_attempt_equality(tmp_path, retr
 
 @pytest.mark.parametrize("damage", ["missing-dimension", "duplicate-dimension", "hidden-required", "unresolved-required", "extra-unresolved"])
 def test_native_actual_retries_do_not_relax_semantic_findings(tmp_path, damage):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path, case="figure-free")
     path = run.run_dir / "review.json"
     master = json.loads(path.read_bytes())
@@ -369,8 +369,8 @@ def test_native_actual_retries_do_not_relax_semantic_findings(tmp_path, damage):
 
 
 def test_figure_review_final_manifest_and_report_retain_complete_evidence(prepared_figure_publication):
-    from web_translator.pdf_qa import finalize_pdf_output
-    from web_translator.pdf_report import PdfFinalManifest
+    from supertranslator.pdf_qa import finalize_pdf_output
+    from supertranslator.pdf_report import PdfFinalManifest
     run = prepared_figure_publication
     original_review = json.loads((run.run_dir / "review.json").read_bytes())["figure_text_review"]
     finalize_pdf_output(run.run_dir, run.output_dir)
@@ -387,7 +387,7 @@ def test_figure_review_final_manifest_and_report_retain_complete_evidence(prepar
     for expected in [FIGURE_ID, "API", "Intrinsic", original_review["inventory_sha256"]]:
         if expected == "Intrinsic": expected = original_review["figures"][FIGURE_ID]["labels"][0]["reason"]
         assert expected in human
-    from web_translator.pdf_qa import PdfQAFailure
+    from supertranslator.pdf_qa import PdfQAFailure
     for mutation in ["foreign-page", "translated-block", "inventory-hash", "required-fix", "extra-label-field", "duplicate-index"]:
         bad = deepcopy(manifest)
         evidence = bad["translation"]["master_semantic_review"]["figure_text_review"]
@@ -404,7 +404,7 @@ def test_figure_review_final_manifest_and_report_retain_complete_evidence(prepar
 @pytest.mark.parametrize("stage", ["prepare", "finalize"])
 @pytest.mark.parametrize("case", INVALID_PUBLICATION)
 def test_figure_review_later_stage_refuses_invalid_preserving_evidence(prepared_figure_publication, stage, case):
-    from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
     run = prepared_figure_publication
     staged = run.run_dir / "staged-output/translated.pdf"
     retained = {p.relative_to(run.run_dir): p.read_bytes() for p in [staged, run.run_dir / "pdf-qa.json", *sorted((run.run_dir / "qa-pages").iterdir())]}
@@ -419,7 +419,7 @@ def test_figure_review_later_stage_refuses_invalid_preserving_evidence(prepared_
 @pytest.mark.parametrize("case", ["numeric-prose", "colon-prose", "indent-20", "indent-36", "empty-figure"])
 @pytest.mark.parametrize("evidence", [False, True])
 def test_figure_review_numeric_colon_indent_prose_and_empty_require_decision(tmp_path, case, evidence):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path, case=case, evidence=evidence)
     if evidence and case == "empty-figure":
         assert assemble_pdf(run.run_dir, translations, {}, run.output_dir).is_file()
@@ -438,8 +438,8 @@ def test_figure_review_prose_later_stages_never_automatically_approve(
 ):
     import shutil
     from tests.pdf_unit_fixtures import rebind_native_fixture
-    from web_translator.pdf_review import build_pdf_semantic_review_input
-    from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
     run = prepared_figure_publication
     candidate, _ = publication_case(tmp_path / "new-case", case=case, evidence=evidence)
     staged = run.run_dir / "staged-output/translated.pdf"
@@ -464,8 +464,8 @@ def test_figure_review_prose_later_stages_never_automatically_approve(
 
 def test_figure_review_horizontally_separated_sentence_labels_pass_exact_approval(tmp_path, monkeypatch):
     from reportlab.pdfgen.canvas import Canvas
-    from web_translator.pdf_assemble import assemble_pdf
-    from web_translator.pdf_qa import prepare_pdf_qa
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa
     original = Canvas.drawString
     def place_second_node(canvas, x, y, text, *args, **kwargs):
         if text == "Responses leave after processing.": x, y = 330, 680
@@ -479,7 +479,7 @@ def test_figure_review_horizontally_separated_sentence_labels_pass_exact_approva
     master = json.loads(original_review)
     master.pop("figure_text_review")
     master_path.write_text(json.dumps(master))
-    from web_translator.pdf_assemble import PdfAssemblyError
+    from supertranslator.pdf_assemble import PdfAssemblyError
     with pytest.raises(PdfAssemblyError): assemble_pdf(run.run_dir, translations, {}, run.output_dir)
     master_path.write_bytes(original_review)
     with pdfplumber.open(run.run_dir / "source.pdf") as pdf:
@@ -493,9 +493,9 @@ def test_figure_review_horizontally_separated_sentence_labels_pass_exact_approva
 def test_figure_review_approval_cannot_bypass_translatable_geometry_overlap(tmp_path, stage):
     from tests.pdf_unit_fixtures import rebind_native_fixture
     from tests.test_pdf_qa import _write_passing_layout_review
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
-    from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     run, translations = publication_case(tmp_path)
     if stage != "assembly": assemble_pdf(run.run_dir, translations, {}, run.output_dir)
     if stage == "finalize":
@@ -526,8 +526,8 @@ def test_figure_review_approval_cannot_bypass_translatable_geometry_overlap(tmp_
 @pytest.mark.parametrize("artifact", ["source.pdf", "media/figure-0001.png", "figure-text-input.json", "review.json"])
 @pytest.mark.parametrize("mutation", ["identity", "content"])
 def test_figure_review_held_identity_and_content_races_refuse(tmp_path, monkeypatch, stage, artifact, mutation):
-    import web_translator.pdf_assemble as assembly
-    import web_translator.pdf_qa as qa
+    import supertranslator.pdf_assemble as assembly
+    import supertranslator.pdf_qa as qa
     from tests.test_pdf_qa import _write_passing_layout_review
     run, translations = publication_case(tmp_path)
     if stage != "assembly": assembly.assemble_pdf(run.run_dir, translations, {}, run.output_dir)
@@ -569,8 +569,8 @@ def test_figure_review_held_identity_and_content_races_refuse(tmp_path, monkeypa
 
 @pytest.mark.parametrize("missing", ["inventory", "review"])
 def test_figure_review_optional_empty_pair_cannot_be_split(tmp_path, missing):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
-    from web_translator.pdf_review import build_pdf_semantic_review_input
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_review import build_pdf_semantic_review_input
     run, translations = publication_case(tmp_path, case="figure-free")
     path = run.run_dir / "review.json"
     master = json.loads(path.read_bytes())
@@ -584,7 +584,7 @@ def test_figure_review_optional_empty_pair_cannot_be_split(tmp_path, missing):
 
 
 def test_figure_review_duplicate_review_fields_refuse_direct_assembly(tmp_path):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path)
     path = run.run_dir / "review.json"
     payload = path.read_text().replace('"verdict": "pass", "evidence": "TEST ONLY page 1',
@@ -596,7 +596,7 @@ def test_figure_review_duplicate_review_fields_refuse_direct_assembly(tmp_path):
 
 
 def test_figure_review_direct_assembly_cannot_hide_required_semantic_finding(tmp_path):
-    from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
     run, translations = publication_case(tmp_path)
     path = run.run_dir / "review.json"
     master = json.loads(path.read_bytes())
@@ -967,7 +967,7 @@ def test_source_structure_refuses_even_with_matching_source_digest(tmp_path, mut
 
 @pytest.mark.parametrize("event", ["failure", "source-replace", "media-replace", "run-replace", "racing-inventory", "post-publish-source", "post-publish-inventory"])
 def test_figure_input_atomic_publication_failure_and_races(tmp_path, monkeypatch, event):
-    import web_translator.pdf_assemble as anchored
+    import supertranslator.pdf_assemble as anchored
     run, _ = make_figure_review_run(tmp_path)
     original = anchored._publish_new_file
     foreign = b"foreign evidence\n"

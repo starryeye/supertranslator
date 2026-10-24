@@ -11,8 +11,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import pytest
 
-from web_translator.preformatted_analysis import analyze_preformatted, build_classification_packages
-from web_translator.preformatted_contract import canonical_bytes, canonical_sha256
+from supertranslator.preformatted_analysis import analyze_preformatted, build_classification_packages
+from supertranslator.preformatted_contract import canonical_bytes, canonical_sha256
 
 
 SOURCE = (b'<html><head></head><body><pre id="manual">Read this manual.\r\n'
@@ -20,8 +20,8 @@ SOURCE = (b'<html><head></head><body><pre id="manual">Read this manual.\r\n'
 
 
 def _api():
-    assert importlib.util.find_spec("web_translator.preformatted_runtime") is not None, "held runtime is missing"
-    from web_translator import preformatted_runtime
+    assert importlib.util.find_spec("supertranslator.preformatted_runtime") is not None, "held runtime is missing"
+    from supertranslator import preformatted_runtime
     return preformatted_runtime
 
 
@@ -425,8 +425,8 @@ def test_all_literal_extraction_preserves_exact_empty_segments(tmp_path, monkeyp
 
 def test_held_output_verification_preserves_real_assembly_crlf(tmp_path):
     # The verifier must decode held bytes, not normalize newlines with read_text.
-    from web_translator.assemble import assemble_page
-    from web_translator.models import Translation, read_segments
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import Translation, read_segments
 
     api = _api()
     run = _run(tmp_path)
@@ -552,7 +552,7 @@ def test_staged_extraction_never_adopts_replaced_or_linked_outputs(tmp_path, mon
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_staged_extraction_exception_cleans_only_preowned_outputs(tmp_path, monkeypatch, after_extraction, interrupt):
     # Outputs must be owned before extraction can raise, not registered afterward.
-    from web_translator.extract import ExtractionError
+    from supertranslator.extract import ExtractionError
 
     api = _api()
     run = _run(tmp_path)

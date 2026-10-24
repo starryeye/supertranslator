@@ -25,7 +25,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Table, TableStyle
 from reportlab.pdfgen.canvas import Canvas
 
-from web_translator.pdf_models import (
+from supertranslator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
     PdfDocument,
@@ -35,7 +35,7 @@ from web_translator.pdf_models import (
     PdfSourceRecord,
     PdfTableCell,
 )
-from web_translator.pdf_extract import extract_pdf
+from supertranslator.pdf_extract import extract_pdf
 
 
 def build_test_fixture_figure_review(
@@ -46,7 +46,7 @@ def build_test_fixture_figure_review(
     Pure construction only: never acquire, rewrite or repair consumed evidence.
     Selectable artwork always needs a real explicit label review instead.
     """
-    from web_translator.pdf_figure_review import (
+    from supertranslator.pdf_figure_review import (
         canonical_figure_text_input_bytes, validate_pdf_figure_text_review,
     )
 
@@ -76,7 +76,7 @@ def build_test_fixture_figure_review(
 def write_test_empty_artwork_approval(run: Path, *, figures: dict[str, str]) -> None:
     """Literal decisions for inspected synthetic empty artwork; never approve text."""
     import hashlib
-    from web_translator.pdf_figure_review import write_pdf_figure_review_input
+    from supertranslator.pdf_figure_review import write_pdf_figure_review_input
     from tests.test_pdf_qa import _write_review
     inventory_path = run / "figure-text-input.json"
     # Call only while deliberately constructing fresh test evidence, not races.
@@ -334,13 +334,13 @@ def make_publication_structure_pdf(path: Path) -> Path:
 
 def run_publication_fixture_pipeline(tmp_path: Path) -> tuple[Path, Path]:
     """Real deterministic source→publication path; reviewed translations are local data."""
-    from web_translator.cli import main
-    from web_translator.models import read_segments
-    from web_translator.protection import restore_tokens
+    from supertranslator.cli import main
+    from supertranslator.models import read_segments
+    from supertranslator.protection import restore_tokens
     from tests.test_pdf_qa import _write_passing_layout_review, _write_review
     import hashlib
 
-    run_dir = tmp_path / ".web-translator" / "runs" / "publication"
+    run_dir = tmp_path / ".supertranslator" / "runs" / "publication"
     output_dir = tmp_path / "translated-pdfs" / "publication"
     run_dir.mkdir(parents=True)
     output_dir.parent.mkdir()
@@ -1028,7 +1028,7 @@ def _write_known_fixture_translations(fixture_dir: Path) -> None:
         ]
         if fixture_dir.name == "figures-captions-v1":
             import hashlib
-            from web_translator.pdf_figure_review import build_pdf_figure_text_input, canonical_figure_text_input_bytes
+            from supertranslator.pdf_figure_review import build_pdf_figure_text_input, canonical_figure_text_input_bytes
             document_bytes = (temporary / "document.json").read_bytes()
             document = PdfDocument.from_dict(json.loads(document_bytes))
             inventory = build_pdf_figure_text_input(document, document_bytes=document_bytes,

@@ -9,12 +9,12 @@ import pytest
 from tests.pdf_unit_fixtures import make_render_unit_run, rebind_native_fixture
 from tests.test_pdf_qa import _write_json, _write_review, _write_passing_layout_review
 from tests.test_pdf_review import _reviewed_run, _write
-from web_translator.models import ProtectedToken, Translation
-from web_translator.pdf_assemble import assemble_pdf, PdfAssemblyError
-import web_translator.pdf_assemble as assembly
-from web_translator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
-import web_translator.pdf_qa as qa
-from web_translator.pdf_review import (
+from supertranslator.models import ProtectedToken, Translation
+from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+import supertranslator.pdf_assemble as assembly
+from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+import supertranslator.pdf_qa as qa
+from supertranslator.pdf_review import (
     preserved_name_pattern, build_pdf_semantic_review_input,
     validate_pdf_semantic_review, PdfSemanticReviewError,
 )
@@ -33,8 +33,8 @@ def approved_run(tmp_path, *, notes=False):
         # Overlapping approvals are deliberately ordered short-before-long.
         names = ["Orion Cache", "Cache Engine", "Orion Cache Engine", "Vega Cache Engine"]
         glossary = {"Cache": "캐시"}
-    from web_translator.cli import _zone_payload
-    from web_translator.zones import build_zones
+    from supertranslator.cli import _zone_payload
+    from supertranslator.zones import build_zones
     for zone in build_zones(segments):
         _write_json(run / "zones" / f"{zone.id}.json", _zone_payload(zone))
     rebind_native_fixture(run)
@@ -187,7 +187,7 @@ def test_names_cross_original_number_placeholder_and_keep_opaque_name_identity(t
             {"text": "QRY:2025", "reason": "Explicit standard identifier."},
             {"text": "Orion Cache Engine", "reason": "Opaque source name."}]})
     assert normalized[0].text == ("QRY:⟦WT:000000⟧ ⟦WT:000001⟧ 질의(QRY) 질의 캐시(Cache)")
-    from web_translator.protection import restore_tokens
+    from supertranslator.protection import restore_tokens
     assert restore_tokens(normalized[0].text, segment.protected) == (
         "QRY:2025 Orion Cache Engine 질의(QRY) 질의 캐시(Cache)")
 
@@ -210,6 +210,6 @@ def test_normalized_name_protection_is_pdf_local_and_preserves_document_first_us
         assert "캐시(Cache)는" in markup[units[0].source_blocks[0].id]
     assert visible == ("Orion Cache Engine와 Vega Cache Engine, Orion Cache Engine는 이름입니다. "
                        "캐시(Cache)는 이름 밖의 용어이고 캐시는 나중 용어입니다.")
-    from web_translator.terminology import normalize_terminology
+    from supertranslator.terminology import normalize_terminology
     html = normalize_terminology(list(translations.values()), glossary, policy="korean-first")
     assert "Orion 캐시(Cache) Engine" in html[0].text

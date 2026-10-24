@@ -8,9 +8,9 @@ from typing import Callable
 import pytest
 
 from tests.pdf_fixtures import make_text_pdf
-from web_translator.pdf_acquire import acquire_pdf
-from web_translator.pdf_extract import PdfExtractionError
-from web_translator.pdf_extract_transaction import extract_pdf_transaction
+from supertranslator.pdf_acquire import acquire_pdf
+from supertranslator.pdf_extract import PdfExtractionError
+from supertranslator.pdf_extract_transaction import extract_pdf_transaction
 
 
 Extractor = Callable[[Path, Path, Path, Path], object]
@@ -18,9 +18,9 @@ Extractor = Callable[[Path, Path, Path, Path], object]
 
 def test_native_unit_transaction_preserves_published_extraction_on_retry(tmp_path):
     from tests.pdf_unit_fixtures import make_native_flow_pdf
-    from web_translator.cli import main
+    from supertranslator.cli import main
     source = make_native_flow_pdf(tmp_path / "입력 source.pdf")
-    run = tmp_path / ".web-translator" / "runs" / "단위 run"
+    run = tmp_path / ".supertranslator" / "runs" / "단위 run"
     run.mkdir(parents=True)
     (tmp_path / "translated-pdfs").mkdir()
     assert main(["pdf-acquire", str(source), "--run-dir", str(run)]) == 0
@@ -183,7 +183,7 @@ def test_pdf_extract_transaction_rejects_raced_extra_published_media_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_extract_transaction as transaction_module
+    import supertranslator.pdf_extract_transaction as transaction_module
 
     run_dir = _acquired_run(tmp_path)
     real_publish = transaction_module.anchored._publish_new_file
@@ -218,7 +218,7 @@ def test_pdf_extract_transaction_rejects_late_private_media_child_and_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_extract_transaction as transaction_module
+    import supertranslator.pdf_extract_transaction as transaction_module
 
     run_dir = _acquired_run(tmp_path)
     real_publish = transaction_module.anchored._publish_new_file
@@ -275,7 +275,7 @@ def test_pdf_extract_transaction_rejects_late_private_media_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import web_translator.pdf_extract_transaction as transaction_module
+    import supertranslator.pdf_extract_transaction as transaction_module
 
     run_dir = _acquired_run(tmp_path)
 

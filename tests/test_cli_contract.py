@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-import web_translator.cli as cli_module
-import web_translator.pdf_assemble as pdf_assemble_module
-from web_translator.cli import (
+import supertranslator.cli as cli_module
+import supertranslator.pdf_assemble as pdf_assemble_module
+from supertranslator.cli import (
     CLIContractError,
     _build_manifest_provenance,
     _detect_source_language,
@@ -19,18 +19,18 @@ from web_translator.cli import (
     _read_review,
     main,
 )
-from web_translator.models import MasterReview, QAResult, Segment, Translation, write_segments
-from web_translator.pdf_models import (
+from supertranslator.models import MasterReview, QAResult, Segment, Translation, write_segments
+from supertranslator.pdf_models import (
     PdfBlock,
     PdfBlockStyle,
     PdfDocument,
     PdfPage,
     PdfSourceRecord,
 )
-from web_translator.pdf_qa import PdfQAFailure
-from web_translator.pdf_review import build_pdf_semantic_review_input
-from web_translator.paths import create_pdf_run_paths
-from web_translator.zones import Zone
+from supertranslator.pdf_qa import PdfQAFailure
+from supertranslator.pdf_review import build_pdf_semantic_review_input
+from supertranslator.paths import create_pdf_run_paths
+from supertranslator.zones import Zone
 from tests.pdf_fixtures import make_image_only_pdf, make_text_pdf
 
 
@@ -97,7 +97,7 @@ def test_native_pdf_planning_rejects_unit_budget_before_writes(tmp_path, capsys)
 
 
 def test_native_pdf_assignment_failed_rename_publishes_nothing(tmp_path, monkeypatch):
-    import web_translator.pdf_qa as pdf_qa
+    import supertranslator.pdf_qa as pdf_qa
     from tests.test_pdf_unit_bindings import make_unit_run
     run = make_unit_run(tmp_path)
     original = os.replace
@@ -131,7 +131,7 @@ def test_native_assignment_rejects_package_changed_after_binding_write(tmp_path,
 
 def _inject_assignment_rename(monkeypatch, run, mutation):
     """Interrupt after the real move, while the native helper still owns its handle."""
-    import web_translator.pdf_qa as pdf_qa
+    import supertranslator.pdf_qa as pdf_qa
     observed = {"moves": 0}
     owner = pdf_assemble_module if os.name == "nt" else pdf_qa
     name = "_windows_rename_open_file" if os.name == "nt" else "_posix_rename_directory_no_replace"
@@ -201,7 +201,7 @@ def test_native_assignment_post_move_preserves_original_error(
 ):
     # Catches lost no-return-handle ownership and cleanup masking the move error.
     from tests.test_pdf_unit_bindings import make_unit_run, write_json
-    import web_translator.pdf_unit_bindings as bindings
+    import supertranslator.pdf_unit_bindings as bindings
     run = make_unit_run(tmp_path)
     temporary = run / ".assignments-test" / "assignments"
     temporary.mkdir(parents=True)
@@ -282,8 +282,8 @@ def test_native_assignment_does_not_replace_racing_empty_destination(tmp_path, m
 
 @pytest.mark.parametrize("mutation", ["none", "content", "identity", "source", "reopen-error"])
 def test_native_assignment_closed_descendant_publication_protocol(tmp_path, monkeypatch, capsys, mutation):
-    import web_translator.pdf_unit_bindings as bindings
-    import web_translator.pdf_qa as pdf_qa
+    import supertranslator.pdf_unit_bindings as bindings
+    import supertranslator.pdf_qa as pdf_qa
     from tests.test_pdf_unit_bindings import make_unit_run
     run = make_unit_run(tmp_path)
     original_open = pdf_assemble_module._open_anchored_input_file
@@ -311,7 +311,7 @@ def test_native_assignment_closed_descendant_publication_protocol(tmp_path, monk
             document = run / "document.json"
             document.write_bytes(document.read_bytes() + b" ")
         return original_rename(source_parent, source_name, identity, destination_parent, destination_name, **kwargs)
-    from web_translator.pdf_assemble import PdfAssemblyError
+    from supertranslator.pdf_assemble import PdfAssemblyError
     monkeypatch.setattr(bindings, "_WINDOWS_RENAME_REQUIRES_CLOSED_DESCENDANTS", True, raising=False)
     monkeypatch.setattr(pdf_assemble_module, "_open_anchored_input_file", opened)
     monkeypatch.setattr(pdf_qa, "_rename_anchored_directory_no_replace", rename)
@@ -735,7 +735,7 @@ def test_pdf_assemble_cli_maps_pdf_assembly_error(
     _write_pdf_assembly_cli_run(run_dir)
 
     def fail_assembly(*args: object, **kwargs: object) -> Path:
-        from web_translator.pdf_assemble import PdfAssemblyError
+        from supertranslator.pdf_assemble import PdfAssemblyError
 
         raise PdfAssemblyError("font embedding failed")
 
@@ -774,7 +774,7 @@ def test_pdf_qa_prepare_cli_maps_pdf_qa_failure(
     run_dir, output_dir = _pdf_cli_paths(tmp_path)
 
     def fail_prepare(*args: object, **kwargs: object) -> object:
-        from web_translator.pdf_qa import PdfQAFailure
+        from supertranslator.pdf_qa import PdfQAFailure
 
         raise PdfQAFailure("render failed")
 
@@ -921,7 +921,7 @@ def test_pdf_extract_cli_keeps_existing_outputs_when_staging_fails(
     (run_dir / "media" / "keep.txt").write_text("old media", encoding="utf-8")
 
     def fail_extraction(*args: object, **kwargs: object) -> object:
-        from web_translator.pdf_extract import PdfExtractionError
+        from supertranslator.pdf_extract import PdfExtractionError
 
         raise PdfExtractionError("ambiguous column evidence")
 
@@ -1048,7 +1048,7 @@ def test_pdf_acquire_cli_rolls_back_source_when_metadata_publication_fails(
 
 def _inject_acquire_publication_link(monkeypatch, name, mutation):
     """Match a real publication by basename and its held run's filesystem identity."""
-    import web_translator.pdf_acquire as acquire_module
+    import supertranslator.pdf_acquire as acquire_module
     original_publish = acquire_module._publish_staged_file
     original_link = acquire_module.os.link
     observed = {"calls": 0}
@@ -1108,7 +1108,7 @@ def test_pdf_acquire_cli_maps_windows_fallback_link_failure(
     source = tmp_path / "source.pdf"
     source.write_bytes(b"%PDF-1.7\n")
     run_dir, _output_dir = _pdf_cli_paths(tmp_path)
-    import web_translator.pdf_acquire as acquire_module
+    import supertranslator.pdf_acquire as acquire_module
 
     monkeypatch.setattr(
         acquire_module, "_supports_descriptor_relative_operations", lambda: False

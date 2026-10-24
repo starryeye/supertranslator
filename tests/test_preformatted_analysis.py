@@ -10,7 +10,7 @@ import pytest
 
 def _api():
     # Keep collection successful while the new producer is still absent (TDD RED).
-    from web_translator.preformatted_analysis import (
+    from supertranslator.preformatted_analysis import (
         analyze_preformatted,
         build_classification_packages,
         validate_review,
@@ -20,7 +20,7 @@ def _api():
 
 
 def _review_payload(analysis, packages, blocks):
-    from web_translator.preformatted_contract import canonical_sha256
+    from supertranslator.preformatted_contract import canonical_sha256
 
     return {
         "schema_version": "1.0",
@@ -183,7 +183,7 @@ def test_html_language_and_empty_pre_keep_stable_text_offsets():
 
 def test_strict_records_reject_unknown_fields_and_duplicate_json_keys():
     analyze, packages_for, validate = _api()
-    from web_translator.preformatted_contract import PreformattedAnalysis, canonical_loads
+    from supertranslator.preformatted_contract import PreformattedAnalysis, canonical_loads
 
     analysis = analyze("<pre>Alpha</pre>")
     bad = analysis.to_dict()
@@ -200,7 +200,7 @@ def test_strict_records_reject_unknown_fields_and_duplicate_json_keys():
 
 def test_records_are_deeply_immutable_and_export_independent_json():
     analyze, packages_for, validate = _api()
-    from web_translator.preformatted_contract import PreformattedAnalysis
+    from supertranslator.preformatted_contract import PreformattedAnalysis
 
     analysis = analyze('<pre class="poem"><a href="/safe">- Alpha</a></pre>')
     wire = analysis.to_dict()
@@ -238,7 +238,7 @@ def test_records_are_deeply_immutable_and_export_independent_json():
 
 def test_nondefault_package_budget_is_rejected_before_wire_record():
     analyze, _, _ = _api()
-    from web_translator.preformatted_contract import PreformattedAnalysis
+    from supertranslator.preformatted_contract import PreformattedAnalysis
 
     with pytest.raises(ValueError, match="fixed.*12000"):
         analyze("<pre>Alpha</pre>", max_chars=100)

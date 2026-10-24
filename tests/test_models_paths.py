@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import web_translator.models as models_module
-from web_translator.models import ProtectedToken, Segment, read_segments, write_segments
-from web_translator.paths import create_run_paths, validate_public_url
+import supertranslator.models as models_module
+from supertranslator.models import ProtectedToken, Segment, read_segments, write_segments
+from supertranslator.paths import create_run_paths, validate_public_url
 
 
 def test_only_public_http_urls_are_accepted() -> None:
@@ -25,7 +25,7 @@ def test_run_paths_are_unique_and_windows_safe(tmp_path: Path) -> None:
     now = datetime(2026, 8, 10, 12, 34, 56, tzinfo=UTC)
     paths = create_run_paths(workspace, "https://docs.example.com/a page", now)
     assert paths.output_dir.name == "docs.example.com-a-page-20260810-123456"
-    assert paths.work_dir.is_relative_to(workspace / ".web-translator/runs")
+    assert paths.work_dir.is_relative_to(workspace / ".supertranslator/runs")
 
 
 def test_segment_jsonl_round_trip(tmp_path: Path) -> None:
@@ -171,7 +171,7 @@ def test_web_run_paths_reject_linked_workspace_run_and_output_roots(
         else:
             workspace.mkdir()
             if linked_component == "runs":
-                control = workspace / ".web-translator"
+                control = workspace / ".supertranslator"
                 control.mkdir()
                 (control / "runs").symlink_to(target, target_is_directory=True)
             elif linked_component == "output":
@@ -247,8 +247,8 @@ def test_web_run_paths_reject_workspace_replacement_during_allocation(
             replaced = True
             workspace.rename(held_workspace)
             real_mkdir(workspace)
-            real_mkdir(workspace / ".web-translator")
-            real_mkdir(workspace / ".web-translator" / "runs")
+            real_mkdir(workspace / ".supertranslator")
+            real_mkdir(workspace / ".supertranslator" / "runs")
             real_mkdir(workspace / "translated-pages")
         if dir_fd is None:
             real_mkdir(path, mode)
@@ -265,14 +265,14 @@ def test_web_run_paths_reject_workspace_replacement_during_allocation(
         )
 
     assert replaced is True
-    assert not (workspace / ".web-translator" / "runs" / run_id).exists()
+    assert not (workspace / ".supertranslator" / "runs" / run_id).exists()
 
 
 def test_lexical_workspace_rejects_linked_pwd_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from web_translator.paths import lexical_workspace
+    from supertranslator.paths import lexical_workspace
 
     target = tmp_path / "real-workspace"
     target.mkdir()
@@ -288,7 +288,7 @@ def test_lexical_workspace_rejects_linked_pwd_evidence(
 
 
 def test_shared_qa_models_default_to_absent_normalization():
-    from web_translator.models import QAInputs, QAResult, MasterReview
+    from supertranslator.models import QAInputs, QAResult, MasterReview
     result = QAResult(True, [], [], [])
     inputs = QAInputs(Path('source'), Path('output'), 'https://example.com/',
                       set(), set(), [], [], Path('screenshots'), MasterReview([], {}, {}))

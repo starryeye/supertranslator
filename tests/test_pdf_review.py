@@ -6,24 +6,24 @@ from pathlib import Path
 
 import pytest
 
-from web_translator.cli import (
+from supertranslator.cli import (
     CLIContractError,
     EXIT_CONTRACT_FAILURE,
     _read_pdf_review,
     main,
 )
-from web_translator.pdf_review import (
+from supertranslator.pdf_review import (
     PdfSemanticReviewError,
     build_pdf_semantic_review_input,
     validate_pdf_semantic_review,
 )
-from web_translator.zones import Zone
+from supertranslator.zones import Zone
 from tests.test_pdf_unit_bindings import bound_unit_run
 
 
 @pytest.mark.parametrize("field", ["preserved_names", "figure_text_review"])
 def test_html_review_rejects_pdf_only_evidence(tmp_path, field):
-    from web_translator.cli import _read_review
+    from supertranslator.cli import _read_review
     path = tmp_path / "review.json"
     path.write_text(json.dumps({"retries": {}, "section_findings": {}, "unresolved_required": [], field: {}}))
     with pytest.raises(CLIContractError, match="review fields"):
@@ -53,7 +53,7 @@ def test_native_review_rejects_stale_binding(bound_unit_run):
 
 
 def test_unit_semantic_input_rejects_duplicate_file_evidence(bound_unit_run):
-    from web_translator.pdf_review import PdfSemanticReviewInput
+    from supertranslator.pdf_review import PdfSemanticReviewInput
     value = build_pdf_semantic_review_input(bound_unit_run).to_dict()
     value["files"].insert(0, value["files"][0])
     with pytest.raises(PdfSemanticReviewError, match="unique"):
@@ -81,7 +81,7 @@ def test_rebinding_changed_unit_evidence_does_not_reuse_old_review(bound_unit_ru
 
 
 def test_native_semantic_consumption_retains_document_identity(bound_unit_run):
-    from web_translator.pdf_review import hold_pdf_semantic_inputs
+    from supertranslator.pdf_review import hold_pdf_semantic_inputs
     path = bound_unit_run / "document.json"
     with pytest.raises(PdfSemanticReviewError, match="changed identity"):
         with hold_pdf_semantic_inputs(bound_unit_run) as snapshot:
@@ -110,7 +110,7 @@ def _reviewed_run(tmp_path: Path, *, names: bool = False) -> tuple[Path, dict[st
     from dataclasses import replace
     from tests.pdf_fixtures import make_pdf_source_record
     from tests.pdf_unit_fixtures import make_unit_document, rebind_native_fixture
-    run_dir = tmp_path / ".web-translator" / "runs" / "run"
+    run_dir = tmp_path / ".supertranslator" / "runs" / "run"
     (tmp_path / "translated-pdfs").mkdir()
     _write(run_dir / "segments.jsonl", '{"id":"seg-000001"}\n')
     _write(run_dir / "glossary.json", '{"OAuth":"권한 위임"}\n')
@@ -131,7 +131,7 @@ def _reviewed_run(tmp_path: Path, *, names: bool = False) -> tuple[Path, dict[st
     _write(run_dir / "document.json", json.dumps(document.to_dict()))
     _write(run_dir / "source.json", json.dumps(make_pdf_source_record().to_dict()))
     if names:
-        from web_translator.models import Segment
+        from supertranslator.models import Segment
         _write(run_dir / "segments.jsonl", json.dumps(Segment(
             id="seg-000001", locator=document.blocks[0].id, semantic_type="paragraph",
             heading_path=[], source_text="Alice Brown writes about systems.",
@@ -197,7 +197,7 @@ def test_pdf_review_requires_exact_preserved_spelling_in_translation(
 
 
 def test_pdf_report_review_retains_explicit_preserved_names(tmp_path: Path) -> None:
-    from web_translator.pdf_report import _semantic_review_from_value
+    from supertranslator.pdf_report import _semantic_review_from_value
     run, review = _reviewed_run(tmp_path, names=True)
     names = {"seg-000001": [{"text": "Alice Brown", "reason": "Source author name."}]}
     review["preserved_names"] = names
@@ -333,7 +333,7 @@ def test_pdf_assembly_review_reader_binds_digest_without_changing_web_reader(
 def test_held_semantic_snapshot_reads_and_verifies_the_same_exact_inputs(
     tmp_path: Path,
 ) -> None:
-    from web_translator.pdf_review import hold_pdf_semantic_inputs
+    from supertranslator.pdf_review import hold_pdf_semantic_inputs
 
     run_dir, review = _reviewed_run(tmp_path)
     translation = run_dir / "translations" / "zone-001.jsonl"

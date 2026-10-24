@@ -82,7 +82,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _download(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "web-translator-font-vendor/1.0"})
+    request = Request(url, headers={"User-Agent": "supertranslator-font-vendor/1.0"})
     try:
         with urlopen(request, timeout=60) as response:
             return response.read()
@@ -322,7 +322,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).parents[1] / "src/web_translator/font_assets",
+        default=Path(__file__).parents[1] / "src/supertranslator/font_assets",
     )
     parser.add_argument("--source-file", type=Path)
     parser.add_argument("--license-file", type=Path)

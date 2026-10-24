@@ -2,20 +2,20 @@ import json
 from pathlib import Path
 
 
-SKILL = Path("skills/web-translator/SKILL.md")
-PDF_SKILL = Path("skills/pdf-translator/SKILL.md")
+SKILL = Path("skills/supertranslator-web/SKILL.md")
+PDF_SKILL = Path("skills/supertranslator-pdf/SKILL.md")
 TRANSLATOR_CONTRACT = Path(
-    "skills/web-translator/references/translator-contract.md"
+    "skills/supertranslator-web/references/translator-contract.md"
 )
-REVIEW_RUBRIC = Path("skills/web-translator/references/review-rubric.md")
+REVIEW_RUBRIC = Path("skills/supertranslator-web/references/review-rubric.md")
 
 
 def test_pdf_skill_commands_create_native_full_unit_assignments(tmp_path, capsys):
     """Execute the documented argument sequence, not just match prose wording."""
     from tests.pdf_unit_fixtures import make_native_flow_pdf
-    from web_translator.cli import main
-    from web_translator.models import read_segments
-    run = tmp_path / ".web-translator" / "runs" / "문서 run"
+    from supertranslator.cli import main
+    from supertranslator.models import read_segments
+    run = tmp_path / ".supertranslator" / "runs" / "문서 run"
     output = tmp_path / "translated-pdfs" / "문서 run"
     run.mkdir(parents=True)
     output.parent.mkdir()
@@ -23,7 +23,7 @@ def test_pdf_skill_commands_create_native_full_unit_assignments(tmp_path, capsys
     values = {"<source>": str(source), "<work-dir>": str(run), "<output-dir>": str(output)}
     commands = [[values.get(arg, arg) for arg in line.split()[3:]]
                 for line in PDF_SKILL.read_text("utf-8").splitlines()
-                if line.startswith("<python> -m web_translator ")]
+                if line.startswith("<python> -m supertranslator ")]
     by_command = {args[0]: args for args in commands}
     for name in ["pdf-acquire", "pdf-extract", "pdf-figure-review-input", "plan-zones"]:
         assert main(by_command[name]) == 0
@@ -63,7 +63,7 @@ def test_skill_requires_master_review_and_isolated_subagents() -> None:
 
 def test_skill_frontmatter_has_trigger_description() -> None:
     text = SKILL.read_text("utf-8")
-    assert text.startswith("---\nname: web-translator\n")
+    assert text.startswith("---\nname: supertranslator-web\n")
     frontmatter = text.split("---", 2)[1]
     assert "Use when" in frontmatter
     assert "public" in frontmatter
@@ -116,7 +116,7 @@ def test_translator_contract_is_strict_and_contextual() -> None:
 
 def test_assignment_package_keeps_fresh_agent_prompts_bounded() -> None:
     text = Path(
-        "skills/web-translator/references/assignment-package.md"
+        "skills/supertranslator-web/references/assignment-package.md"
     ).read_text("utf-8")
     for phrase in (
         '"schema_version"',
@@ -187,13 +187,13 @@ def test_skill_resolves_one_interpreter_and_persists_review_evidence() -> None:
     assert 'python="$(cd .venv/bin && pwd -P)/python"' in skill
     assert 'PowerShell: `& $python`' in skill
     assert 'POSIX: `"$python"`' in skill
-    from web_translator.cli import _build_parser
+    from supertranslator.cli import _build_parser
 
     commands = [line.strip() for line in skill.splitlines()
                 if line.strip().startswith("<python> ")]
     assert commands
     for command in commands:
-        prefix = "<python> -m web_translator "
+        prefix = "<python> -m supertranslator "
         assert command.startswith(prefix)
         arguments = _build_parser().parse_args(command.removeprefix(prefix).split())
         assert callable(arguments.handler)
@@ -233,8 +233,8 @@ def test_skill_preserves_platform_arguments_as_single_values() -> None:
     ):
         assert substitution in skill
     assert "Never build or evaluate a command string" in skill
-    assert '& $python -m web_translator capture $url --run-dir $workDir' in readme
-    assert '"$python" -m web_translator capture "$url" --run-dir "$work_dir"' in readme
+    assert '& $python -m supertranslator capture $url --run-dir $workDir' in readme
+    assert '"$python" -m supertranslator capture "$url" --run-dir "$work_dir"' in readme
 
 
 def test_public_skills_keep_allocated_paths_lexical_and_under_exact_roots() -> None:
@@ -248,7 +248,7 @@ def test_public_skills_keep_allocated_paths_lexical_and_under_exact_roots() -> N
         assert ".resolve()" not in text
         assert "lexical_workspace()" in text
         assert "Path.cwd().absolute()" not in text
-        assert 'workspace / ".web-translator" / "runs"' in text
+        assert 'workspace / ".supertranslator" / "runs"' in text
         assert f'workspace / "{output_root}"' in text
         assert "exact child" in text
         assert "symlink or reparse" in text
@@ -257,7 +257,7 @@ def test_public_skills_keep_allocated_paths_lexical_and_under_exact_roots() -> N
 def test_pdf_skill_is_discoverable_and_fail_closed() -> None:
     text = PDF_SKILL.read_text("utf-8")
     for phrase in (
-        "name: pdf-translator",
+        "name: supertranslator-pdf",
         "local path",
         "attached file",
         "public HTTP(S) URL",
@@ -279,15 +279,15 @@ def test_pdf_skill_is_discoverable_and_fail_closed() -> None:
         "never report partial output as complete",
     ):
         assert phrase in text
-    assert not Path("skills/pdf-translator/references").exists()
+    assert not Path("skills/supertranslator-pdf/references").exists()
 
 
 def test_pdf_skill_reuses_shared_translation_contracts_and_agents() -> None:
     text = PDF_SKILL.read_text("utf-8")
     for phrase in (
-        "../web-translator/references/translator-contract.md",
-        "../web-translator/references/assignment-package.md",
-        "../web-translator/references/review-rubric.md",
+        "../supertranslator-web/references/translator-contract.md",
+        "../supertranslator-web/references/assignment-package.md",
+        "../supertranslator-web/references/review-rubric.md",
         "Segment",
         "spawn_agent",
         'fork_turns="none"',
@@ -320,16 +320,16 @@ def test_pdf_skill_preserves_platform_arguments_and_stage_order() -> None:
         assert phrase in text
 
     commands = (
-        "<python> -m web_translator pdf-acquire <source> --run-dir <work-dir>",
-        "<python> -m web_translator pdf-extract --run-dir <work-dir>",
-        "<python> -m web_translator plan-zones --run-dir <work-dir> --max-chars 12000 --target-zones 3",
-        "<python> -m web_translator prepare-assignments --run-dir <work-dir>",
-        "<python> -m web_translator validate-translations --run-dir <work-dir> --zone-id zone-001",
-        "<python> -m web_translator validate-translations --run-dir <work-dir>",
-        "<python> -m web_translator pdf-review-input --run-dir <work-dir>",
-        "<python> -m web_translator pdf-assemble --run-dir <work-dir> --output-dir <output-dir>",
-        "<python> -m web_translator pdf-qa prepare --run-dir <work-dir> --output-dir <output-dir>",
-        "<python> -m web_translator pdf-qa finalize --run-dir <work-dir> --output-dir <output-dir>",
+        "<python> -m supertranslator pdf-acquire <source> --run-dir <work-dir>",
+        "<python> -m supertranslator pdf-extract --run-dir <work-dir>",
+        "<python> -m supertranslator plan-zones --run-dir <work-dir> --max-chars 12000 --target-zones 3",
+        "<python> -m supertranslator prepare-assignments --run-dir <work-dir>",
+        "<python> -m supertranslator validate-translations --run-dir <work-dir> --zone-id zone-001",
+        "<python> -m supertranslator validate-translations --run-dir <work-dir>",
+        "<python> -m supertranslator pdf-review-input --run-dir <work-dir>",
+        "<python> -m supertranslator pdf-assemble --run-dir <work-dir> --output-dir <output-dir>",
+        "<python> -m supertranslator pdf-qa prepare --run-dir <work-dir> --output-dir <output-dir>",
+        "<python> -m supertranslator pdf-qa finalize --run-dir <work-dir> --output-dir <output-dir>",
     )
     lines = [line.strip() for line in text.splitlines()]
     positions = [lines.index(command) for command in commands]
@@ -464,7 +464,7 @@ def test_pdf_skill_and_spec_bind_review_render_figure_and_link_contracts() -> No
 def test_readme_documents_pdf_workflow_and_boundaries() -> None:
     text = Path("README.md").read_text("utf-8")
     for phrase in (
-        "pdf-translator",
+        "supertranslator-pdf",
         "local text-selectable PDF",
         "public HTTP(S) PDF URL",
         "50 MiB",

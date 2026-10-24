@@ -11,8 +11,8 @@ import httpx
 import pytest
 from tinycss2.ast import ParseError
 
-import web_translator.capture as capture_module
-from web_translator.capture import (
+import supertranslator.capture as capture_module
+from supertranslator.capture import (
     MAX_CSS_IMPORT_DEPTH,
     CaptureError,
     _assert_transport_compatibility,

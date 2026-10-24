@@ -1,11 +1,11 @@
-# web-translator
+# supertranslator
 
-`web-translator` is a cross-platform Codex plugin for Windows and macOS with two clearly
+`supertranslator` is a cross-platform Codex plugin for Windows and macOS with two clearly
 selectable workflows:
 
-- `web-translator` translates one supported public static HTML URL into an offline Korean
+- `supertranslator-web` translates one supported public static HTML URL into an offline Korean
   bundle while preserving its DOM, links, styles, and captured assets.
-- `pdf-translator` translates one local text-selectable PDF, attached text-selectable PDF,
+- `supertranslator-pdf` translates one local text-selectable PDF, attached text-selectable PDF,
   or public HTTP(S) PDF URL into a reviewed Korean PDF.
 
 Both workflows use the same Python package, immutable semantic zones, translation
@@ -13,6 +13,20 @@ contract, glossary, validation, and master-review rubric. Format-specific comman
 HTML or PDF acquisition, extraction, assembly, and QA.
 
 ## Setup
+
+### Breaking rename in 0.8.0
+
+The repository is now [starryeye/supertranslator](https://github.com/starryeye/supertranslator).
+Remove the old `web-translator@starryeye` plugin and install `supertranslator@starryeye`.
+Use a new workspace/run with `supertranslator-web` or `supertranslator-pdf`, the
+`supertranslator` command, or `python -m supertranslator`. For a Python installation,
+uninstall the `web-translator` distribution before installing `supertranslator`.
+Old commands (`web-translator`, `python -m web_translator`), skill names
+(`web-translator`, `pdf-translator`), and unfinished `.web-translator/runs` are not
+supported 0.8.0 interfaces. There are no aliases or automatic run migration/resume.
+Keep historical runs and completed outputs unchanged; new runs use `.supertranslator/runs`.
+After moving a local checkout to its new real path, recreate its virtual environment
+there rather than reusing old absolute interpreter paths.
 
 Use Python 3.11 or newer. On Windows PowerShell:
 
@@ -41,7 +55,7 @@ Confirm both executables are available before starting a PDF run.
 ## Versioning
 
 The release version is declared in `.codex-plugin/plugin.json` and mirrored in
-`pyproject.toml` and `src/web_translator/__init__.py`. Keep all three synchronized
+`pyproject.toml` and `src/supertranslator/__init__.py`. Keep all three synchronized
 with the standard-library-only helper. Replace `<PYTHON>` with the repository-local
 interpreter for your platform:
 
@@ -67,7 +81,7 @@ Translate this page into an offline Korean HTML bundle:
 https://docs.spring.io/spring-ai/reference/concepts.html
 ```
 
-The skill creates a unique work directory under `.web-translator/runs/`, captures and
+The skill creates a unique work directory under `.supertranslator/runs/`, captures and
 extracts the page, delegates translation zones, performs master review, assembles the
 page, and runs QA. A successful output has this layout:
 
@@ -83,7 +97,7 @@ The completion response links to `index.html` and `review-report.md` with absolu
 paths and reports optional asset warnings.
 
 Allocation keeps absolute lexical paths and requires the run and reserved output to be
-exact children of the held `.web-translator/runs` and `translated-pages` roots. A symlink
+exact children of the held `.supertranslator/runs` and `translated-pages` roots. A symlink
 or reparse ancestor, dangling link, or replacement race fails closed.
 
 ### Local, attached, or public PDF
@@ -106,7 +120,7 @@ creates a unique private run directory, acquires and extracts the source, uses t
 zone translation and semantic review, assembles a staged PDF with embedded Noto Sans KR
 Regular and Bold fonts, prepares automated/rendered QA, and requires master inspection of
 every numbered contact sheet. Font licensing and source provenance are stored beside the
-package fonts in `src/web_translator/font_assets/OFL.txt` and `PROVENANCE.json`.
+package fonts in `src/supertranslator/font_assets/OFL.txt` and `PROVENANCE.json`.
 
 The Korean edition preserves the source trim size and distinct publication structures:
 TOC hierarchy and output-page links, dedication and epigraph, part/chapter openers,
@@ -181,44 +195,44 @@ native shell argument. For example:
 
 ```powershell
 $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
-& $python -m web_translator capture $url --run-dir $workDir
-& $python -m web_translator assemble --run-dir $workDir --output-dir $outputDir
+& $python -m supertranslator capture $url --run-dir $workDir
+& $python -m supertranslator assemble --run-dir $workDir --output-dir $outputDir
 ```
 
 ```sh
 python="$(cd .venv/bin && pwd -P)/python"
-"$python" -m web_translator capture "$url" --run-dir "$work_dir"
-"$python" -m web_translator assemble --run-dir "$work_dir" --output-dir "$output_dir"
+"$python" -m supertranslator capture "$url" --run-dir "$work_dir"
+"$python" -m supertranslator assemble --run-dir "$work_dir" --output-dir "$output_dir"
 ```
 
 The complete stage sequence is:
 
 ```text
-<PYTHON> -m web_translator capture <URL> --run-dir <WORK_DIR>
-<PYTHON> -m web_translator extract --run-dir <WORK_DIR>
-<PYTHON> -m web_translator plan-zones --run-dir <WORK_DIR> --max-chars 12000 --target-zones 3
-<PYTHON> -m web_translator prepare-assignments --run-dir <WORK_DIR>
-<PYTHON> -m web_translator validate-translations --run-dir <WORK_DIR> --zone-id zone-001
-<PYTHON> -m web_translator validate-translations --run-dir <WORK_DIR>
-<PYTHON> -m web_translator assemble --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
-<PYTHON> -m web_translator qa --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
+<PYTHON> -m supertranslator capture <URL> --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator extract --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator plan-zones --run-dir <WORK_DIR> --max-chars 12000 --target-zones 3
+<PYTHON> -m supertranslator prepare-assignments --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator validate-translations --run-dir <WORK_DIR> --zone-id zone-001
+<PYTHON> -m supertranslator validate-translations --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator assemble --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
+<PYTHON> -m supertranslator qa --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
 ```
 
 For a local or public PDF, bind the complete source path or URL to one shell variable and
 run the PDF stages in order:
 
 ```text
-<PYTHON> -m web_translator pdf-acquire <FILE_OR_URL> --run-dir <WORK_DIR>
-<PYTHON> -m web_translator pdf-extract --run-dir <WORK_DIR>
-<PYTHON> -m web_translator plan-zones --run-dir <WORK_DIR> --max-chars 12000 --target-zones 3
-<PYTHON> -m web_translator prepare-assignments --run-dir <WORK_DIR>
-<PYTHON> -m web_translator validate-translations --run-dir <WORK_DIR> --zone-id <ZONE_ID>
-<PYTHON> -m web_translator validate-translations --run-dir <WORK_DIR>
-<PYTHON> -m web_translator pdf-review-input --run-dir <WORK_DIR>
-<PYTHON> -m web_translator pdf-assemble --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
-<PYTHON> -m web_translator pdf-qa prepare --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
+<PYTHON> -m supertranslator pdf-acquire <FILE_OR_URL> --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator pdf-extract --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator plan-zones --run-dir <WORK_DIR> --max-chars 12000 --target-zones 3
+<PYTHON> -m supertranslator prepare-assignments --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator validate-translations --run-dir <WORK_DIR> --zone-id <ZONE_ID>
+<PYTHON> -m supertranslator validate-translations --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator pdf-review-input --run-dir <WORK_DIR>
+<PYTHON> -m supertranslator pdf-assemble --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
+<PYTHON> -m supertranslator pdf-qa prepare --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
 <MASTER> inspect every contact sheet and write strict pdf-layout-review.json
-<PYTHON> -m web_translator pdf-qa finalize --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
+<PYTHON> -m supertranslator pdf-qa finalize --run-dir <WORK_DIR> --output-dir <OUTPUT_DIR>
 ```
 
 `pdf-qa prepare` writes automated evidence and numbered contact sheets under the private
@@ -238,8 +252,8 @@ installed skill/plugin validator directories for your Codex installation:
 ```text
 <PYTHON> -m pytest -q
 <PYTHON> -m pytest tests/test_skill_contract.py -q
-<PYTHON> <SKILL_CREATOR_DIR>/scripts/quick_validate.py skills/web-translator
-<PYTHON> <SKILL_CREATOR_DIR>/scripts/quick_validate.py skills/pdf-translator
+<PYTHON> <SKILL_CREATOR_DIR>/scripts/quick_validate.py skills/supertranslator-web
+<PYTHON> <SKILL_CREATOR_DIR>/scripts/quick_validate.py skills/supertranslator-pdf
 <PYTHON> <PLUGIN_CREATOR_DIR>/scripts/validate_plugin.py .
 ```
 

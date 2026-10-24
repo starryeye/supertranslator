@@ -9,16 +9,16 @@ import pytest
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-from web_translator.models import (
+from supertranslator.models import (
     Finding,
     MasterReview,
     ProtectedToken,
     QAInputs,
     QAResult,
 )
-from web_translator.qa import _check_external_dependencies, run_qa
-from web_translator.protection import protect_fragment
-from web_translator.report import write_manifest, write_review_report
+from supertranslator.qa import _check_external_dependencies, run_qa
+from supertranslator.protection import protect_fragment
+from supertranslator.report import write_manifest, write_review_report
 
 
 TOKEN = "⟦WT:000000⟧"
@@ -330,9 +330,9 @@ def test_source_bound_url_boundary_keeps_overlapping_value_ownership(tmp_path, o
 
 def test_source_bound_url_boundaries_survive_normal_extraction_assembly_and_qa(tmp_path):
     # Catch a unit-only fix that fails with real extracted location metadata and restored HTML.
-    from web_translator.assemble import assemble_page
-    from web_translator.extract import extract_segments
-    from web_translator.models import Translation
+    from supertranslator.assemble import assemble_page
+    from supertranslator.extract import extract_segments
+    from supertranslator.models import Translation
 
     captured = tmp_path / "capture" / "source.html"
     captured.parent.mkdir()
@@ -418,7 +418,7 @@ def _inputs(source: Path, output: Path, **overrides: object) -> QAInputs:
 @pytest.mark.parametrize('indicator', ['preformatted', 'assets'])
 def test_direct_legacy_qa_holds_absence_through_checks(tmp_path, monkeypatch, indicator):
     # A late state appearance must invalidate even direct callers without capture.json.
-    import web_translator.qa as qa
+    import supertranslator.qa as qa
     source, output = _write_pages(tmp_path)
     real = qa._run_qa
 
@@ -2462,7 +2462,7 @@ def test_report_wraps_all_source_values_in_inert_gfm_code_spans(tmp_path: Path) 
 
 def test_optional_normalization_report_is_typed_and_legacy_is_omitted(tmp_path):
     from dataclasses import replace
-    from web_translator.preformatted_contract import NormalizationSummary
+    from supertranslator.preformatted_contract import NormalizationSummary
     summary = NormalizationSummary.from_dict({
         'schema_version': '1.0', 'policy': 'prose-reflow-literals-preserved',
         'source_sha256': '1' * 64, 'review_sha256': '2' * 64,

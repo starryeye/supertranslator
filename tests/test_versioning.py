@@ -18,7 +18,7 @@ def _version_root(tmp_path: Path) -> Path:
     for relative in (
         Path(".codex-plugin/plugin.json"),
         Path("pyproject.toml"),
-        Path("src/web_translator/__init__.py"),
+        Path("src/supertranslator/__init__.py"),
     ):
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ def _versions(root: Path) -> tuple[str, str, str]:
         (root / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
     )
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    package = (root / "src/web_translator/__init__.py").read_text(encoding="utf-8")
+    package = (root / "src/supertranslator/__init__.py").read_text(encoding="utf-8")
     project_version = next(
         line.split("=", 1)[1].strip().strip('"')
         for line in pyproject.splitlines()

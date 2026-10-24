@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from web_translator.pdf_models import (
+from supertranslator.pdf_models import (
     PdfBlock, PdfBlockBoundary, PdfBlockStyle, PdfBoundaryLine, PdfDocument,
     PdfJoinEvidence, PdfLinkEvidence, PdfPage, PdfTextJoin, PdfTranslationUnit,
 )
@@ -49,10 +49,10 @@ def make_native_flow_pdf(path, *, ambiguous=False, oversized=False):
 def run_native_unit_pipeline(root):
     """Public workflow with explicitly test-only translations and approvals."""
     import json
-    from web_translator.cli import main
-    from web_translator.models import read_segments
+    from supertranslator.cli import main
+    from supertranslator.models import read_segments
     from tests.test_pdf_qa import _write_review, _write_passing_layout_review
-    run = root / ".web-translator" / "runs" / "논리 단위"
+    run = root / ".supertranslator" / "runs" / "논리 단위"
     output = root / "translated-pdfs" / "논리 단위"
     run.mkdir(parents=True)
     output.parent.mkdir()
@@ -191,7 +191,7 @@ def make_observed_flow(*, columns: int = 1, scale: float = 1.0, list_item: bool 
                        head_discretionary: bool = False, sentence_boundary: bool = False,
                        tops_by_page=None, page_scales=None, space_continuation: bool = False):
     """Synthetic words run through the real page-local extraction pipeline."""
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, classify_semantic_roles,
         group_words_into_lines, order_page_lines,
     )
@@ -317,7 +317,7 @@ def region_source_lines(*, margin=72, discretionary=False, opaque=False):
 
 def make_observed_region_flow(*, scale=1, margin=72, font="ObservedFace", problem=None,
                               discretionary=False, opaque=False):
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, classify_semantic_roles,
         group_words_into_lines, order_page_lines,
     )
@@ -392,7 +392,7 @@ def make_native_region_pdf(path, *, scale=1, margin=72, font="Helvetica",
         from reportlab.pdfbase.ttfonts import TTFont
         font = "RegionFixtureUnicode"
         pdfmetrics.registerFont(TTFont(font, str(
-            Path(__file__).parents[1] / "src/web_translator/font_assets/NotoSansKR-Regular.ttf")))
+            Path(__file__).parents[1] / "src/supertranslator/font_assets/NotoSansKR-Regular.ttf")))
     canvas = Canvas(str(path), pagesize=(612 * scale, 792 * scale), invariant=1)
     for page, records in enumerate(region_source_lines(margin=margin, discretionary=discretionary, opaque=opaque)):
         if page == 1 and problem == "competing":
@@ -499,7 +499,7 @@ def _context_record_words(row, scale):
 
 def make_observed_owned_context(*, scale=1, margin=72, font="Helvetica", mixed=True,
                                note=True, label="Variant label", spacing=18, label_first=False):
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, classify_semantic_roles,
         detect_footnotes, group_words_into_lines, order_page_lines,
     )
@@ -541,7 +541,7 @@ def make_native_owned_context_pdf(path, *, scale=1, **kwargs):
 def make_observed_terminal_paragraphs(*, scale=1.0, margin=72, font="ObservedFace",
                                       texts=TERMINAL_PARAGRAPHS, problem=None):
     """Invented justified prose through grouping/classification/order/ownership."""
-    from web_translator.pdf_layout import (
+    from supertranslator.pdf_layout import (
         build_text_blocks, classify_document_lines, classify_semantic_roles,
         group_words_into_lines, order_page_lines,
     )
@@ -585,7 +585,7 @@ def make_native_terminal_pdf(path, *, scale=1.0, margin=72, font="Helvetica", no
         from reportlab.pdfbase.ttfonts import TTFont
         font = "TerminalFixtureUnicode"
         pdfmetrics.registerFont(TTFont(font, str(
-            Path(__file__).parents[1] / "src/web_translator/font_assets/NotoSansKR-Regular.ttf")))
+            Path(__file__).parents[1] / "src/supertranslator/font_assets/NotoSansKR-Regular.ttf")))
         paragraphs = (("Opaque observations retain a careful para‐", "graph with independent measurements",
                        *paragraphs[0][2:]), paragraphs[1])
     canvas = Canvas(str(path), pagesize=(612 * scale, 792 * scale), invariant=1)
@@ -609,8 +609,8 @@ def make_render_unit_run(root, *, case="joined"):
     import json
     from reportlab.pdfgen.canvas import Canvas
     from tests.pdf_fixtures import make_pdf_source_record
-    from web_translator.models import Translation, write_segments
-    from web_translator.pdf_extract import build_pdf_unit_segments
+    from supertranslator.models import Translation, write_segments
+    from supertranslator.pdf_extract import build_pdf_unit_segments
 
     run = root / "run"
     run.mkdir(parents=True)
@@ -731,7 +731,7 @@ def make_render_unit_run(root, *, case="joined"):
 def bind_render_unit_run(run):
     """Bind generated render fixtures using production exact-byte binding logic."""
     import json
-    from web_translator.pdf_unit_bindings import build_pdf_unit_binding
+    from supertranslator.pdf_unit_bindings import build_pdf_unit_binding
     for directory in ("zones", "assignments"):
         (run / directory).mkdir()
         (run / directory / "zone-001.json").write_text('{"zone_id":"zone-001"}\n', encoding="utf-8")
@@ -750,7 +750,7 @@ def write_native_singleton_fixture(run):
     fields and Segment bytes remain unchanged; tests for stale input never call it.
     """
     import json
-    from web_translator.pdf_units import TRANSLATABLE_KINDS
+    from supertranslator.pdf_units import TRANSLATABLE_KINDS
     value = json.loads((run / "document.json").read_bytes())
     units = [PdfTranslationUnit(f"pdf:unit-{index:06d}", (block.id,),
              block.kind, block.semantic_role, block.segment_id, ())
@@ -764,7 +764,7 @@ def write_native_singleton_fixture(run):
 
 def replace_fixture_document(document, **changes):
     """Keep synthetic singleton ownership aligned with deliberate block edits."""
-    from web_translator.pdf_units import TRANSLATABLE_KINDS
+    from supertranslator.pdf_units import TRANSLATABLE_KINDS
     updated = replace(document, **changes)
     units = [PdfTranslationUnit(f"pdf:unit-{index:06d}", (block.id,), block.kind,
              block.semantic_role, block.segment_id, ()) for index, block in enumerate(
@@ -775,10 +775,10 @@ def replace_fixture_document(document, **changes):
 def rebind_native_fixture(run):
     """Bind deliberate synthetic setup changes before any fresh review."""
     import json
-    from web_translator.cli import _assignment_records, _zone_payload
-    from web_translator.models import read_segments
-    from web_translator.pdf_unit_bindings import build_pdf_unit_binding
-    from web_translator.zones import Zone
+    from supertranslator.cli import _assignment_records, _zone_payload
+    from supertranslator.models import read_segments
+    from supertranslator.pdf_unit_bindings import build_pdf_unit_binding
+    from supertranslator.zones import Zone
     if any(not (run / name).exists() for name in ("zones", "assignments")):
         segments = read_segments(run / "segments.jsonl")
         targets = [segment for segment in segments if segment.target]
@@ -812,9 +812,9 @@ def rebind_native_fixture(run):
 def protect_fixture_note_markers(run, translations):
     """Make old renderer-only note data use native physical marker provenance."""
     import json
-    from web_translator.models import ProtectedToken, read_segments, write_segments
-    from web_translator.pdf_units import _unit_protection
-    from web_translator.protection import restore_tokens
+    from supertranslator.models import ProtectedToken, read_segments, write_segments
+    from supertranslator.pdf_units import _unit_protection
+    from supertranslator.protection import restore_tokens
     document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
     by_id = {block.id: block for block in document.blocks}
     by_segment = {unit.segment_id: unit for unit in document.translation_units}

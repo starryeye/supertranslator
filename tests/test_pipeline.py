@@ -16,13 +16,13 @@ import pytest
 import httpx
 from bs4 import BeautifulSoup
 
-from web_translator import __version__
-import web_translator.capture as capture_module
-import web_translator.cli as cli_module
-import web_translator.network as network_module
-from web_translator.capture import CaptureError, capture_page
-from web_translator.cli import main
-from web_translator.models import MasterReview, QAResult
+from supertranslator import __version__
+import supertranslator.capture as capture_module
+import supertranslator.cli as cli_module
+import supertranslator.network as network_module
+from supertranslator.capture import CaptureError, capture_page
+from supertranslator.cli import main
+from supertranslator.models import MasterReview, QAResult
 
 
 TRANSLATED_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "translated"
@@ -59,7 +59,7 @@ REVIEW_DIMENSIONS = (
 
 
 def _web_cli_paths(tmp_path: Path, run_id: str = "run") -> tuple[Path, Path]:
-    run_dir = tmp_path / ".web-translator" / "runs" / run_id
+    run_dir = tmp_path / ".supertranslator" / "runs" / run_id
     output_dir = tmp_path / "translated-pages" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -245,7 +245,7 @@ def test_fixture_pipeline_builds_complete_offline_bundle(
         "warnings",
     }
     assert manifest["schema_version"] == "1.0"
-    assert manifest["tool"] == {"name": "web-translator", "version": __version__}
+    assert manifest["tool"] == {"name": "supertranslator", "version": __version__}
     assert manifest["capture"] == {
         "captured_at": capture["captured_at"],
         "final_url": capture["final_url"],
@@ -606,7 +606,7 @@ def test_subcommand_help_keeps_stdout_reserved_for_one_status_object(
         "status": "ok",
     }
     assert output.out.count("\n") == 1
-    assert "usage: web-translator capture" in output.err
+    assert "usage: supertranslator capture" in output.err
 
 
 def test_capture_failure_returns_capture_exit_code_and_one_status(

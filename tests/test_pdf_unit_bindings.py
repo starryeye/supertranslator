@@ -12,20 +12,20 @@ import pytest
 
 from tests.pdf_fixtures import make_pdf_source_record
 from tests.pdf_unit_fixtures import make_unit_document
-from web_translator import cli
-from web_translator.models import Translation, write_segments
-from web_translator.paths import create_pdf_run_paths
-from web_translator.pdf_extract import build_pdf_unit_segments
-from web_translator.pdf_models import PdfDocument
-from web_translator.zones import build_zones
+from supertranslator import cli
+from supertranslator.models import Translation, write_segments
+from supertranslator.paths import create_pdf_run_paths
+from supertranslator.pdf_extract import build_pdf_unit_segments
+from supertranslator.pdf_models import PdfDocument
+from supertranslator.zones import build_zones
 
 
 BINDING = ".pdf-unit-binding.json"
 
 
 def binding_api():
-    assert importlib.util.find_spec("web_translator.pdf_unit_bindings"), "PDF binding guard is missing"
-    return importlib.import_module("web_translator.pdf_unit_bindings")
+    assert importlib.util.find_spec("supertranslator.pdf_unit_bindings"), "PDF binding guard is missing"
+    return importlib.import_module("supertranslator.pdf_unit_bindings")
 
 
 def write_json(path, value):
@@ -76,7 +76,7 @@ def bound_unit_run(tmp_path):
 
 
 def test_native_origin_is_current_and_readable():
-    from web_translator.pdf_models import PDF_DOCUMENT_SCHEMA_VERSION
+    from supertranslator.pdf_models import PDF_DOCUMENT_SCHEMA_VERSION
     payload = make_unit_document().to_dict()
     payload["extracted_schema_version"] = "1.2"
     assert PdfDocument.from_dict(payload).extracted_schema_version == "1.2"
@@ -177,7 +177,7 @@ def test_adapted_document_cannot_be_assigned(origin):
 
 
 def test_direct_assembly_rejects_missing_native_binding_before_staging(bound_unit_run):
-    from web_translator.pdf_assemble import PdfAssemblyError, assemble_pdf
+    from supertranslator.pdf_assemble import PdfAssemblyError, assemble_pdf
     run = bound_unit_run
     (run / "assignments" / BINDING).unlink()
     with pytest.raises(PdfAssemblyError, match="binding"):
@@ -186,7 +186,7 @@ def test_direct_assembly_rejects_missing_native_binding_before_staging(bound_uni
 
 
 def test_direct_assembly_keeps_public_error_on_consumer_failure(bound_unit_run):
-    from web_translator.pdf_assemble import PdfAssemblyError, assemble_pdf
+    from supertranslator.pdf_assemble import PdfAssemblyError, assemble_pdf
     run = bound_unit_run
     with pytest.raises(PdfAssemblyError, match="cover"):
         assemble_pdf(run, {}, {}, run.parents[2] / "translated-pdfs" / run.name)
@@ -195,7 +195,7 @@ def test_direct_assembly_keeps_public_error_on_consumer_failure(bound_unit_run):
 
 @pytest.mark.parametrize("command", ["prepare", "finalize"])
 def test_qa_rejects_missing_binding_before_artifact_consumption(bound_unit_run, command):
-    from web_translator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
+    from supertranslator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
     run = bound_unit_run
     (run / "assignments" / BINDING).unlink()
     operation = prepare_pdf_qa if command == "prepare" else finalize_pdf_output
