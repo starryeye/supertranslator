@@ -187,7 +187,16 @@ def test_skill_resolves_one_interpreter_and_persists_review_evidence() -> None:
     assert 'python="$(cd .venv/bin && pwd -P)/python"' in skill
     assert 'PowerShell: `& $python`' in skill
     assert 'POSIX: `"$python"`' in skill
-    assert skill.count("<python> -m web_translator") == 8
+    from web_translator.cli import _build_parser
+
+    commands = [line.strip() for line in skill.splitlines()
+                if line.strip().startswith("<python> ")]
+    assert commands
+    for command in commands:
+        prefix = "<python> -m web_translator "
+        assert command.startswith(prefix)
+        arguments = _build_parser().parse_args(command.removeprefix(prefix).split())
+        assert callable(arguments.handler)
     assert "section_findings must exactly cover every planned zone" in skill
     assert "integers from 0 through 2" in skill
     assert '"unresolved_required": []' in skill
