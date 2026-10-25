@@ -73,6 +73,8 @@ _TEXT_BLOCK_KINDS = {
 }
 _DISCRETIONARY_HYPHENS = "\u00ad\u2010\u2011\u2012\u2013\u2014\u2015"
 
+CaptionBox = tuple[int, tuple[float, float, float, float]]
+
 
 class PdfExtractionError(RuntimeError):
     """A PDF cannot safely enter the translation extraction workflow."""
@@ -801,7 +803,7 @@ def classify_graphic_text_lines(
         if line.semantic_role != "body":
             previous = None
             continue
-        marker = re.match(r"^\s*(?:figure|fig\.)\s*\d+\b", line.text, re.I)
+        marker = is_explicit_figure_caption(line.text)
         wrapped = previous is not None and previous.kind == "caption" and (
             not re.search(r"[.!?]\s*$", previous.text)
             and 0 <= line.top - previous.bottom <= max(line.size, previous.size) * 0.7
@@ -1787,7 +1789,7 @@ def merge_contiguous_paragraph_lines(
                 (kind == "paragraph" and merged[-1][0] == "paragraph")
                 or (
                     kind == "caption" and merged[-1][0] == "caption"
-                    and re.match(r"^\s*(?:figure|fig\.)\s*\d+\b", line.text, re.I) is None
+                    and not is_explicit_figure_caption(line.text)
                 )
                 or continues_reference
             )
@@ -2283,37 +2285,34 @@ def detect_footnotes(
     ]
 
 
-def pair_figure_captions(blocks: Sequence[PdfBlock]) -> list[PdfBlock]:
-    """Pair figures and explicit captions only when the relation is unique."""
-    figures = [block for block in blocks if block.kind == "figure"]
-    captions = [
-        block
-        for block in blocks
-        if block.kind in {"paragraph", "caption"}
-        and re.match(r"^\s*(?:figure|fig\.)\s*\d+\b", block.source_text, re.I)
-    ]
-    figure_by_id = {figure.id: figure for figure in figures}
+def is_explicit_figure_caption(text: str) -> bool:
+    """Recognize the existing explicit figure marker, not an inline reference."""
+    return re.match(r"^\s*(?:figure|fig\.)\s*\d+\b", text, re.I) is not None
+
+
+def match_figure_caption_bounds(
+    figures: Mapping[str, CaptionBox],
+    captions: Mapping[str, CaptionBox],
+) -> dict[str, str]:
+    """Return caption-to-figure evidence only for one complete unique matching."""
     candidates = {
-        caption.id: sorted(
+        caption_id: sorted(
             (
-                figure.id
-                for figure in figures
-                if caption.page_number == figure.page_number
-                and _caption_distance(figure.bbox, caption.bbox) <= 36.0
-                and _horizontal_overlap_ratio(figure.bbox, caption.bbox) >= 0.25
+                figure_id
+                for figure_id, (figure_page, figure_bbox) in figures.items()
+                if caption_page == figure_page
+                and _caption_distance(figure_bbox, caption_bbox) <= 36.0
+                and _horizontal_overlap_ratio(figure_bbox, caption_bbox) >= 0.25
             ),
             key=lambda figure_id: (
-                _caption_distance(
-                    figure_by_id[figure_id].bbox,
-                    caption.bbox,
-                ),
+                _caption_distance(figures[figure_id][1], caption_bbox),
                 figure_id,
             ),
         )
-        for caption in captions
+        for caption_id, (caption_page, caption_bbox) in captions.items()
     }
     orphaned = sorted(
-        caption.id for caption in captions if not candidates[caption.id]
+        caption_id for caption_id in captions if not candidates[caption_id]
     )
     if orphaned:
         raise PdfExtractionError(
@@ -2329,6 +2328,22 @@ def pair_figure_captions(blocks: Sequence[PdfBlock]) -> list[PdfBlock]:
         raise PdfExtractionError(
             f"ambiguous figure-caption pairing for {evidence}"
         )
+    return claimed
+
+
+def pair_figure_captions(blocks: Sequence[PdfBlock]) -> list[PdfBlock]:
+    """Pair figures and explicit captions only when the relation is unique."""
+    figures = {
+        block.id: (block.page_number, block.bbox)
+        for block in blocks if block.kind == "figure"
+    }
+    captions = {
+        block.id: (block.page_number, block.bbox)
+        for block in blocks
+        if block.kind in {"paragraph", "caption"}
+        and is_explicit_figure_caption(block.source_text)
+    }
+    claimed = match_figure_caption_bounds(figures, captions)
     replacements: dict[str, PdfBlock] = {}
     by_id = {block.id: block for block in blocks}
     for caption_id, figure_id in claimed.items():
