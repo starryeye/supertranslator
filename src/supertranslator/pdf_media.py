@@ -19,7 +19,16 @@ from PIL import ImageDraw, ImageFont
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
-from supertranslator.pdf_layout import PdfLine, group_words_into_lines
+from supertranslator.pdf_layout import (
+    CaptionBox,
+    PdfExtractionError,
+    PdfLine,
+    build_text_blocks,
+    classify_graphic_text_lines,
+    group_words_into_lines,
+    is_explicit_figure_caption,
+    match_figure_caption_bounds,
+)
 
 
 _POPPLER_TIMEOUT_SECONDS = 600
@@ -651,6 +660,118 @@ def _large_inside_art(item: BBox, container: BBox) -> bool:
     )
 
 
+def _has_closed_graphic_frame(page: object, bbox: BBox) -> bool:
+    """Require actual complete axis-aligned sides, never an object's bounds."""
+    if any(
+        (box := _object_bbox(item)) is not None and _same_box(box, bbox)
+        for item in getattr(page, "rects", ())
+    ):
+        return True
+    edges = [
+        box for item in getattr(page, "lines", ())
+        if (box := _object_bbox(item)) is not None
+        and (box[2] - box[0] <= 1 or box[3] - box[1] <= 1)
+    ]
+    for item in getattr(page, "curves", ()):
+        path = item.get("path", ())
+        if not path or path[0][0] != "m" or any(
+            command[0] not in {"m", "l", "h"} for command in path
+        ) or sum(command[0] == "m" for command in path) != 1:
+            continue
+        points = [command[1] for command in path if command[0] in {"m", "l"}]
+        if len(points) < 4:
+            continue
+        if path[-1][0] == "h":
+            points.append(points[0])
+        if points[-1] != points[0]:
+            continue
+        segments = [
+            (min(a[0], b[0]), min(a[1], b[1]),
+             max(a[0], b[0]), max(a[1], b[1]))
+            for a, b in zip(points, points[1:])
+        ]
+        if all(edge[2] - edge[0] <= 1 or edge[3] - edge[1] <= 1
+               for edge in segments):
+            edges.extend(segments)
+    for side in _box_sides(bbox):
+        horizontal = side[1] == side[3]
+        axis, fixed = (0, 1) if horizontal else (1, 0)
+        intervals = sorted(
+            (edge[axis], edge[axis + 2]) for edge in edges
+            if abs(edge[fixed] - side[fixed]) <= 1
+            and abs(edge[fixed + 2] - side[fixed]) <= 1
+        )
+        covered = side[axis]
+        for start, end in intervals:
+            if start > covered + 1:
+                break
+            covered = max(covered, end)
+        if covered < side[axis + 2] - 1:
+            return False
+    return True
+
+
+def _on_graphic_frame_border(item: BBox, bbox: BBox) -> bool:
+    """Complete borders and partial perimeter segments are not artwork."""
+    return _border_object(item, bbox) or any(
+        _inside_box(item, (side[0] - 1, side[1] - 1, side[2] + 1, side[3] + 1))
+        for side in _box_sides(bbox)
+    )
+
+
+def _caption_witnessed_graphics(
+    page: object, page_number: int, candidates: Sequence[BBox],
+    lines: Sequence[PdfLine], decorated: Sequence[BBox],
+) -> set[BBox]:
+    """Use disposable caption spans to witness composite shape, not approval."""
+    classified = classify_graphic_text_lines(lines, decorated)
+    captions = {
+        block.id: block for block in build_text_blocks(classified, page_number)
+        if block.kind in {"paragraph", "caption"}
+        and is_explicit_figure_caption(block.source_text)
+    }
+    figures: dict[str, CaptionBox] = {
+        str(index): (page_number, box) for index, box in enumerate(candidates)
+    }
+    try:
+        matches = match_figure_caption_bounds(figures, {
+            key: (page_number, block.bbox) for key, block in captions.items()
+        })
+    except PdfExtractionError:
+        return set()
+    artwork = [
+        box for kind in ("images", "lines", "rects", "curves")
+        for item in getattr(page, kind, ())
+        if (box := _object_bbox(item)) is not None
+    ]
+    witnessed = set()
+    for caption_id, figure_id in matches.items():
+        box = figures[figure_id][1]
+        caption = captions[caption_id].bbox
+        if (
+            any(_same_box(box, decoration) for decoration in decorated)
+            or not _has_closed_graphic_frame(page, box)
+            or not any(_inside_box(item, box) and not _on_graphic_frame_border(item, box)
+                       for item in artwork)
+        ):
+            continue
+        if caption[3] <= box[1]:
+            top, bottom = caption[3], box[1]
+        elif caption[1] >= box[3]:
+            top, bottom = box[3], caption[1]
+        else:
+            continue
+        strip = (max(box[0], caption[0]), top, min(box[2], caption[2]), bottom)
+        if _valid_bbox(strip) and any(
+            line.kind != "caption"
+            and _boxes_intersect((word.x0, word.top, word.x1, word.bottom), strip)
+            for line in classified for word in line.words
+        ):
+            continue
+        witnessed.add(box)
+    return witnessed
+
+
 def partition_graphic_regions(
     page: object, *, page_number: int,
     excluded_bboxes: Sequence[tuple[float, float, float, float]] = (),
@@ -710,10 +831,11 @@ def partition_graphic_regions(
         if any(_inside_box(word_box, box) for box in decorated)
         and not any(_inside_box(word_box, box) for box in semantic)
     ]
+    witnessed = _caption_witnessed_graphics(page, page_number, semantic, lines, decorated)
     figures = []
     for bbox in semantic:
         owned_lines = [line for line in lines if _line_inside(line, bbox)]
-        if _has_prose(owned_lines):
+        if _has_prose(owned_lines) and bbox not in witnessed:
             raise PdfMediaError(
                 f"page {page_number} graphic bounds {bbox}: cannot partition selectable prose"
             )
