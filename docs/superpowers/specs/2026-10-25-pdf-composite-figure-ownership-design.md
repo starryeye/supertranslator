@@ -1,6 +1,6 @@
 # Caption-witnessed composite PDF figures
 
-Status: proposed design; user approved fixing the generic failure and resuming the whole-book translation, not this detailed design or an implementation plan yet.
+Status: detailed design approved by the user's subsequent “네” on 2026-10-25. Implementation plan awaits review; no product code has changed.
 
 ## Intent
 
@@ -59,4 +59,4 @@ The builder chooses the smallest pure-helper organization and how to represent t
 
 ## Decisions to review
 
-The source-frame plus unambiguous-caption witness is the builder's recommended conservative boundary, not a user-selected threshold. It intentionally leaves other ambiguous prose-bearing illustrations unsupported rather than guessing. The user owns approval of this behavior; the implementation plan follows only after this design is approved.
+The source-frame plus unambiguous-caption witness was the builder's recommended conservative boundary and is now included in the approved design. It intentionally leaves other ambiguous prose-bearing illustrations unsupported rather than guessing. Implementation follows only after review of its separate plan.
