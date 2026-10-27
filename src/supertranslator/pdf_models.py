@@ -6,7 +6,10 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from supertranslator.pdf_callout_models import PdfCalloutGroup
 
 
 PdfBlockKind = Literal[
@@ -23,6 +26,7 @@ class PdfContractError(ValueError):
 
 _SCHEMA_VERSION = "1.0"
 PDF_DOCUMENT_SCHEMA_VERSION = "1.2"
+PDF_LOGICAL_DOCUMENT_VERSIONS = frozenset({"1.2", "1.3"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BLOCK_ID = re.compile(
     r"pdf:page-(?P<page>\d{4}):(?:block-\d{4}|table-\d{4}:row-\d{4}:cell-\d{4})\Z"
@@ -701,6 +705,7 @@ class PdfDocument:
     extracted_schema_version: str | None = None
     translation_units: list[PdfTranslationUnit] = field(default_factory=list)
     flow_findings: list[PdfFlowFinding] = field(default_factory=list)
+    callout_groups: list[PdfCalloutGroup] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -715,10 +720,14 @@ class PdfDocument:
             "links": [link.to_dict() for link in self.links],
             "extraction_warnings": list(self.extraction_warnings),
         }
-        if self.schema_version == "1.2":
+        if self.callout_groups and self.schema_version != "1.3":
+            raise PdfContractError("PdfDocument.callout_groups require native schema 1.3")
+        if has_logical_pdf_units(self):
             data.update(extracted_schema_version=self.extracted_schema_version,
                         translation_units=[unit.to_dict() for unit in self.translation_units],
                         flow_findings=[finding.to_dict() for finding in self.flow_findings])
+            if self.schema_version == "1.3":
+                data["callout_groups"] = [group.to_dict() for group in self.callout_groups]
             # Direct constructors bypass from_dict; never publish an invalid nested record.
             type(self).from_dict(data)
         return data
@@ -731,12 +740,13 @@ class PdfDocument:
         root_version = _require_string(data, "schema_version", context)
         data = _require_exact_fields(data, context, base_fields | (
             {"extracted_schema_version", "translation_units", "flow_findings"}
-            if root_version == "1.2" else set()))
+            if root_version in PDF_LOGICAL_DOCUMENT_VERSIONS else set()) | (
+            {"callout_groups"} if root_version == "1.3" else set()))
         if root_version == "1.0":
             data = upgrade_pdf_document_v1(data)
-        elif root_version not in {"1.1", PDF_DOCUMENT_SCHEMA_VERSION}:
+        elif root_version not in {"1.1"} | PDF_LOGICAL_DOCUMENT_VERSIONS:
             raise PdfContractError(
-                f"{context}.schema_version must be 1.0, 1.1, or {PDF_DOCUMENT_SCHEMA_VERSION}"
+                f"{context}.schema_version must be 1.0, 1.1, 1.2, or 1.3"
             )
         pages = [PdfPage.from_dict(_require_mapping(item, f"{context}.pages[{index}]")) for index, item in enumerate(_require_list(data, "pages", context))]
         page_count = _require_positive_int(data, "page_count", context)
@@ -821,16 +831,22 @@ class PdfDocument:
         extracted_schema_version = None
         translation_units: list[PdfTranslationUnit] = []
         flow_findings: list[PdfFlowFinding] = []
-        if root_version == "1.2":
+        callout_groups: list[PdfCalloutGroup] = []
+        if root_version in PDF_LOGICAL_DOCUMENT_VERSIONS:
             extracted_schema_version = _require_string(data, "extracted_schema_version", context)
-            if extracted_schema_version not in {"1.0", "1.1", "1.2"}:
-                raise PdfContractError(f"{context}.extracted_schema_version must be 1.0, 1.1, or 1.2")
+            allowed_origins = {"1.3"} if root_version == "1.3" else {"1.0", "1.1", "1.2"}
+            if extracted_schema_version not in allowed_origins:
+                raise PdfContractError(f"{context}.extracted_schema_version is not supported for schema {root_version}")
             translation_units = [PdfTranslationUnit.from_dict(_require_mapping(item, f"{context}.translation_units[{index}]"))
                                  for index, item in enumerate(_require_list(data, "translation_units", context))]
             flow_findings = [PdfFlowFinding.from_dict(_require_mapping(item, f"{context}.flow_findings[{index}]"))
                              for index, item in enumerate(_require_list(data, "flow_findings", context))]
+        if root_version == "1.3":
+            from supertranslator.pdf_callout_models import PdfCalloutGroup
+            callout_groups = [PdfCalloutGroup.from_dict(_require_mapping(item, f"{context}.callout_groups[{index}]"))
+                              for index, item in enumerate(_require_list(data, "callout_groups", context))]
         document = cls(
-            schema_version=root_version if root_version == "1.2" else _require_pdf_document_schema_version(data, context),
+            schema_version=root_version if root_version in PDF_LOGICAL_DOCUMENT_VERSIONS else _require_pdf_document_schema_version(data, context),
             source_sha256=_require_sha256(data, "source_sha256", context),
             page_count=page_count,
             selectable_characters=_require_nonnegative_int(data, "selectable_characters", context),
@@ -843,13 +859,22 @@ class PdfDocument:
             extracted_schema_version=extracted_schema_version,
             translation_units=translation_units,
             flow_findings=flow_findings,
+            callout_groups=callout_groups,
         )
-        if root_version == "1.2":
+        if root_version in PDF_LOGICAL_DOCUMENT_VERSIONS:
             from supertranslator.pdf_units import validate_unit_membership
             validate_unit_membership(document)
             if any(unit.segment_id is None for unit in document.translation_units):
                 raise PdfContractError("PdfDocument serialized units require assigned segment IDs")
+        if root_version == "1.3":
+            from supertranslator.pdf_callout_models import validate_callout_group_membership
+            validate_callout_group_membership(document)
         return document
+
+
+def has_logical_pdf_units(document: PdfDocument) -> bool:
+    """Report structural unit capability, not permission to assign or publish."""
+    return document.schema_version in PDF_LOGICAL_DOCUMENT_VERSIONS
 
 
 @dataclass(frozen=True, slots=True)
