@@ -719,6 +719,39 @@ def _on_graphic_frame_border(item: BBox, bbox: BBox) -> bool:
     )
 
 
+def _curve_has_interior_artwork(item: Mapping[str, object], bbox: BBox) -> bool:
+    """Witness drawn segments, not the union bounds of a multi-side path."""
+    path = item.get("path", ())
+    if not path or path[0][0] != "m":
+        return False
+    # Filling an open subpath implicitly closes it; that closing edge can
+    # cross the interior even when the explicit strokes follow the perimeter.
+    if item.get("fill") and path[-1][0] != "h":
+        path = [*path, ("h",)]
+    current = start = None
+    witnessed = False
+    for command in path:
+        operator = command[0]
+        if operator == "m":
+            current = start = command[1]
+            continue
+        if current is None or operator not in {"l", "c", "v", "y", "h"}:
+            return False
+        points = [current, start] if operator == "h" else [current, *command[1:]]
+        # A line lies in its endpoint hull; a Bezier lies in the hull of its
+        # endpoints/control points (including the implicit v/y control point).
+        # One segment confined to a side is border ink, even if other segments
+        # in the same path follow different sides.
+        bounds = (
+            min(point[0] for point in points), min(point[1] for point in points),
+            max(point[0] for point in points), max(point[1] for point in points),
+        )
+        if _inside_box(bounds, bbox) and not _on_graphic_frame_border(bounds, bbox):
+            witnessed = True
+        current = points[-1]
+    return witnessed
+
+
 def _caption_witnessed_graphics(
     page: object, page_number: int, candidates: Sequence[BBox],
     lines: Sequence[PdfLine], decorated: Sequence[BBox],
@@ -740,7 +773,7 @@ def _caption_witnessed_graphics(
     except PdfExtractionError:
         return set()
     artwork = [
-        box for kind in ("images", "lines", "rects", "curves")
+        (kind, item, box) for kind in ("images", "lines", "rects", "curves")
         for item in getattr(page, kind, ())
         if (box := _object_bbox(item)) is not None
     ]
@@ -751,8 +784,11 @@ def _caption_witnessed_graphics(
         if (
             any(_same_box(box, decoration) for decoration in decorated)
             or not _has_closed_graphic_frame(page, box)
-            or not any(_inside_box(item, box) and not _on_graphic_frame_border(item, box)
-                       for item in artwork)
+            or not any(
+                _inside_box(bounds, box) and not _on_graphic_frame_border(bounds, box)
+                and (kind != "curves" or _curve_has_interior_artwork(item, box))
+                for kind, item, bounds in artwork
+            )
         ):
             continue
         if caption[3] <= box[1]:

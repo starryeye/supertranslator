@@ -42,7 +42,7 @@ def make_composite_figure_pdf(
     canvas.drawString(60, 675, body_text)
 
     if frame == "rect":
-        canvas.rect(60, 360, 440, 220)
+        canvas.rect(60, 360, 440, 220, fill=int(case == "filled-frame-text-only"))
     elif frame in {"lines", "missing-side", "split-lines"}:
         sides = [(60, 360, 500, 360), (500, 360, 500, 580),
                  (500, 580, 60, 580), (60, 580, 60, 360)]
@@ -72,7 +72,20 @@ def make_composite_figure_pdf(
     else:
         raise ValueError(f"unknown frame: {frame}")
 
-    if case not in {"text-only", "no-artwork"}:
+    if case in {"perimeter-path", "perimeter-curved-path", "interior-path",
+                "interior-curved-path", "filled-perimeter-path"}:
+        path_object = canvas.beginPath()
+        path_object.moveTo(60, 420)
+        if case == "perimeter-curved-path":
+            path_object.curveTo(60, 460, 60, 540, 60, 580)
+            path_object.curveTo(160, 580, 260, 580, 360, 580)
+        elif case == "interior-curved-path":
+            path_object.curveTo(240, 420, 360, 460, 360, 580)
+        else:
+            path_object.lineTo(60 if case != "interior-path" else 240, 580)
+            path_object.lineTo(360, 580)
+        canvas.drawPath(path_object, fill=int(case == "filled-perimeter-path"))
+    elif case not in {"text-only", "filled-frame-text-only", "no-artwork"}:
         # A large filled chamber is real internal artwork, not a border/icon.
         canvas.setFillColorRGB(0.2, 0.5, 0.7)
         canvas.rect(100, 385, 320, 70, fill=1)
@@ -97,7 +110,7 @@ def make_composite_figure_pdf(
         caption_y = 585
     elif case == "above":
         caption_y = 598
-    if case not in {"missing", "cross-page", "text-only"}:
+    if case not in {"missing", "cross-page", "text-only", "filled-frame-text-only"}:
         for index, text in enumerate(caption_lines):
             canvas.drawString(caption_x, caption_y - 14 * index, text)
     if case == "ambiguous":

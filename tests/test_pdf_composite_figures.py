@@ -10,6 +10,7 @@ from PIL import Image, ImageChops
 import pytest
 
 from supertranslator.pdf_extract import extract_pdf
+from supertranslator.pdf_layout import PdfExtractionError
 from supertranslator.pdf_media import (
     PdfMediaError, partition_graphic_regions, render_pdf_pages,
 )
@@ -98,8 +99,9 @@ def test_composite_refuses_caption_crossing_frame(tmp_path: Path, case: str) -> 
             partition_graphic_regions(pdf.pages[0], page_number=1)
 
 
-def test_text_only_box_remains_selectable_callout(tmp_path: Path) -> None:
-    fixture = make_composite_figure_pdf(tmp_path / "source.pdf", case="text-only")
+@pytest.mark.parametrize("case", ["text-only", "filled-frame-text-only"])
+def test_text_only_box_remains_selectable_callout(tmp_path: Path, case: str) -> None:
+    fixture = make_composite_figure_pdf(tmp_path / "source.pdf", case=case)
     document = extract_pdf(fixture.source, tmp_path / "doc.json",
                            tmp_path / "segments.jsonl", tmp_path / "media")
     assert not [block for block in document.blocks if block.kind == "figure"]
@@ -119,6 +121,49 @@ def test_split_frame_without_internal_artwork_cannot_own_prose(tmp_path: Path) -
         assert page.extract_text().endswith(fixture.caption_text)
         with pytest.raises(PdfMediaError, match="cannot partition selectable prose"):
             partition_graphic_regions(page, page_number=1)
+
+
+@pytest.mark.parametrize("case", ["perimeter-path", "perimeter-curved-path"])
+def test_perimeter_only_path_cannot_witness_internal_artwork(
+    tmp_path: Path, case: str,
+) -> None:
+    # A multi-side path's bounds span the interior, but none of its ink does.
+    fixture = make_composite_figure_pdf(tmp_path / "source.pdf", case=case)
+    with pdfplumber.open(fixture.source) as pdf:
+        page = pdf.pages[0]
+        assert len(page.rects) == len(page.curves) == 1
+        assert not page.images and not page.lines
+        assert page.curves[0]["pts"][0] == (60, 340)
+        assert page.curves[0]["pts"][-1] == (360, 180)
+        assert page.extract_text().endswith(fixture.caption_text)
+        with pytest.raises(PdfMediaError, match="cannot partition selectable prose"):
+            partition_graphic_regions(page, page_number=1)
+
+
+@pytest.mark.parametrize("case", ["perimeter-path", "perimeter-curved-path"])
+def test_extract_refuses_rasterizing_prose_with_only_perimeter_ink(
+    tmp_path: Path, case: str,
+) -> None:
+    fixture = make_composite_figure_pdf(tmp_path / "source.pdf", case=case)
+    with pytest.raises(PdfExtractionError, match="cannot partition selectable prose"):
+        extract_pdf(fixture.source, tmp_path / "doc.json",
+                    tmp_path / "segments.jsonl", tmp_path / "media")
+
+
+@pytest.mark.parametrize("case", ["interior-path", "interior-curved-path",
+                                 "filled-perimeter-path"])
+def test_actual_path_ink_inside_frame_can_witness_composite(
+    tmp_path: Path, case: str,
+) -> None:
+    fixture = make_composite_figure_pdf(tmp_path / "source.pdf", case=case)
+    document = extract_pdf(fixture.source, tmp_path / "doc.json",
+                           tmp_path / "segments.jsonl", tmp_path / "media")
+    assert [block.bbox for block in document.blocks if block.kind == "figure"] == [
+        fixture.frame_bbox,
+    ]
+    targets = [restore_tokens(segment.source_text, segment.protected)
+               for segment in read_segments(tmp_path / "segments.jsonl")]
+    assert sorted(targets) == sorted([fixture.caption_text, fixture.body_text])
 
 
 @pytest.mark.parametrize("case", ["valid", "wrapped", "above"])
