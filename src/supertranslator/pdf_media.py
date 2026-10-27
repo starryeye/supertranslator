@@ -489,14 +489,19 @@ def detect_figure_regions(
 
 def detect_decorated_text_bboxes(
     page: object,
+    *, proven_callouts: Sequence[BBox] = (),
+    page_lines: Sequence[PdfLine] | None = None,
 ) -> list[tuple[float, float, float, float]]:
     """Find prose decoration before table detection can claim its characters."""
-    _, _, _, decorated = _graphic_text_evidence(page)
+    _, _, _, decorated = _graphic_text_evidence(
+        page, proven_callouts=proven_callouts, page_lines=page_lines)
     return decorated
 
 
 def _graphic_text_evidence(
     page: object,
+    *, proven_callouts: Sequence[BBox] = (),
+    page_lines: Sequence[PdfLine] | None = None,
 ) -> tuple[list[BBox], list[BBox], list[PdfLine], list[BBox]]:
     raster = [
         bbox for item in getattr(page, "images", ())
@@ -508,7 +513,7 @@ def _graphic_text_evidence(
         if (bbox := _object_bbox(item)) is not None
     ]
     vector = [bbox for _kind, bbox in primitives]
-    lines = (
+    lines = list(page_lines) if page_lines is not None else (
         group_words_into_lines(page.extract_words(
             return_chars=True, extra_attrs=["fontname", "size"],
         ))
@@ -530,7 +535,7 @@ def _graphic_text_evidence(
             for side in _box_sides(bbox)
         ):
             rectangles.append(bbox)
-    decorated = []
+    decorated = list(proven_callouts)
     for bbox in rectangles:
         enclosed = [line for line in lines if _line_inside(line, bbox)]
         # Interior grid rules and substantial artwork are not prose decoration.
@@ -847,17 +852,23 @@ def _caption_witnessed_graphics(
 def partition_graphic_regions(
     page: object, *, page_number: int,
     excluded_bboxes: Sequence[tuple[float, float, float, float]] = (),
+    proven_callouts: Sequence[BBox] = (),
+    page_lines: Sequence[PdfLine] | None = None,
 ) -> GraphicPartition:
     """Partition decoration and artwork using source text and object geometry."""
     page_width = _positive_number(getattr(page, "width", None), "page width")
     page_height = _positive_number(getattr(page, "height", None), "page height")
     page_x0, page_top = _page_origin(page)
-    raster, vector, lines, decorated = _graphic_text_evidence(page)
+    raster, vector, lines, decorated = _graphic_text_evidence(
+        page, proven_callouts=proven_callouts, page_lines=page_lines)
     decorated = [box for box in decorated if not _excluded(box, excluded_bboxes)]
     raster = [box for box in raster if not _excluded(box, excluded_bboxes)]
     vector = [
         box for box in vector if not _excluded(box, excluded_bboxes)
         and not any(_border_object(box, decoration) for decoration in decorated)
+        # Discovery checked actual path segments, not just their bounding hull.
+        # Split L-shaped borders can have a nontrivial hull inside this frame.
+        and not any(_inside_box(box, border) for border in proven_callouts)
     ]
     vector_groups = [
         group

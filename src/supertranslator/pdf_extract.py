@@ -7,6 +7,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import hashlib
+from io import BytesIO
 import json
 import math
 from numbers import Real
@@ -16,6 +17,7 @@ import re
 import shutil
 import tempfile
 import warnings
+from types import SimpleNamespace
 
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
@@ -74,6 +76,10 @@ from supertranslator.pdf_models import (
 )
 from supertranslator.protection import protect_fragment
 from supertranslator.pdf_units import _isolated_edge_item_ids, build_translation_units
+from supertranslator.pdf_callouts import (
+    PdfCalloutChainEvidence, PdfCalloutPageEvidence, bind_callout_groups,
+    collect_callout_pages, discover_callout_chains,
+)
 
 
 _MIN_PAGE_POINTS = 36.0
@@ -105,6 +111,8 @@ class _PageMaterial:
     figure_regions: tuple[FigureRegion, ...]
     figure_character_count: int
     characters: tuple[dict[str, object], ...]
+    callout_page: PdfCalloutPageEvidence | None = None
+    callout_chains: tuple[PdfCalloutChainEvidence, ...] = ()
 
 
 def _flow_font(line: PdfLine) -> str:
@@ -398,14 +406,29 @@ def collect_flow_boundaries(
     return result
 
 
+def logical_pdf_bytes(source_pdf_bytes: bytes) -> bytes:
+    """Project source rotation to logical text coordinates without editing source."""
+    reader = PdfReader(BytesIO(source_pdf_bytes), strict=True)
+    if all(_normalized_rotation(page.get("/Rotate", 0)) == 0 for page in reader.pages):
+        return source_pdf_bytes
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    for page in writer.pages:
+        page[NameObject("/Rotate")] = NumberObject(0)
+    destination = BytesIO()
+    writer.write(destination)
+    return destination.getvalue()
+
+
 @contextmanager
 def _upright_extraction_source(
     source: Path,
     staging_parent: Path,
 ) -> Iterator[Path]:
     """Clone one PDF for logical extraction with only page rotation cleared."""
-    reader = PdfReader(Path(source), strict=True)
-    if all(_normalized_rotation(page.get("/Rotate", 0)) == 0 for page in reader.pages):
+    source_bytes = Path(source).read_bytes()
+    logical_bytes = logical_pdf_bytes(source_bytes)
+    if logical_bytes is source_bytes:
         yield Path(source)
         return
     staging_parent = Path(staging_parent)
@@ -418,12 +441,8 @@ def _upright_extraction_source(
         )
         partial = staging_root / "source.partial.pdf"
         staged = staging_root / "source.pdf"
-        writer = PdfWriter()
-        writer.clone_document_from_reader(reader)
-        for page in writer.pages:
-            page[NameObject("/Rotate")] = NumberObject(0)
         with partial.open("wb") as destination:
-            writer.write(destination)
+            destination.write(logical_bytes)
         os.replace(partial, staged)
         yield staged
     finally:
@@ -609,6 +628,10 @@ def extract_pdf(
         _validate_peer_overlap(blocks)
         link_evidence = extract_link_evidence(logical_source, blocks)
         blocks = list(link_evidence.blocks)
+        callout_groups = bind_callout_groups(
+            [chain for material in materials for chain in material.callout_chains],
+            blocks, {material.callout_page.page_number: material.callout_page
+                     for material in materials if material.callout_page is not None})
     extraction_warnings = sorted(
         set((*semantic_warnings, *link_evidence.warnings))
     )
@@ -625,8 +648,8 @@ def extract_pdf(
         owned_line_continuations=owned_line_continuations)
     blocks, units, segments = build_pdf_unit_segments(blocks, units)
     document = PdfDocument(
-        schema_version="1.2",
-        extracted_schema_version="1.2",
+        schema_version="1.3" if callout_groups else "1.2",
+        extracted_schema_version="1.3" if callout_groups else "1.2",
         source_sha256=_sha256(source),
         page_count=inspection.page_count,
         selectable_characters=inspection.selectable_characters,
@@ -638,6 +661,7 @@ def extract_pdf(
         table_cells=table_cells,
         links=list(link_evidence.links),
         extraction_warnings=extraction_warnings,
+        callout_groups=callout_groups,
     )
     try:
         PdfDocument.from_dict(document.to_dict())
@@ -691,10 +715,26 @@ def _extract_page_materials(
         with pdfplumber.open(source) as document:
             if len(document.pages) != inspection.page_count:
                 raise PdfExtractionError("PDF readers disagree on page count")
+            cached_pages = collect_callout_pages(document.pages)
+            chains = discover_callout_chains(cached_pages)
             result: list[_PageMaterial] = []
-            for page, evidence in zip(document.pages, inspection.pages, strict=True):
+            for page, evidence, cached in zip(document.pages, inspection.pages, cached_pages, strict=True):
+                proven = tuple(fragment.border_bbox for chain in chains
+                               for fragment in chain.fragments
+                               if fragment.page_number == evidence.number)
+                # Retain the same raw glyphs and primitives for every graphic claim.
+                graphic_page = SimpleNamespace(**cached.primitives,
+                    chars=cached.characters, bbox=cached.page_bbox,
+                    width=float(page.width), height=float(page.height))
+                for word in cached.words:
+                    box = (float(word["x0"]), float(word["top"]),
+                           float(word["x1"]), float(word["bottom"]))
+                    if any(_intersection_area(box, border) > 0
+                           and not _bbox_inside(box, border) for border in proven):
+                        raise PdfExtractionError(f"callout page {evidence.number}: partial word ownership")
                 try:
-                    decorated = detect_decorated_text_bboxes(page)
+                    decorated = detect_decorated_text_bboxes(
+                        graphic_page, proven_callouts=proven, page_lines=cached.lines)
                     table_page = (
                         page.filter(
                             lambda item: not _mapping_center_in_any_bbox(item, decorated)
@@ -702,19 +742,24 @@ def _extract_page_materials(
                     )
                     tables = detect_tables(table_page, page_number=evidence.number)
                     partition = partition_graphic_regions(
-                        page,
+                        graphic_page,
                         page_number=evidence.number,
                         excluded_bboxes=tables.bboxes,
+                        proven_callouts=proven,
+                        page_lines=cached.lines,
                     )
                     regions = [
                         _region_with_source_crop(region, evidence.rotation)
                         for region in partition.figures
                     ]
+                    if any(_intersection_area(border, other) > 0 for border in proven
+                           for other in (*tables.bboxes, *(r.bbox for r in regions))):
+                        raise PdfExtractionError(f"callout page {evidence.number}: table or figure overlap")
                 except PdfMediaError as error:
                     raise PdfExtractionError(str(error)) from error
                 characters = tuple(
                     dict(character)
-                    for character in page.chars
+                    for character in cached.characters
                     if isinstance(character, Mapping)
                 )
                 tables = _exclude_tables_inside_figures(
@@ -722,14 +767,7 @@ def _extract_page_materials(
                     regions,
                     characters,
                 )
-                raw_words = page.extract_words(
-                    return_chars=True,
-                    extra_attrs=["fontname", "size"],
-                )
-                if not isinstance(raw_words, list):
-                    raise PdfExtractionError(
-                        f"page {evidence.number} did not produce word evidence"
-                    )
+                raw_words = cached.words
                 excluded = [*tables.bboxes, *(region.bbox for region in regions)]
                 prose_words = [
                     word for word in raw_words if not _word_in_any_bbox(word, excluded)
@@ -743,6 +781,7 @@ def _extract_page_materials(
                 ]
                 lines = classify_graphic_text_lines(
                     lines, partition.decorated_text_bboxes,
+                    proven_callouts=proven,
                 )
                 figure_character_count = sum(
                     region.owned_selectable_characters for region in regions
@@ -758,6 +797,9 @@ def _extract_page_materials(
                         figure_regions=tuple(regions),
                         figure_character_count=figure_character_count,
                         characters=characters,
+                        callout_page=cached,
+                        callout_chains=tuple(chain for chain in chains
+                            if chain.fragments[0].page_number == evidence.number),
                     )
                 )
             return result

@@ -15,6 +15,7 @@ import pdfplumber
 from pypdf import PdfReader
 
 from supertranslator.pdf_models import (
+    BBox,
     PdfBlock,
     PdfBlockKind,
     PdfBlockStyle,
@@ -183,6 +184,7 @@ class PdfLine:
     spanning: bool = False
     continues_discretionary_hyphen: bool = False
     semantic_role: PdfSemanticRole = "body"
+    proven_callout_bbox: BBox | None = None
 
     @classmethod
     def from_word(cls, word: PdfWord) -> PdfLine:
@@ -775,6 +777,7 @@ def classify_semantic_roles(
 def classify_graphic_text_lines(
     lines: Sequence[PdfLine],
     decorated_text_bboxes: Sequence[tuple[float, float, float, float]],
+    *, proven_callouts: Sequence[BBox] = (),
 ) -> list[PdfLine]:
     """Retain source words while marking callouts and conservative caption wraps."""
     result = list(lines)
@@ -794,8 +797,12 @@ def classify_graphic_text_lines(
                 line.bold or (bool(body_sizes) and line.size > max(body_sizes) * 1.1)
             )
             result[index] = replace(
-                line, kind="paragraph",
+                line, kind=(
+                    "heading" if title else
+                    "list-item" if split_list_marker(line.text) is not None else "paragraph"
+                ) if bbox in proven_callouts else "paragraph",
                 semantic_role="callout-title" if title else "callout-body",
+                proven_callout_bbox=bbox if bbox in proven_callouts else None,
             )
     previous: PdfLine | None = None
     for index in sorted(range(len(result)), key=lambda i: (result[i].top, result[i].x0)):
@@ -1750,6 +1757,10 @@ def _normalized_text(text: str) -> str:
 
 def classify_line(line: PdfLine) -> tuple[PdfBlockKind, PdfLine]:
     """Classify one already-normalized line without mutating it."""
+    if line.proven_callout_bbox is not None:
+        if line.semantic_role == "callout-title":
+            return "heading", line
+        return "list-item" if split_list_marker(line.text) is not None else "paragraph", line
     if line.kind is not None:
         return line.kind, line
     if split_list_marker(line.text) is not None:
@@ -1818,9 +1829,12 @@ def _continues_hanging_list(
 ) -> bool:
     first, previous = owned[0], owned[-1]
     marker = split_list_marker(first.text)
+    callout = (first.proven_callout_bbox is not None
+               and first.proven_callout_bbox == current.proven_callout_bbox
+               and first.semantic_role == current.semantic_role == "callout-body")
     if (
-        kind != "paragraph" or current.semantic_role != "body"
-        or first.semantic_role != "body" or marker is None
+        kind != "paragraph" or (not callout and current.semantic_role != "body")
+        or (not callout and first.semantic_role != "body") or marker is None
         or split_list_marker(current.text) is not None
         or len(first.words) < 2 or first.words[0].text != marker[0]
     ):
@@ -1833,7 +1847,8 @@ def _continues_hanging_list(
     size = max(body.size, current.size)
     gap = current.top - previous.bottom
     if (
-        abs(current.x0 - body.x0) > size * 0.25
+        (abs(current.x0 - body.x0) > size * 0.25
+         and not (callout and abs(current.x0 - first.x0) <= size * 0.25))
         or abs(current.size - body.size) > size * 0.15
         or not -1e-9 <= gap <= size * 0.75
     ):

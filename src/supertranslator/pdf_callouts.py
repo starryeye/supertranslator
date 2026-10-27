@@ -19,7 +19,8 @@ from supertranslator.pdf_media import (
     _box_sides, _curve_has_interior_artwork, _object_bbox, _straight_path_edges,
     source_axis_aligned_edges,
 )
-from supertranslator.pdf_models import BBox
+from supertranslator.pdf_models import BBox, PdfBlock
+from supertranslator.pdf_callout_models import PdfCalloutFragment, PdfCalloutGroup
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,3 +308,51 @@ def discover_callout_chains(
             _fail(by_number[fragments[0].page_number], fragments[0].border_bbox, "incomplete chain")
         chains.append(PdfCalloutChainEvidence(f"pdf:callout-{len(chains) + 1:06d}", tuple(fragments)))
     return tuple(chains)
+
+
+def bind_callout_groups(
+    chains: Sequence[PdfCalloutChainEvidence], blocks: Sequence[PdfBlock],
+    pages: Mapping[int, PdfCalloutPageEvidence],
+) -> list[PdfCalloutGroup]:
+    """Bind physical members only after proving exact original glyph ownership."""
+    groups = []
+    assigned: set[str] = set()
+    for chain in chains:
+        fragments = []
+        for fragment in chain.fragments:
+            page = pages[fragment.page_number]
+            members = sorted((block for block in blocks
+                if block.page_number == fragment.page_number
+                and _intersects(block.bbox, fragment.content_bbox)), key=lambda b: b.order)
+            if not members or any(
+                block.id in assigned or not _inside(block.bbox, fragment.content_bbox)
+                or block.semantic_role not in {"callout-title", "callout-body"}
+                or block.kind not in {"heading", "paragraph", "list-item"}
+                for block in members
+            ):
+                _fail(page, fragment.border_bbox, "ambiguous physical callout members")
+            ownership: dict[int, str] = {}
+            for block in members:
+                count = 0
+                for index, char in enumerate(page.characters):
+                    if not str(char.get("text", "")).strip():
+                        continue
+                    box = _character_bbox(char)
+                    if box is None or not _intersects(box, block.bbox):
+                        continue
+                    if index in ownership or not _character_fully_inside_bbox(char, block.bbox):
+                        _fail(page, fragment.border_bbox, "partial or duplicate member glyph")
+                    ownership[index] = block.id
+                    count += sum(not c.isspace() for c in str(char["text"]))
+                if count != sum(not c.isspace() for c in block.source_text):
+                    _fail(page, fragment.border_bbox, "member source character accounting")
+            if set(ownership) != set(fragment.character_indexes):
+                _fail(page, fragment.border_bbox, "incomplete member glyph ownership")
+            identifiers = tuple(block.id for block in members)
+            assigned.update(identifiers)
+            fragments.append(PdfCalloutFragment(
+                fragment.page_number, fragment.page_bbox, fragment.border_bbox,
+                fragment.content_bbox, fragment.open_top, fragment.open_bottom,
+                fragment.character_indexes, identifiers))
+        groups.append(PdfCalloutGroup(chain.id, tuple(fragments)))
+    return groups
