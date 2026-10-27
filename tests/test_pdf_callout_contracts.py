@@ -291,7 +291,7 @@ def test_logical_unit_capability_does_not_enable_native_callout_assignment() -> 
         require_assignable_pdf(document)
 
 
-def test_native_groups_do_not_bypass_existing_joined_callout_unit_rejection() -> None:
+def test_joined_callout_requires_native_group_context() -> None:
     payload = make_unit_document().to_dict()
     payload.update(schema_version="1.3", extracted_schema_version="1.3")
     for block in payload["blocks"]:
@@ -306,8 +306,15 @@ def test_native_groups_do_not_bypass_existing_joined_callout_unit_rejection() ->
         fragment["border_bbox"] = [20, 20, 600, 760]
         fragment["content_bbox"] = [30, 30, 590, 750]
     payload["callout_groups"] = [group]
+    document = PdfDocument.from_dict(payload)
+    from supertranslator.pdf_units import project_unit_text
+    unit, = document.translation_units
+    by_id = {b.id: b for b in document.blocks}
+    assert project_unit_text(unit, by_id, callout_groups=document.callout_groups,
+                             document_schema_version="1.3").text == "A paragraph continues."
     with pytest.raises(PdfContractError, match="multi-member unit must be a body"):
-        PdfDocument.from_dict(payload)
+        project_unit_text(unit, by_id, callout_groups=document.callout_groups,
+                          document_schema_version="1.2")
 
 
 def test_fragment_order_must_also_follow_actual_document_block_order() -> None:

@@ -13,6 +13,7 @@ from supertranslator.pdf_models import (
     PdfJoinEvidence, PdfPage, PdfTextJoin, PdfTranslationUnit,
 )
 from supertranslator.protection import protect_fragment
+from supertranslator.pdf_callout_models import PdfCalloutGroup
 
 
 TRANSLATABLE_KINDS = frozenset({
@@ -67,15 +68,36 @@ def _observed_terminal_paragraph(
     ownership_blocks: Sequence[PdfBlock],
     owned_line_continuations: Mapping[str, tuple[bool, ...]],
 ) -> bool:
-    """Narrow transient proof, after the ordinary boundary prerequisites.
+    """Narrow transient proof, after the ordinary boundary prerequisites."""
+    if (left.kind != "paragraph" or right.kind != "paragraph"
+            or left.style.bold or right.style.bold
+            or not _complete_owned_flow(left, right, left_boundary, right_boundary,
+                pages, owned_lines, ownership_blocks, owned_line_continuations)):
+        return False
+    members = owned_lines[left.id]
+    tail = members[-1]
+    frame = left_boundary.column_bbox
+    return (len(members) >= 3
+            and all(abs(frame[2] - line.bbox[2]) <= line.font_size * 0.25 + 1e-9
+                    for line in members[:-1])
+            and frame[2] - tail.bbox[2] >= max(2 * tail.font_size, (frame[2] - frame[0]) * 0.15))
+
+
+def _complete_owned_flow(
+    left: PdfBlock, right: PdfBlock,
+    left_boundary: PdfBlockBoundary, right_boundary: PdfBlockBoundary,
+    pages: Mapping[int, PdfPage],
+    owned_lines: Mapping[str, tuple[PdfBoundaryLine, ...]],
+    ownership_blocks: Sequence[PdfBlock],
+    owned_line_continuations: Mapping[str, tuple[bool, ...]],
+) -> bool:
+    """Require complete reversible physical lines and unique glyph owners.
 
     Canonical per-line continuation flags preserve the collector's exact
     discretionary reconstruction; never infer them from punctuation or text.
     Without flags only exact raw-space reconstruction can earn this proof.
     """
-    if (left.kind != "paragraph" or right.kind != "paragraph"
-            or left.style.bold or right.style.bold
-            or not ownership_blocks
+    if (not ownership_blocks
             or len({block.id for block in ownership_blocks}) != len(ownership_blocks)
             or not set(owned_lines).issubset({block.id for block in ownership_blocks})
             or not set(owned_line_continuations).issubset(set(owned_lines))):
@@ -106,7 +128,7 @@ def _observed_terminal_paragraph(
                 max(line.bbox[2] for line in members), max(line.bbox[3] for line in members))
         if any(abs(a - b) > 1e-7 for a, b in zip(bbox, block.bbox)):
             return False
-        for line in members:
+        for index, line in enumerate(members):
             owners = [candidate for candidate in peers
                       if all(a >= b - 1e-7 for a, b in zip(line.bbox[:2], candidate.bbox[:2]))
                       and all(a <= b + 1e-7 for a, b in zip(line.bbox[2:], candidate.bbox[2:]))]
@@ -115,7 +137,8 @@ def _observed_terminal_paragraph(
             if (line.font_family.split("+")[-1].casefold()
                     != boundary.last_line.font_family.split("+")[-1].casefold()
                     or abs(line.font_size - boundary.last_line.font_size) > line.font_size * 0.10
-                    or abs(line.bbox[0] - boundary.column_bbox[0] - boundary.text_indent)
+                    or abs(line.bbox[0] - (members[0].bbox[0] if index == 0 and block.kind == "list-item"
+                                          else boundary.column_bbox[0] + boundary.text_indent))
                     > line.font_size * 0.25 + 1e-9
                     or line.bbox[2] > boundary.column_bbox[2] + 1e-9):
                 return False
@@ -130,16 +153,7 @@ def _observed_terminal_paragraph(
         left_boundary.line_pitch / lp.height, right_boundary.line_pitch / rp.height,
     ) * 0.15 + 1e-9:
         return False
-    members = owned_lines[left.id]
-    tail = members[-1]
-    frame = left_boundary.column_bbox
-    # At least two consecutive full preceding lines calibrate justification.
-    # Quarter-em edge tolerance permits rounding, not ordinary ragged margins.
-    # The terminal gap must be both two ems and 15% of observed column width.
-    return (len(members) >= 3
-            and all(abs(frame[2] - line.bbox[2]) <= line.font_size * 0.25 + 1e-9
-                    for line in members[:-1])
-            and frame[2] - tail.bbox[2] >= max(2 * tail.font_size, (frame[2] - frame[0]) * 0.15))
+    return True
 
 
 def decide_page_join(
@@ -154,6 +168,21 @@ def decide_page_join(
     separate = PdfJoinDecision("separate")
     if not _flow_pair(left, right):
         return separate
+    return _decide_flow_join(left, right, left_boundary, right_boundary, pages,
+        owned_lines=owned_lines or {}, ownership_blocks=ownership_blocks,
+        owned_line_continuations=owned_line_continuations or {})
+
+
+def _decide_flow_join(
+    left: PdfBlock, right: PdfBlock,
+    left_boundary: PdfBlockBoundary, right_boundary: PdfBlockBoundary,
+    pages: Mapping[int, PdfPage], *,
+    owned_lines: Mapping[str, tuple[PdfBoundaryLine, ...]],
+    ownership_blocks: Sequence[PdfBlock],
+    owned_line_continuations: Mapping[str, tuple[bool, ...]],
+    proven_container_overflow: bool = False,
+) -> PdfJoinDecision:
+    separate = PdfJoinDecision("separate")
     tail, head = left_boundary.last_line, right_boundary.first_line
     discretionary = left.source_text.endswith(("‐", "\u00ad"))
     if (left_boundary.block_id != left.id or right_boundary.block_id != right.id
@@ -169,6 +198,8 @@ def decide_page_join(
     expected_indent = left_boundary.text_indent / lp.width
     head_indent = (head.bbox[0] - rc[0]) / rp.width
     if abs(head_indent - expected_indent) > size * 0.25 + 1e-9:
+        if proven_container_overflow:
+            return _ambiguous(left, right, "incompatible continuation indentation within source callout")
         return separate
     if any(b.column_index is None or b.column_count is None or b.line_pitch is None
            for b in (left_boundary, right_boundary)):
@@ -179,7 +210,7 @@ def decide_page_join(
         return separate
     pitch_left = left_boundary.line_pitch / lp.height
     pitch_right = right_boundary.line_pitch / rp.height
-    if any(b.column_bbox[3] - b.column_bbox[1] < 4 * b.line_pitch - 1e-9
+    if not proven_container_overflow and any(b.column_bbox[3] - b.column_bbox[1] < 4 * b.line_pitch - 1e-9
            for b in (left_boundary, right_boundary)):
         return _ambiguous(left, right, "observed column frame is too short to establish overflow")
     if (tail.bbox[2] > lc[2] + 1e-9 or tail.bbox[0] < lc[0] - 1e-9
@@ -218,6 +249,81 @@ def decide_page_join(
         left.id, right.id, "remove-discretionary-hyphen" if discretionary else "space",
         PdfJoinEvidence(left_boundary, right_boundary, (lp.width, lp.height), (rp.width, rp.height)),
     ))
+
+
+def _bound_callout_members(
+    groups: Sequence[PdfCalloutGroup], blocks: Mapping[str, PdfBlock],
+) -> dict[str, PdfCalloutGroup]:
+    """Validate supplied native group records against actual physical members."""
+    result: dict[str, PdfCalloutGroup] = {}
+    group_ids: set[str] = set()
+    characters: set[tuple[int, int]] = set()
+    for group in groups:
+        group.to_dict()
+        if group.id in group_ids:
+            raise PdfContractError("callout groups have duplicate identity")
+        group_ids.add(group.id)
+        orders: list[int] = []
+        for fragment in group.fragments:
+            indexes = {(fragment.page_number, i) for i in fragment.character_indexes}
+            if indexes & characters:
+                raise PdfContractError("callout groups have duplicate character ownership")
+            characters.update(indexes)
+            for identifier in fragment.source_block_ids:
+                block = blocks.get(identifier)
+                box = fragment.content_bbox
+                if (block is None or identifier in result or block.page_number != fragment.page_number
+                        or block.semantic_role not in {"callout-title", "callout-body"}
+                        or block.kind not in {"heading", "paragraph", "list-item"}
+                        or not block.source_text.strip()
+                        or not (box[0] <= block.bbox[0] <= block.bbox[2] <= box[2]
+                                and box[1] <= block.bbox[1] <= block.bbox[3] <= box[3])):
+                    raise PdfContractError("callout group lacks unique physical member ownership")
+                result[identifier] = group
+                orders.append(block.order)
+        if orders != sorted(set(orders)):
+            raise PdfContractError("callout group members must follow physical order")
+    return result
+
+
+def _callout_flow_pair(left: PdfBlock, right: PdfBlock) -> bool:
+    return (right.page_number == left.page_number + 1
+            and left.kind in {"paragraph", "list-item"} and right.kind == "paragraph"
+            and left.semantic_role == right.semantic_role == "callout-body"
+            and bool(left.source_text.strip()) and bool(right.source_text.strip())
+            and split_list_marker(right.source_text) is None)
+
+
+def decide_callout_join(
+    left: PdfBlock, right: PdfBlock,
+    left_boundary: PdfBlockBoundary, right_boundary: PdfBlockBoundary,
+    pages: Mapping[int, PdfPage], *, group: PdfCalloutGroup,
+    owned_lines: Mapping[str, tuple[PdfBoundaryLine, ...]],
+    ownership_blocks: Sequence[PdfBlock],
+    owned_line_continuations: Mapping[str, tuple[bool, ...]],
+) -> PdfJoinDecision:
+    """Use ordinary positive flow proof only within a bound source-cap chain."""
+    if not _callout_flow_pair(left, right):
+        return PdfJoinDecision("separate")
+    by_id = {block.id: block for block in ownership_blocks}
+    membership = _bound_callout_members((group,), by_id)
+    physical = [i for f in group.fragments for i in f.source_block_ids]
+    if (membership.get(left.id) != group or membership.get(right.id) != group
+            or physical.index(right.id) != physical.index(left.id) + 1):
+        return PdfJoinDecision("separate")
+    if (left.page_number not in pages or right.page_number not in pages
+            or left_boundary.line_pitch is None or right_boundary.line_pitch is None
+            or not _complete_owned_flow(left, right, left_boundary, right_boundary, pages,
+                owned_lines, ownership_blocks, owned_line_continuations)):
+        return _ambiguous(left, right, "missing complete observed callout line ownership or pitch")
+    # A cap-to-cap source chain proves overflow, but cannot manufacture leading.
+    # One-line edge fragments borrow only their matched peer's two intervals.
+    lengths = [len(owned_lines[block.id]) for block in (left, right)]
+    if any(length < 3 for length in lengths) and not (min(lengths) == 1 and max(lengths) >= 3):
+        return _ambiguous(left, right, "insufficient observed callout line intervals")
+    return _decide_flow_join(left, right, left_boundary, right_boundary, pages,
+        owned_lines=owned_lines, ownership_blocks=ownership_blocks,
+        owned_line_continuations=owned_line_continuations, proven_container_overflow=True)
 
 
 def _matching_isolated_edge_item(
@@ -299,6 +405,7 @@ def build_translation_units(
     boundaries: Mapping[str, PdfBlockBoundary], *,
     owned_lines: Mapping[str, tuple[PdfBoundaryLine, ...]] | None = None,
     owned_line_continuations: Mapping[str, tuple[bool, ...]] | None = None,
+    callout_groups: Sequence[PdfCalloutGroup] = (),
 ) -> tuple[list[PdfTranslationUnit], list[PdfFlowFinding]]:
     """Build unassigned logical ownership without modifying physical blocks."""
     ordered = sorted(blocks, key=lambda block: block.order)
@@ -323,16 +430,27 @@ def build_translation_units(
             and block.id not in notes and block.id not in edge_ids]
     joins: dict[str, PdfTextJoin] = {}
     findings: list[PdfFlowFinding] = []
-    for left, right in zip(flow, flow[1:]):
-        if not _flow_pair(left, right):
+    bound = _bound_callout_members(callout_groups, {block.id: block for block in blocks})
+    pairs = [(left, right) for left, right in zip(flow, flow[1:]) if _flow_pair(left, right)]
+    for group in callout_groups:
+        members = [next(block for block in ordered if block.id == i)
+                   for f in group.fragments for i in f.source_block_ids]
+        pairs.extend(zip(members, members[1:]))
+    for left, right in pairs:
+        is_callout = (_callout_flow_pair(left, right) and left.id in bound
+                      and bound.get(right.id) == bound[left.id])
+        if not _flow_pair(left, right) and not is_callout:
             continue
         if left.id not in boundaries or right.id not in boundaries:
             decision = _ambiguous(left, right, "missing provable boundary ownership or column frame")
         else:
-            candidates = (*blocks_by_page[left.page_number], *blocks_by_page[right.page_number])
+            candidates = (tuple(blocks) if is_callout else
+                          (*blocks_by_page[left.page_number], *blocks_by_page[right.page_number]))
             evidence = {block.id: paragraph_lines[block.id] for block in candidates
                         if block.id in paragraph_lines}
-            decision = decide_page_join(left, right, boundaries[left.id], boundaries[right.id], page_map,
+            decider = decide_callout_join if is_callout else decide_page_join
+            decision = decider(left, right, boundaries[left.id], boundaries[right.id], page_map,
+                                        **({"group": bound[left.id]} if is_callout else {}),
                                         owned_lines=evidence, ownership_blocks=candidates,
                                         owned_line_continuations={block.id: continuations[block.id]
                                                                  for block in candidates
@@ -402,19 +520,35 @@ class PdfProtectedOccurrence:
 
 def _require_supported_unit_members(
     unit: PdfTranslationUnit, blocks: Mapping[str, PdfBlock],
+    *, callout_groups: Sequence[PdfCalloutGroup] = (), document_schema_version: str = "1.2",
 ) -> None:
     """Only body paragraph/list continuations may span physical blocks."""
     if len(unit.source_block_ids) <= 1:
         return
-    if unit.semantic_role != "body" or unit.kind not in {"paragraph", "list-item"}:
+    if unit.semantic_role == "callout-body" and document_schema_version == "1.3":
+        bound = _bound_callout_members(callout_groups, blocks)
+        group = bound.get(unit.source_block_ids[0])
+        if group is None or any(bound.get(i) != group for i in unit.source_block_ids):
+            raise PdfContractError(f"{unit.id}: continued callout requires one bound source group")
+        physical = [i for f in group.fragments for i in f.source_block_ids]
+        if (len(set(unit.source_block_ids)) != len(unit.source_block_ids)
+                or any(physical.index(b) != physical.index(a) + 1
+                       or blocks[b].page_number != blocks[a].page_number + 1
+                       for a, b in zip(unit.source_block_ids, unit.source_block_ids[1:]))):
+            raise PdfContractError(f"{unit.id}: callout members must follow adjacent physical group order")
+    elif unit.semantic_role != "body" or unit.kind not in {"paragraph", "list-item"}:
         raise PdfContractError(f"{unit.id}: multi-member unit must be a body paragraph or list-item")
+    if unit.kind not in {"paragraph", "list-item"}:
+        raise PdfContractError(f"{unit.id}: multi-member unit must be a paragraph or list-item")
     for index, block_id in enumerate(unit.source_block_ids):
         try:
             block = blocks[block_id]
         except KeyError as error:
             raise PdfContractError(f"{unit.id}: member {block_id} is missing") from error
         expected_kind = unit.kind if index == 0 else "paragraph"
-        if block.semantic_role != "body" or block.kind != expected_kind:
+        if (block.semantic_role != unit.semantic_role or block.kind != expected_kind
+                or (unit.semantic_role == "callout-body" and index > 0
+                    and split_list_marker(block.source_text) is not None)):
             raise PdfContractError(f"{unit.id}: multi-member unit must contain only body continuations")
 
 
@@ -452,9 +586,11 @@ def validate_unit_membership(document: PdfDocument) -> None:
             if unit.kind == "list-item" and member.kind == "list-item":
                 raise PdfContractError("PdfDocument.translation_units cannot contain a second list-item")
             if (member.kind, member.semantic_role) != (unit.kind, unit.semantic_role):
-                if not (unit.kind == "list-item" and member.kind == "paragraph" and member.semantic_role == "body"):
+                if not (unit.kind == "list-item" and member.kind == "paragraph"
+                        and member.semantic_role == unit.semantic_role):
                     raise PdfContractError("PdfDocument.translation_units cannot mix member kinds or roles")
-        _require_supported_unit_members(unit, by_id)
+        _require_supported_unit_members(unit, by_id, callout_groups=document.callout_groups,
+                                         document_schema_version=document.schema_version)
         if unit.segment_id is not None:
             if unit.segment_id in segment_ids:
                 raise PdfContractError("PdfDocument.translation_units segment IDs must be unique")
@@ -488,10 +624,13 @@ def unit_for_block(document: PdfDocument, block_id: str) -> PdfTranslationUnit:
     raise PdfContractError(f"No translation unit owns block {block_id}")
 
 
-def project_unit_text(unit: PdfTranslationUnit, blocks: Mapping[str, PdfBlock]) -> PdfUnitProjection:
+def project_unit_text(unit: PdfTranslationUnit, blocks: Mapping[str, PdfBlock], *,
+    callout_groups: Sequence[PdfCalloutGroup] = (), document_schema_version: str = "1.2",
+) -> PdfUnitProjection:
     if len(unit.joins) != len(unit.source_block_ids) - 1:
         raise PdfContractError("PdfTranslationUnit joins must match member boundaries")
-    _require_supported_unit_members(unit, blocks)
+    _require_supported_unit_members(unit, blocks, callout_groups=callout_groups,
+                                    document_schema_version=document_schema_version)
     chunks: list[str] = []
     spans: list[PdfSourceSpan] = []
     cursor = 0
@@ -563,6 +702,7 @@ def _occurrence_spans(
 def _unit_protection(
     unit: PdfTranslationUnit, blocks: Mapping[str, PdfBlock],
     reference_lengths: Mapping[str, int] | None = None,
+    *, callout_groups: Sequence[PdfCalloutGroup] = (), document_schema_version: str = "1.2",
 ) -> tuple[str, tuple[PdfProtectedOccurrence, ...]]:
     """Allocate tokens once from the projection; segments and provenance share it.
 
@@ -574,7 +714,8 @@ def _unit_protection(
         _PDF_PLACEHOLDER_PATTERN, _pdf_leading_marker_value, _reference_core_lengths,
     )
 
-    projection = project_unit_text(unit, blocks)
+    projection = project_unit_text(unit, blocks, callout_groups=callout_groups,
+                                   document_schema_version=document_schema_version)
     raw = projection.text
     ranges: list[_ProtectedRange] = []
     if unit.semantic_role == "reference-entry":
@@ -670,9 +811,11 @@ def _unit_protection(
 
 def project_protected_occurrences(
     unit: PdfTranslationUnit, blocks: Mapping[str, PdfBlock],
+    *, callout_groups: Sequence[PdfCalloutGroup] = (), document_schema_version: str = "1.2",
 ) -> tuple[PdfProtectedOccurrence, ...]:
     """Project canonical protected occurrences onto their physical sources."""
-    return _unit_protection(unit, blocks)[1]
+    return _unit_protection(unit, blocks, callout_groups=callout_groups,
+                            document_schema_version=document_schema_version)[1]
 
 
 def require_pdf_unit_budget(

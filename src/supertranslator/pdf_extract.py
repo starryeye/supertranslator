@@ -76,6 +76,7 @@ from supertranslator.pdf_models import (
 )
 from supertranslator.protection import protect_fragment
 from supertranslator.pdf_units import _isolated_edge_item_ids, build_translation_units
+from supertranslator.pdf_callout_models import PdfCalloutFragment, PdfCalloutGroup
 from supertranslator.pdf_callouts import (
     PdfCalloutChainEvidence, PdfCalloutPageEvidence, bind_callout_groups,
     collect_callout_pages, discover_callout_chains,
@@ -131,9 +132,12 @@ def collect_owned_flow_lines(
     blocks: Sequence[PdfBlock], pages: Sequence[PdfPage],
     lines_by_page: Mapping[int, Sequence[PdfLine]], *,
     discretionary_continuations: MutableMapping[str, tuple[bool, ...]] | None = None,
+    callout_groups: Sequence[PdfCalloutGroup] = (),
 ) -> dict[str, tuple[PdfBoundaryLine, ...]]:
     """Retain uniquely reconstructed physical lines independently of frames."""
     result: dict[str, tuple[PdfBoundaryLine, ...]] = {}
+    from supertranslator.pdf_units import _bound_callout_members
+    bound = _bound_callout_members(callout_groups, {b.id: b for b in blocks})
     for page in pages:
         page_blocks = [block for block in blocks if block.page_number == page.number]
         lines = repair_line_fragments(lines_by_page.get(page.number, ()))
@@ -145,7 +149,9 @@ def collect_owned_flow_lines(
                 owned[owners[0].id].append(line)
         for block in page_blocks:
             members = owned[block.id]
-            if (block.kind not in {"paragraph", "list-item"} or block.semantic_role != "body"
+            if (block.kind not in {"paragraph", "list-item"}
+                    or not (block.semantic_role == "body" or block.id in bound
+                            and block.semantic_role == "callout-body")
                     or not members or _block_source_text(members) != block.source_text):
                 continue
             bbox = (min(line.x0 for line in members), min(line.top for line in members),
@@ -321,6 +327,7 @@ def collect_flow_boundaries(
     blocks: Sequence[PdfBlock], pages: Sequence[PdfPage],
     lines_by_page: Mapping[int, Sequence[PdfLine]], *,
     owned_lines: Mapping[str, tuple[PdfBoundaryLine, ...]] | None = None,
+    callout_groups: Sequence[PdfCalloutGroup] = (),
 ) -> dict[str, PdfBlockBoundary]:
     """Collect real column frames and pitch from uniquely owned physical lines.
 
@@ -328,16 +335,20 @@ def collect_flow_boundaries(
     observed column lines, never guessed block boxes or absent line context.
     """
     if owned_lines is None:
-        owned_lines = collect_owned_flow_lines(blocks, pages, lines_by_page)
+        owned_lines = collect_owned_flow_lines(blocks, pages, lines_by_page, callout_groups=callout_groups)
+    callout_ids = {identifier for group in callout_groups for fragment in group.fragments
+                   for identifier in fragment.source_block_ids}
+    ordinary_owned_lines = {identifier: lines for identifier, lines in owned_lines.items()
+                            if identifier not in callout_ids}
     edge_ids = _isolated_edge_item_ids(blocks, pages, owned_lines)
     result: dict[str, PdfBlockBoundary] = {}
     for page in pages:
         page_blocks = [block for block in blocks if block.page_number == page.number]
         lines = repair_line_fragments(lines_by_page.get(page.number, ()))
         indexed = {_boundary_line(line): line for line in lines}
-        proven = {block.id: [indexed[line] for line in owned_lines[block.id]]
-                  for block in page_blocks if block.id in owned_lines and block.id not in edge_ids
-                  and all(line in indexed for line in owned_lines[block.id])}
+        proven = {block.id: [indexed[line] for line in ordinary_owned_lines[block.id]]
+                  for block in page_blocks if block.id in ordinary_owned_lines and block.id not in edge_ids
+                  and all(line in indexed for line in ordinary_owned_lines[block.id])}
         context = [line for members in proven.values() for line in members]
         if len(context) < 3:
             continue
@@ -403,6 +414,66 @@ def collect_flow_boundaries(
                     block.id, _boundary_line(first), _boundary_line(last), frame,
                     margin - frame[0], pitch, index, len(columns),
                 )
+    # Source containers supply their own scope, never surrounding body columns.
+    # Reconstruct canonically even when a caller supplies an ownership mapping.
+    canonical = collect_owned_flow_lines(blocks, pages, lines_by_page, callout_groups=callout_groups)
+    by_id = {block.id: block for block in blocks}
+    for group in callout_groups:
+        fragments: list[tuple[PdfCalloutFragment, list[PdfBlock], list[PdfBoundaryLine], float | None]] = []
+        for fragment in group.fragments:
+            members = [by_id[i] for i in fragment.source_block_ids
+                       if by_id[i].semantic_role == "callout-body"]
+            lines = [line for block in members for line in canonical.get(block.id, ())]
+            if (not lines or any(owned_lines.get(b.id) != canonical.get(b.id)
+                                 or b.id not in canonical for b in members)):
+                continue
+            intervals = [b.bbox[1] - a.bbox[1] for block in members
+                         for a, b in zip(canonical[block.id], canonical[block.id][1:])]
+            pitch = min(intervals) if intervals else None
+            if pitch is not None and (len(intervals) < 2 or any(
+                    abs(value - pitch) > max(line.font_size for line in lines) * .15 + 1e-9
+                    for value in intervals)):
+                pitch = None
+            fragments.append((fragment, members, lines, pitch))
+        if not fragments:
+            continue
+        # Observe padding across the accepted same-frame source chain. A hanging
+        # continuation cannot invent its own narrower column, nor can a short
+        # edge line redefine the measured right edge.
+        left_padding = min((line.bbox[0] - f.border_bbox[0]) / (f.page_bbox[2] - f.page_bbox[0])
+                           for f, _, lines, _ in fragments for line in lines)
+        right_padding = min((f.border_bbox[2] - line.bbox[2]) / (f.page_bbox[2] - f.page_bbox[0])
+                            for f, _, lines, _ in fragments for line in lines)
+        for fragment, members, lines, pitch in fragments:
+            if pitch is None and len(lines) == 1:
+                # Only an adjacent matched fragment may lend two measured intervals.
+                height = fragment.page_bbox[3] - fragment.page_bbox[1]
+                peers = [p * height / (f.page_bbox[3] - f.page_bbox[1])
+                         for f, _, _, p in fragments if p is not None
+                         and abs(f.page_number - fragment.page_number) == 1]
+                if peers and all(abs(p - peers[0]) <= lines[0].font_size * .15 for p in peers):
+                    pitch = peers[0]
+            width = fragment.page_bbox[2] - fragment.page_bbox[0]
+            frame = (fragment.border_bbox[0] + left_padding * width,
+                     min(line.bbox[1] for line in lines),
+                     fragment.border_bbox[2] - right_padding * width,
+                     max(line.bbox[3] for line in lines))
+            for block in members:
+                owned = canonical[block.id]
+                first, last = owned[0], owned[-1]
+                raw = next((line for line in repair_line_fragments(lines_by_page[block.page_number])
+                            if _boundary_line(line) == first), None)
+                margin = min(line.bbox[0] for line in owned)
+                if block.kind == "list-item":
+                    marker = split_list_marker(first.text)
+                    if raw is None or marker is None or len(raw.words) < 2 or raw.words[0].text != marker[0]:
+                        continue
+                    # Existing inline list flow and hanging flow must not mix.
+                    hanging = (len(owned) == 1 or
+                               abs(owned[1].bbox[0] - raw.words[1].x0) <= first.font_size * .25)
+                    margin = raw.words[1].x0 if hanging else first.bbox[0]
+                result[block.id] = PdfBlockBoundary(block.id, first, last, frame,
+                    margin - frame[0], pitch, 0, 1)
     return result
 
 
@@ -641,12 +712,15 @@ def extract_pdf(
              for evidence, material in zip(inspection.pages, materials, strict=True)]
     owned_line_continuations: dict[str, tuple[bool, ...]] = {}
     owned_lines = collect_owned_flow_lines(
-        blocks, pages, lines_by_page, discretionary_continuations=owned_line_continuations)
-    boundaries = collect_flow_boundaries(blocks, pages, lines_by_page, owned_lines=owned_lines)
+        blocks, pages, lines_by_page, discretionary_continuations=owned_line_continuations,
+        callout_groups=callout_groups)
+    boundaries = collect_flow_boundaries(blocks, pages, lines_by_page, owned_lines=owned_lines,
+                                         callout_groups=callout_groups)
     units, flow_findings = build_translation_units(
         blocks, pages, boundaries, owned_lines=owned_lines,
-        owned_line_continuations=owned_line_continuations)
-    blocks, units, segments = build_pdf_unit_segments(blocks, units)
+        owned_line_continuations=owned_line_continuations, callout_groups=callout_groups)
+    blocks, units, segments = build_pdf_unit_segments(blocks, units, callout_groups=callout_groups,
+        document_schema_version="1.3" if callout_groups else "1.2")
     document = PdfDocument(
         schema_version="1.3" if callout_groups else "1.2",
         extracted_schema_version="1.3" if callout_groups else "1.2",
@@ -1264,6 +1338,7 @@ def _build_segments(blocks: list[PdfBlock]) -> tuple[list[PdfBlock], list[Segmen
 
 def build_pdf_unit_segments(
     blocks: Sequence[PdfBlock], units: Sequence[PdfTranslationUnit],
+    *, callout_groups: Sequence[PdfCalloutGroup] = (), document_schema_version: str = "1.2",
 ) -> tuple[list[PdfBlock], list[PdfTranslationUnit], list[Segment]]:
     """Assign one shared target per logical unit without selecting the 1.2 writer."""
     from supertranslator.pdf_units import (
@@ -1272,7 +1347,8 @@ def build_pdf_unit_segments(
 
     by_id = {block.id: block for block in blocks}
     for unit in units:
-        _require_supported_unit_members(unit, by_id)
+        _require_supported_unit_members(unit, by_id, callout_groups=callout_groups,
+                                        document_schema_version=document_schema_version)
     reference_blocks = [block for block in blocks if block.semantic_role == "reference-entry"]
     reference_lengths = _reference_core_lengths(reference_blocks) if reference_blocks else {}
     heading_sizes = sorted({font_size_bucket(by_id[unit.source_block_ids[0]].style.font_size)
@@ -1284,7 +1360,8 @@ def build_pdf_unit_segments(
     assigned_units: list[PdfTranslationUnit] = []
     for identifier, unit in zip(identifiers, units, strict=True):
         first = by_id[unit.source_block_ids[0]]
-        source_text, occurrences = _unit_protection(unit, by_id, reference_lengths)
+        source_text, occurrences = _unit_protection(unit, by_id, reference_lengths,
+            callout_groups=callout_groups, document_schema_version=document_schema_version)
         drafts.append((unit, identifier, list(headings), source_text, occurrences))
         assigned_units.append(replace(unit, segment_id=identifier))
         for block_id in unit.source_block_ids:
@@ -1296,7 +1373,8 @@ def build_pdf_unit_segments(
             headings = headings[:level - 1]
             while len(headings) < level - 1:
                 headings.append("")
-            headings.append(project_unit_text(unit, by_id).text)
+            headings.append(project_unit_text(unit, by_id, callout_groups=callout_groups,
+                document_schema_version=document_schema_version).text)
 
     segments = [Segment(
         id=identifier,
