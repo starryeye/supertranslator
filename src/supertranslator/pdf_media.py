@@ -660,6 +660,46 @@ def _large_inside_art(item: BBox, container: BBox) -> bool:
     )
 
 
+def _straight_path_edges(item: Mapping[str, object]) -> tuple[BBox, ...]:
+    """Decode actual straight strokes, never the bounding box of a path."""
+    path = item.get("path", ())
+    if not path or path[0][0] != "m" or any(
+        command[0] not in {"m", "l", "h"} for command in path
+    ):
+        return ()
+    edges = []
+    current = start = None
+    for command in path:
+        if command[0] == "m":
+            current = start = command[1]
+            continue
+        end = start if command[0] == "h" else command[1]
+        if current is None or end is None:
+            return ()
+        if current != end:
+            edges.append((min(current[0], end[0]), min(current[1], end[1]),
+                          max(current[0], end[0]), max(current[1], end[1])))
+        current = end
+    return tuple(edges)
+
+
+def source_axis_aligned_edges(page: object) -> tuple[BBox, ...]:
+    """Actual axis-aligned source segments, including unclosed straight paths.
+
+    This enumeration is not a closed-frame witness for figure ownership.
+    """
+    edges = [box for item in getattr(page, "lines", ())
+             if (box := _object_bbox(item)) is not None
+             and ((box[0] == box[2]) != (box[1] == box[3]))]
+    for item in getattr(page, "rects", ()):
+        if (box := _object_bbox(item)) is not None:
+            edges.extend(_box_sides(box))
+    for item in getattr(page, "curves", ()):
+        edges.extend(edge for edge in _straight_path_edges(item)
+                     if edge[0] == edge[2] or edge[1] == edge[3])
+    return tuple(edges)
+
+
 def _has_closed_graphic_frame(page: object, bbox: BBox) -> bool:
     """Require actual complete axis-aligned sides, never an object's bounds."""
     if any(
@@ -685,11 +725,7 @@ def _has_closed_graphic_frame(page: object, bbox: BBox) -> bool:
             points.append(points[0])
         if points[-1] != points[0]:
             continue
-        segments = [
-            (min(a[0], b[0]), min(a[1], b[1]),
-             max(a[0], b[0]), max(a[1], b[1]))
-            for a, b in zip(points, points[1:])
-        ]
+        segments = _straight_path_edges(item)
         if all(edge[2] - edge[0] <= 1 or edge[3] - edge[1] <= 1
                for edge in segments):
             edges.extend(segments)
