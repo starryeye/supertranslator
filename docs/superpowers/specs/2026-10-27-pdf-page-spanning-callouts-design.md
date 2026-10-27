@@ -1,6 +1,6 @@
 # Page-spanning selectable-text PDF callouts
 
-Status: the user approved the recommended approach on 2026-10-27: prove adjacent source callout fragments belong together, preserve titles/lists, translate a continued logical paragraph as one AI target, and reflow Korean output. This detailed design awaits approval. No product implementation is authorized yet.
+Status: the user approved the recommended approach on 2026-10-27 and this detailed design through the subsequent “네” on 2026-10-28. The separate implementation plan awaits review; no product code has changed.
 
 ## Intent and current evidence
 
@@ -64,4 +64,4 @@ If extraction passes, resume the existing direct-AI `korean-first` workflow: imm
 
 ## Approval boundary
 
-This is a connected extension across existing components, not a one-line extraction workaround. The user chose the approach; the detailed document still needs approval, followed by the separate implementation plan. Builder check may settle minor internal organization choices; it cannot change these product/safety boundaries. Implementation and book re-execution do not begin merely because this document exists.
+This is a connected extension across existing components, not a one-line extraction workaround. The user approved the detailed design; the separate implementation plan still needs review before implementation. Builder check may settle minor internal organization choices; it cannot change these product/safety boundaries. Implementation and book re-execution do not begin merely because this document exists.
