@@ -15,6 +15,7 @@ from typing import Any, Callable, Literal, get_args
 from reportlab.platypus import Flowable
 
 from supertranslator.pdf_models import PdfContractError, PdfLinkEvidence, PdfSemanticRole
+from supertranslator.pdf_callout_models import PdfCalloutLayoutPart
 
 
 _BLOCK_ID = re.compile(
@@ -88,9 +89,11 @@ class PdfFlowableLayout:
     footnote_ownership: str | None = None
     unit_id: str | None = None
     source_block_ids: tuple[str, ...] = ()
+    callout_group_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
+            **({"callout_group_id": self.callout_group_id} if self.callout_group_id is not None else {}),
             **({"unit_id": self.unit_id, "source_block_ids": list(self.source_block_ids)}
                if self.unit_id is not None else {}),
             **({"footnote_owner_id": self.footnote_owner_id, "footnote_ownership": self.footnote_ownership}
@@ -115,6 +118,7 @@ class PdfFlowableLayout:
         ownership_present = ownership_fields.intersection(value) if isinstance(value, Mapping) else set()
         unit_fields = {"unit_id", "source_block_ids"}
         unit_present = unit_fields.intersection(value) if isinstance(value, Mapping) else set()
+        group_present = {"callout_group_id"}.intersection(value) if isinstance(value, Mapping) else set()
         data = _exact_mapping(
             value,
             context,
@@ -128,7 +132,8 @@ class PdfFlowableLayout:
                 "source_order",
                 "split_part",
             } | ({"semantic_role"} if schema_version != "1.0" else set()) | ownership_present
-            | (unit_present if schema_version == "1.2" else set()),
+            | (unit_present if schema_version in {"1.2", "1.3"} else set())
+            | (group_present if schema_version == "1.3" else set()),
         )
         semantic_role = (
             _string(data, "semantic_role", context) if schema_version != "1.0" else "body"
@@ -149,8 +154,12 @@ class PdfFlowableLayout:
                     or any(not isinstance(item, str) or _BLOCK_ID.fullmatch(item) is None for item in members)
                     or len(members) != len(set(members)) or members[0] != block_id):
                 raise PdfAssemblyError(f"{context} has invalid unit/member provenance")
-        elif schema_version == "1.2" and kind in {"heading", "paragraph", "list-item", "caption", "footnote"}:
+        elif schema_version in {"1.2", "1.3"} and kind in {"heading", "paragraph", "list-item", "caption", "footnote"}:
             raise PdfAssemblyError(f"{context} requires unit/member provenance")
+        if group_present and (not unit_present or semantic_role not in {"callout-title", "callout-body"}
+                or kind not in {"heading", "paragraph", "list-item"}
+                or re.fullmatch(r"pdf:callout-\d{6}", _string(data, "callout_group_id", context)) is None):
+            raise PdfAssemblyError(f"{context} has invalid callout group provenance")
         if ownership_present:
             if ownership_present != ownership_fields or kind != "footnote":
                 raise PdfAssemblyError(f"{context} ownership requires a footnote and complete fields")
@@ -175,6 +184,7 @@ class PdfFlowableLayout:
             footnote_ownership=data.get("footnote_ownership"),
             unit_id=data.get("unit_id"),
             source_block_ids=tuple(data.get("source_block_ids", ())),
+            callout_group_id=data.get("callout_group_id"),
         )
 
 
@@ -243,9 +253,11 @@ class PdfAssemblyLayout:
     toc_entries: tuple[PdfTocResolution, ...] = ()
     footnote_continuations: tuple[PdfFootnoteContinuation, ...] = ()
     anchor_pages: tuple[tuple[str, int], ...] = ()
+    callout_parts: tuple[PdfCalloutLayoutPart, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
+            **({"callout_parts": [part.to_dict() for part in self.callout_parts]} if self.schema_version == "1.3" else {}),
             **({
                 "toc_entries": [asdict(item) for item in self.toc_entries],
                 "footnote_continuations": [asdict(item) for item in self.footnote_continuations],
@@ -269,6 +281,8 @@ class PdfAssemblyLayout:
     @classmethod
     def from_dict(cls, value: object) -> PdfAssemblyLayout:
         optional = {"toc_entries", "footnote_continuations", "anchor_pages"}
+        if isinstance(value, Mapping) and value.get("schema_version") == "1.3":
+            optional.add("callout_parts")
         present = optional.intersection(value) if isinstance(value, Mapping) else set()
         data = _exact_mapping(
             value,
@@ -285,8 +299,8 @@ class PdfAssemblyLayout:
             root_message="layout fields must be exactly",
         )
         schema_version = _string(data, "schema_version", "layout")
-        if schema_version not in {"1.0", "1.1", "1.2"}:
-            raise PdfAssemblyError("layout.schema_version must be '1.0', '1.1' or '1.2'")
+        if schema_version not in {"1.0", "1.1", "1.2", "1.3"}:
+            raise PdfAssemblyError("layout.schema_version must be '1.0', '1.1', '1.2' or '1.3'")
         digest = _string(data, "staged_pdf_sha256", "layout")
         if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise PdfAssemblyError("layout.staged_pdf_sha256 must be lowercase SHA-256")
@@ -297,6 +311,55 @@ class PdfAssemblyLayout:
             PdfFlowableLayout.from_dict(item, index, schema_version=schema_version)
             for index, item in enumerate(raw_flowables)
         )
+        page_size = PdfPageSize.from_dict(data.get("page_size"))
+        callout_parts: tuple[PdfCalloutLayoutPart, ...] = ()
+        if schema_version == "1.3":
+            raw_parts = data.get("callout_parts")
+            if not isinstance(raw_parts, list) or not raw_parts:
+                raise PdfAssemblyError("layout 1.3 requires nonempty callout_parts")
+            try:
+                callout_parts = tuple(PdfCalloutLayoutPart.from_dict(part) for part in raw_parts)
+            except (PdfContractError, TypeError, ValueError) as error:
+                raise PdfAssemblyError(f"invalid callout_parts: {error}") from error
+            groups: dict[str, list[PdfFlowableLayout]] = {}
+            for item in flowables:
+                if item.callout_group_id is not None:
+                    groups.setdefault(item.callout_group_id, []).append(item)
+            if set(groups) != {part.group_id for part in callout_parts}:
+                raise PdfAssemblyError("layout callout parts and grouped owners must match")
+            ordered_groups = sorted(groups, key=lambda group: min(r.source_order for r in groups[group]))
+            if list(callout_parts) != sorted(callout_parts, key=lambda part: (ordered_groups.index(part.group_id), part.split_part)):
+                raise PdfAssemblyError("layout callout parts must follow group and split order")
+            for group_id, group_records in groups.items():
+                parts = [part for part in callout_parts if part.group_id == group_id]
+                if [part.split_part for part in parts] != list(range(len(parts))):
+                    raise PdfAssemblyError("layout callout split parts must be contiguous and unique")
+                if [part.page_number for part in parts] != sorted(set(part.page_number for part in parts)):
+                    raise PdfAssemblyError("layout callout parts must advance output pages")
+                for part in parts:
+                    drawn = [r for r in group_records if r.page_number == part.page_number]
+                    expected = tuple(dict.fromkeys(r.unit_id for r in sorted(drawn, key=lambda r: r.source_order)))
+                    if part.unit_ids != expected:
+                        raise PdfAssemblyError("layout callout part unit membership must match drawn owners")
+                    x, y, width, height = part.bounds
+                    if x + width > page_size.width + 1e-6 or y + height > page_size.height + 1e-6:
+                        raise PdfAssemblyError("layout callout part must be inside its output page")
+                    for record in drawn:
+                        rx, ry, rw, rh = record.bounds
+                        _validate_inside_frame((rx, page_size.height - ry - rh, rw, rh), part.bounds,
+                                               "layout callout owner")
+                if {r.page_number for r in group_records} != {part.page_number for part in parts}:
+                    raise PdfAssemblyError("layout grouped flowables require matching drawn parts")
+                if [r.page_number for r in group_records] != sorted(r.page_number for r in group_records):
+                    raise PdfAssemblyError("layout grouped owners must retain unit order across pages")
+                for unit in {r.unit_id for r in group_records}:
+                    split_records = [r for r in group_records if r.unit_id == unit]
+                    if [r.split_part for r in split_records] != list(range(len(split_records))):
+                        raise PdfAssemblyError("layout grouped owner split parts must be contiguous")
+            unit_groups: dict[str, str | None] = {}
+            for item in flowables:
+                if item.unit_id is not None and unit_groups.setdefault(item.unit_id, item.callout_group_id) != item.callout_group_id:
+                    raise PdfAssemblyError("layout unit must retain one callout group")
         raw_links = data.get("links")
         if not isinstance(raw_links, list):
             raise PdfAssemblyError("layout.links must be an array")
@@ -373,13 +436,14 @@ class PdfAssemblyLayout:
             schema_version=schema_version,
             reserved_output_dir=reserved_output_dir,
             staged_pdf_sha256=digest,
-            page_size=PdfPageSize.from_dict(data.get("page_size")),
+            page_size=page_size,
             minimum_font_size=minimum_font_size,
             flowables=flowables,
             links=links,
             toc_entries=toc_entries,
             footnote_continuations=continuations,
             anchor_pages=tuple(sorted(anchors.items())),
+            callout_parts=callout_parts,
         )
 
 
@@ -406,6 +470,7 @@ class TrackedFlowable(Flowable):
         unit_id: str | None = None,
         source_block_ids: tuple[str, ...] = (),
         anchor_aliases: tuple[str, ...] = (),
+        callout_group_id: str | None = None,
     ) -> None:
         super().__init__()
         self._content = content
@@ -425,6 +490,7 @@ class TrackedFlowable(Flowable):
         self._unit_id = unit_id
         self._source_block_ids = source_block_ids
         self._anchor_aliases = anchor_aliases
+        self._callout_group_id = callout_group_id
         self.hAlign = getattr(content, "hAlign", "LEFT")
         self.width = 0.0
         self.height = 0.0
@@ -475,6 +541,7 @@ class TrackedFlowable(Flowable):
                 unit_id=self._unit_id,
                 source_block_ids=self._source_block_ids,
                 anchor_aliases=self._anchor_aliases,
+                callout_group_id=self._callout_group_id,
             )
             for index, part in enumerate(parts)
         ]
@@ -543,6 +610,7 @@ class TrackedFlowable(Flowable):
                 footnote_ownership=self._footnote_ownership,
                 unit_id=self._unit_id,
                 source_block_ids=self._source_block_ids,
+                callout_group_id=self._callout_group_id,
             )
         )
 

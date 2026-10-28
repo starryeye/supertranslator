@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import math
 import re
 from typing import Any, TYPE_CHECKING
 
@@ -22,6 +23,43 @@ if TYPE_CHECKING:
 
 
 _CALLOUT_ID = re.compile(r"pdf:callout-\d{6}\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class PdfCalloutLayoutPart:
+    """One actually drawn table part; bounds are top-origin (x, y, width, height)."""
+
+    group_id: str
+    page_number: int
+    split_part: int
+    bounds: BBox
+    unit_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        data = {"group_id": self.group_id, "page_number": self.page_number,
+                "split_part": self.split_part, "bounds": list(self.bounds),
+                "unit_ids": list(self.unit_ids)}
+        type(self).from_dict(data)
+        return data
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> PdfCalloutLayoutPart:
+        context = "PdfCalloutLayoutPart"
+        value = _require_exact_fields(value, context, set(cls.__dataclass_fields__))
+        group_id = _require_string(value, "group_id", context)
+        if _CALLOUT_ID.fullmatch(group_id) is None:
+            raise PdfContractError(f"{context}.group_id must be a stable callout ID")
+        bounds = _require_list(value, "bounds", context)
+        if (len(bounds) != 4 or any(type(n) not in {int, float} or not math.isfinite(n) for n in bounds)
+                or any(n < 0 for n in bounds[:2]) or any(n <= 0 for n in bounds[2:])):
+            raise PdfContractError(f"{context}.bounds must be finite top-origin bounds with positive size")
+        units = tuple(_require_string_list(value, "unit_ids", context))
+        if (not units or len(set(units)) != len(units)
+                or any(re.fullmatch(r"pdf:unit-\d{6}", unit) is None for unit in units)):
+            raise PdfContractError(f"{context}.unit_ids must be nonempty unique stable unit IDs")
+        return cls(group_id, _require_positive_int(value, "page_number", context),
+                   _require_nonnegative_int(value, "split_part", context),
+                   tuple(float(n) for n in bounds), units)
 
 
 def _contains(outer: BBox, inner: BBox) -> bool:

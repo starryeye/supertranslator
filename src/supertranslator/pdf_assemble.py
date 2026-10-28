@@ -49,6 +49,8 @@ from reportlab.platypus import (
 )
 
 import supertranslator.pdf_acquire as pdf_acquire_module
+from supertranslator.pdf_callout_models import PdfCalloutLayoutPart
+from supertranslator.pdf_callout_flowables import TrackedCalloutTable
 from supertranslator.models import (
     Segment,
     SegmentContractError,
@@ -972,7 +974,8 @@ def _protected_note_links(document: PdfDocument, units: Sequence[PdfRenderUnit])
     from supertranslator.pdf_units import project_protected_occurrences
     blocks = {block.id: block for block in document.blocks}
     spans = {(span.block_id, (span.source_start, span.source_end), occurrence.note_id)
-             for render in units for occurrence in project_protected_occurrences(render.unit, blocks)
+             for render in units for occurrence in project_protected_occurrences(render.unit, blocks,
+                 callout_groups=document.callout_groups, document_schema_version=document.schema_version)
              if occurrence.note_id is not None and occurrence.note_id != occurrence.owner_block_id
              for span in occurrence.source_spans}
     return {link.id for link in document.links if link.reconstructed
@@ -996,7 +999,8 @@ def _unit_markups(
     ambiguous_links: set[str] = set()
     for render, record in zip(units, records, strict=True):
         # Track restored offsets while the unique placeholder identity is still available.
-        occurrences = {item.placeholder: item for item in project_protected_occurrences(render.unit, blocks)
+        occurrences = {item.placeholder: item for item in project_protected_occurrences(render.unit, blocks,
+                           callout_groups=document.callout_groups, document_schema_version=document.schema_version)
                        if item.note_id is not None and item.owner_block_id != item.note_id}
         cursor = 0
         visible = ""
@@ -1268,13 +1272,21 @@ def _role_paragraph(
     callbacks: Mapping[str, Callable[[Any, int, Flowable], None]],
     render_units: Mapping[str, PdfRenderUnit],
     unit_markup: Mapping[str, str],
+    *, callout_group_id: str | None = None,
 ) -> TrackedFlowable:
+    bullet = None
+    markup = unit_markup.get(block.id)
+    if callout_group_id is not None and block.kind == "list-item":
+        bullet, body = _normalized_list_parts(block, translated[block.id])
+        markup = markup or _linked_markup(block, body, links.get(block.id, ()))
     return TrackedFlowable(
-        Paragraph(unit_markup.get(block.id) or _linked_markup(block, translated[block.id], links.get(block.id, ())), style),
+        Paragraph(markup or _linked_markup(block, translated[block.id], links.get(block.id, ())), style,
+                  bulletText=escape(bullet) if bullet is not None else None),
         block_id=block.id, kind=block.kind, source_order=block.order, split_part=0,
         font_size=style.fontSize, frame=frame, records=records, part_counters=counters,
         anchor_name=_anchor_name(block.id), semantic_role=block.semantic_role,
         on_draw=callbacks.get(block.id),
+        callout_group_id=callout_group_id,
         **_unit_tracking(block.id, render_units),
     )
 
@@ -1335,6 +1347,8 @@ def _append_callout_group(
     part_counters: dict[str, int], *, media_payloads: Mapping[str, bytes],
     callbacks: Mapping[str, Callable[[Any, int, Flowable], None]],
     render_units: Mapping[str, PdfRenderUnit], unit_markup: Mapping[str, str],
+    group_id: str | None = None, callout_parts: list[PdfCalloutLayoutPart] | None = None,
+    source_body_size: float = BODY_FONT_SIZE,
 ) -> None:
     icon = blocks[0] if blocks[0].kind == "figure" else None
     paragraphs: list[TrackedFlowable] = []
@@ -1342,13 +1356,17 @@ def _append_callout_group(
         if block is icon:
             continue
         title = block.semantic_role == "callout-title"
+        font_size = (12 if title else _source_scaled_font_size(block.style.font_size, source_body_size)
+                     if group_id is not None else BODY_FONT_SIZE)
         style = ParagraphStyle(
-            f"WT-{block.semantic_role}", fontName=BOLD_FONT_NAME if title else REGULAR_FONT_NAME,
-            fontSize=12 if title else BODY_FONT_SIZE, leading=18 if title else 16,
+            f"WT-{block.semantic_role}", fontName=BOLD_FONT_NAME if title or (group_id is not None and block.style.bold) else REGULAR_FONT_NAME,
+            fontSize=font_size, leading=18 if title else font_size * 16 / BODY_FONT_SIZE,
             spaceAfter=6, keepWithNext=title,
+            **({"leftIndent": 16, "bulletIndent": 0} if group_id is not None and block.kind == "list-item" else {}),
         )
         paragraphs.append(_role_paragraph(
             block, translated, links, frame, records, part_counters, style, callbacks, render_units, unit_markup,
+            callout_group_id=group_id,
         ))
     if icon is None:
         data, widths = [[paragraphs]], [frame[2]]
@@ -1374,7 +1392,13 @@ def _append_callout_group(
         ("TOPPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
-    story.append(KeepTogether([table]))
+    if group_id is None:
+        story.append(KeepTogether([table]))
+    else:
+        assert callout_parts is not None
+        story.append(TrackedCalloutTable(table, group_id=group_id,
+            unit_ids=tuple(render_units[block.id].unit.id for block in blocks),
+            parts=callout_parts, records=records, counters=part_counters))
 
 
 def _reference_style(block: PdfBlock) -> ParagraphStyle:
@@ -1725,9 +1749,11 @@ def _build_rich_document(
     publication_evidence: dict[str, Any] | None = None,
     render_units: Sequence[PdfRenderUnit] = (),
     unit_markup: Mapping[str, str] | None = None,
+    callout_parts: list[PdfCalloutLayoutPart] | None = None,
 ) -> list[PdfFlowableLayout]:
     records: list[PdfFlowableLayout] = []
     part_counters: dict[str, int] = {}
+    callout_parts = callout_parts if callout_parts is not None else []
     units_by_block = {item.source_blocks[0].id: item for item in render_units}
     member_units = {member.id: item for item in render_units for member in item.source_blocks}
     unit_markup = unit_markup or {}
@@ -1735,6 +1761,8 @@ def _build_rich_document(
     segments_by_block = {block.id: segment for block, segment, _text in ordered}
     segments_by_block.update({member: render.segment for member, render in member_units.items()})
     block_by_id = {block.id: block for block in document.blocks}
+    source_groups = {member: group for group in document.callout_groups
+                     for fragment in group.fragments for member in fragment.source_block_ids}
     links_by_block = _links_by_block(document)
     left_margin = right_margin = 54.0
     top_margin = 54.0
@@ -1773,6 +1801,7 @@ def _build_rich_document(
     def reset_pass() -> None:
         records.clear()
         part_counters.clear()
+        callout_parts.clear()
         scheduled_note_pages.clear()
         drawn_page_notes.clear()
         anchor_pages.clear()
@@ -1877,7 +1906,8 @@ def _build_rich_document(
         if owner_id in member_units:
             from supertranslator.pdf_units import project_protected_occurrences
             render = member_units[owner_id]
-            occurrences = [item for item in project_protected_occurrences(render.unit, block_by_id)
+            occurrences = [item for item in project_protected_occurrences(render.unit, block_by_id,
+                               callout_groups=document.callout_groups, document_schema_version=document.schema_version)
                            if item.owner_block_id == owner_id and item.note_id == note_id
                            and item.owner_block_id != item.note_id]
             if len(occurrences) != 1:
@@ -2316,6 +2346,20 @@ def _build_rich_document(
                     if story and not isinstance(story[-1], PageBreak):
                         story.append(PageBreak())
                     composition_page = None
+                if block.id in source_groups:
+                    source_group = source_groups[block.id]
+                    members = [member for fragment in source_group.fragments for member in fragment.source_block_ids]
+                    owners = [block_by_id[member] for member in members if member in units_by_block]
+                    if not owners or any(member not in member_units for member in members):
+                        raise PdfAssemblyError("source callout group requires complete logical render owners")
+                    if first_owners := block_first_owners([block_by_id[member] for member in members]):
+                        story.append(ActionFlowable(("ownerFloor", first_owners)))
+                    _append_callout_group(story, owners, translated, links_by_block, portrait_frame,
+                        records, part_counters, media_payloads=media_payloads,
+                        callbacks=page_note_callbacks, render_units=units_by_block, unit_markup=unit_markup,
+                        group_id=source_group.id, callout_parts=callout_parts, source_body_size=source_body_size)
+                    emitted_block_ids.update(members)
+                    continue
                 if block.semantic_role in _OPENER_ROLES | _EPIGRAPH_ROLES:
                     opener = block.semantic_role in _OPENER_ROLES
                     group = _consume_role_group(
@@ -2454,6 +2498,7 @@ def _build_rich_document(
         raise PdfAssemblyError("not every page-local footnote was emitted")
     if publication_evidence is not None:
         publication_evidence.update(
+            **({"callout_parts": list(callout_parts)} if document.callout_groups else {}),
             anchor_pages=dict(anchor_pages),
             toc_entries=[replace(item, output_page=anchor_pages[_anchor_name(item.target_block_id)] if item.target_block_id else None)
                 for item in (toc_resolutions or {}).values()],
