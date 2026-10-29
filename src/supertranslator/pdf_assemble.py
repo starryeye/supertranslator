@@ -289,7 +289,7 @@ def assemble_pdf(
         needs_figure_review = (any(block.kind == "figure" for block in document.blocks)
                 or FIGURE_TEXT_INPUT_NAME in _anchored_directory_names(run_anchor)
                 or "figure_text_review" in review_value)
-        if (needs_figure_review or ("preserved_names" in review_value
+        if (document.schema_version == "1.3" or needs_figure_review or ("preserved_names" in review_value
                                    and review_value["preserved_names"] != {})):
             from supertranslator.pdf_review import hold_pdf_semantic_inputs, validate_pdf_semantic_review_snapshot
             if semantic_snapshot is None:
@@ -311,7 +311,7 @@ def assemble_pdf(
                 validate_current_pdf_figure_review(figure_inputs,
                     inventory_bytes=semantic_snapshot.payloads[FIGURE_TEXT_INPUT_NAME],
                     review_value=review_value["figure_text_review"])
-        if document.schema_version == "1.2":
+        if document.schema_version in {"1.2", "1.3"}:
             from supertranslator.pdf_unit_bindings import _binding_from_payloads, _hold_pdf_unit_inputs
 
             binding_inputs = binding_stack.enter_context(
@@ -349,9 +349,9 @@ def assemble_pdf(
         preserved_names = review_value.get("preserved_names", {})
         render_units = (normalize_pdf_units(document, segments, consumed_translations, consumed_glossary,
                                            preserved_names=preserved_names)
-                        if document.schema_version == "1.2" else [])
+                        if document.schema_version in {"1.2", "1.3"} else [])
         ordered = ([(item.source_blocks[0], item.segment, item.text) for item in render_units]
-                   if document.schema_version == "1.2" else
+                   if document.schema_version in {"1.2", "1.3"} else
                    _normalize_pdf_translations(document, segments, consumed_translations, consumed_glossary,
                                                preserved_names=preserved_names))
         toc_resolutions = _resolve_toc_targets(document)
@@ -406,7 +406,7 @@ def assemble_pdf(
             temporary_staging_anchor,
             "translated.pdf",
         )
-        uses_rich_layout = document.schema_version == "1.2" or bool(document.links) or any(
+        uses_rich_layout = document.schema_version in {"1.2", "1.3"} or bool(document.links) or any(
             block.kind in _RICH_KINDS
             or block.kind in _IGNORED_KINDS
             or block.semantic_role != "body"
@@ -441,7 +441,7 @@ def assemble_pdf(
         temporary_pdf.stream.close()
         temporary_staging_anchor.verify_visible()
         layout = PdfAssemblyLayout(
-            schema_version="1.2" if document.schema_version == "1.2" else "1.1",
+            schema_version=document.schema_version if document.schema_version in {"1.2", "1.3"} else "1.1",
             reserved_output_dir=str(output_dir),
             staged_pdf_sha256=digest,
             page_size=page_size,
@@ -451,9 +451,13 @@ def assemble_pdf(
             toc_entries=tuple(publication_evidence.get("toc_entries", ())),
             footnote_continuations=tuple(publication_evidence.get("footnote_continuations", ())),
             anchor_pages=tuple(sorted(publication_evidence.get("anchor_pages", {}).items())),
+            callout_parts=tuple(publication_evidence.get("callout_parts", ())),
         )
         # Validate every field before either run-visible artifact is published.
         PdfAssemblyLayout.from_dict(layout.to_dict())
+        if document.schema_version == "1.3":
+            from supertranslator.pdf_qa import validate_pdf_unit_layout
+            validate_pdf_unit_layout(document, layout)
         temporary_layout = _create_anchored_binary_file(
             temporary_anchor,
             "layout.json",
@@ -518,7 +522,13 @@ def assemble_pdf(
         active_exception = sys.exc_info()[0] is not None
         # Validation errors are already translated at the API boundary above.
         # Cleanup must not inject them into input contexts that wrap entry errors.
-        binding_stack.close()
+        try:
+            binding_stack.close()
+        except ValueError as error:
+            # Exit checks still run, but must not mask the already normalized
+            # publication failure or prevent owned-artifact cleanup below.
+            if not active_exception:
+                raise PdfAssemblyError(str(error)) from error
         _close_opened_file(temporary_layout)
         _close_opened_file(temporary_pdf)
         if active_exception:

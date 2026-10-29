@@ -423,6 +423,8 @@ def finalize_pdf_output(run_dir: Path, output_dir: Path) -> Path:
             qa=qa,
             visual_review=review,
             semantic_snapshot=semantic_snapshot,
+            layout_bytes=snapshot_bytes["layout.json"],
+            review_bytes=snapshot_bytes["review.json"],
         )
         if layout.reserved_output_dir != str(output_dir):
             raise PdfQAFailure(
@@ -519,6 +521,17 @@ def finalize_pdf_output(run_dir: Path, output_dir: Path) -> Path:
                 raise PdfQAFailure(str(error)) from error
 
         verify_figure_publication_inputs()
+        def complete_publication_inputs() -> None:
+            nonlocal semantic_context
+            # Finish the fallible holder exit while the renamed directory is
+            # still covered by the publication helper's rollback handler.
+            context, semantic_context = semantic_context, None
+            if context is not None:
+                try:
+                    context.__exit__(None, None, None)
+                except (PdfSemanticReviewError, PdfAssemblyError) as error:
+                    raise PdfQAFailure(str(error)) from error
+
         _publish_final_directory_no_clobber(
             run_anchor,
             staged_anchor,
@@ -527,6 +540,7 @@ def finalize_pdf_output(run_dir: Path, output_dir: Path) -> Path:
             final_identities,
             final_hashes,
             verify_inputs=verify_figure_publication_inputs,
+            complete_inputs=complete_publication_inputs,
         )
         completed = True
         return output_dir
@@ -564,10 +578,16 @@ def finalize_pdf_output(run_dir: Path, output_dir: Path) -> Path:
             output_parent_anchor.close()
         if figure_context is not None:
             figure_context.__exit__(None, None, None)
-        if semantic_context is not None:
-            semantic_context.__exit__(None, None, None)
-        if run_anchor is not None:
-            run_anchor.close()
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            if semantic_context is not None:
+                semantic_context.__exit__(None, None, None)
+        except PdfSemanticReviewError as error:
+            if not active_exception:
+                raise PdfQAFailure(str(error)) from error
+        finally:
+            if run_anchor is not None:
+                run_anchor.close()
 
 
 def _pdf_qa_from_value(value: object, qa_pages_dir: Path) -> PdfQAResult:
@@ -740,6 +760,7 @@ def _publish_final_directory_no_clobber(
     expected_hashes: Mapping[str, str],
     *,
     verify_inputs: Any | None = None,
+    complete_inputs: Any | None = None,
 ) -> None:
     destination = destination_parent.path / destination_name
     publication_handle: int | None = None
@@ -793,6 +814,8 @@ def _publish_final_directory_no_clobber(
                     verify_inputs()
             finally:
                 published.close()
+            if complete_inputs is not None:
+                complete_inputs()
         except (PdfQAFailure, PdfAssemblyError) as error:
             try:
                 private_name = _rollback_final_directory(
@@ -1318,6 +1341,8 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
     figure_context: Any | None = None
     figure_snapshot: Any | None = None
     review_bytes: bytes | None = None
+    callout_payloads: dict[str, bytes] = {}
+    callout_hashes: dict[str, str] = {}
     try:
         run_anchor = assembly._open_directory_anchor(run_dir, "run")
         semantic_context = hold_pdf_semantic_inputs(run_anchor)
@@ -1366,8 +1391,19 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
             figure_context = hold_pdf_figure_inputs(run_anchor)
             figure_snapshot = figure_context.__enter__()
         source_pdf_bytes = _validate_source(document, source, opened["source.pdf"])
+        if document.schema_version == "1.3":
+            callout_payloads = {
+                "source.pdf": source_pdf_bytes, "review.json": review_bytes,
+                **{name: assembly._read_opened_bytes(opened[name], run_dir / name, "callout publication evidence")
+                   for name in ("document.json", "layout.json")},
+            }
+            if (callout_payloads["document.json"] != semantic_snapshot.payloads["document.json"]
+                    or source_pdf_bytes != semantic_snapshot.payloads["source.pdf"]
+                    or _strict_json_mapping(callout_payloads["layout.json"], "PDF layout") != layout_value):
+                raise PdfQAFailure("callout publication bytes changed during QA consumption")
+            callout_hashes = {name: hashlib.sha256(payload).hexdigest() for name, payload in callout_payloads.items()}
         _validate_publication_evidence(document_value, layout_value, layout)
-        if document.schema_version == "1.2":
+        if document.schema_version in {"1.2", "1.3"}:
             validate_pdf_unit_layout(document, layout)
         pdf_bytes = assembly._read_opened_bytes(
             staged_pdf,
@@ -1385,6 +1421,8 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
         )
         furniture_evidence = _validate_running_furniture(document, layout)
         callout_evidence = _validate_callout_layout(document, layout)
+        if callout_payloads:
+            callout_evidence = _callout_publication_evidence(document, layout, callout_payloads)
         template_evidence = _validate_specialized_role_templates(document, layout)
         provenance_evidence = _validate_generated_provenance(staged_reader, layout)
         normalized = _validate_contracts(
@@ -1508,7 +1546,7 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
                     "contract.coverage": (
                         f"Validated {sum(block.segment_id is not None for block in document.blocks)} physical translated blocks "
                         f"in {len(normalized)} logical translation units."
-                        if document.schema_version == "1.2" else
+                        if document.schema_version in {"1.2", "1.3"} else
                         f"Validated {len(normalized)} translated blocks."
                     ),
                     "contract.review": "Semantic review has no unresolved required finding.",
@@ -1529,14 +1567,14 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
                     "structure.pages": f"Reopened {structure['page_count']} unencrypted pages.",
                     "structure.text": (
                         f"Validated selectable text for {len(normalized)} logical translation units."
-                        if document.schema_version == "1.2" else
+                        if document.schema_version in {"1.2", "1.3"} else
                         f"Validated selectable text for {len(normalized)} translated blocks."
                     ),
                 }.items()
             )
         )
         result = PdfQAResult(
-            schema_version="1.1" if document.schema_version == "1.2" else "1.0",
+            schema_version="1.1" if document.schema_version in {"1.2", "1.3"} else "1.0",
             staged_pdf_sha256=staged_hash,
             findings=findings,
             rendered_pages=tuple(run_dir / "qa-pages" / path.name for path in raw_pages),
@@ -1554,7 +1592,7 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
                 **({
                     "translated_block_count": sum(len(unit.source_block_ids) for unit in document.translation_units),
                     "translation_unit_count": len(normalized),
-                } if document.schema_version == "1.2" else {}),
+                } if document.schema_version in {"1.2", "1.3"} else {}),
             },
             passed=True,
         )
@@ -1571,6 +1609,8 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
         qa_json.stream.close()
         assembly._verify_anchored_evidence(qa_pages_anchor, qa_artifacts)
         _verify_prepare_figure_snapshot(run_anchor, opened, figure_snapshot, review_bytes)
+        if callout_hashes:
+            _verify_report_evidence_snapshot(run_anchor, {name: opened[name] for name in callout_hashes}, callout_hashes)
         if prior is not None:
             _move_prior_evidence_to_staging(run_anchor, staging_anchor, prior)
         assembly._verify_anchored_evidence(
@@ -1607,6 +1647,13 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
         )
         semantic_snapshot.verify()
         _verify_prepare_figure_snapshot(run_anchor, opened, figure_snapshot, review_bytes)
+        if callout_hashes:
+            _verify_report_evidence_snapshot(run_anchor, {name: opened[name] for name in callout_hashes}, callout_hashes)
+        # Prior QA must remain restorable until the source holder's final
+        # verification has succeeded. Clear first so failure cleanup cannot
+        # exit the same context twice or mask the primary refusal.
+        context, semantic_context = semantic_context, None
+        context.__exit__(None, None, None)
         completed = True
         if prior is not None:
             _discard_prior_evidence(staging_anchor, prior)
@@ -1695,10 +1742,16 @@ def prepare_pdf_qa(run_dir: Path, output_dir: Path) -> PdfQAResult:
             staging_anchor.close()
         if figure_context is not None:
             figure_context.__exit__(None, None, None)
-        if semantic_context is not None:
-            semantic_context.__exit__(None, None, None)
-        if run_anchor is not None:
-            run_anchor.close()
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            if semantic_context is not None:
+                semantic_context.__exit__(None, None, None)
+        except PdfSemanticReviewError as error:
+            if not active_exception:
+                raise PdfQAFailure(str(error)) from error
+        finally:
+            if run_anchor is not None:
+                run_anchor.close()
 
 
 def _verify_prepare_figure_snapshot(run_anchor: Any, opened: Mapping[str, Any],
@@ -2047,9 +2100,10 @@ def _validate_publication_evidence(
     layout: PdfAssemblyLayout,
 ) -> None:
     """Require native semantic evidence for publication, not compatibility upgrades."""
-    if document_value.get("schema_version") == "1.2":
-        if document_value.get("extracted_schema_version") != "1.2" or layout.schema_version != "1.2":
-            raise PdfQAFailure("native unit publication requires native 1.2 origin and layout")
+    if document_value.get("schema_version") in {"1.2", "1.3"}:
+        if (document_value.get("extracted_schema_version") != document_value["schema_version"]
+                or layout.schema_version != document_value["schema_version"]):
+            raise PdfQAFailure("native unit publication requires matching document origin and layout")
         return
     raise PdfQAFailure("publication requires native 1.2 extraction; legacy evidence is diagnostic only")
 
@@ -2375,10 +2429,17 @@ def _validate_running_furniture(
 def _validate_callout_layout(
     document: PdfDocument, layout: PdfAssemblyLayout
 ) -> str:
+    from supertranslator.pdf_callout_validation import validate_callout_layout
+    try:
+        validate_callout_layout(document, layout)
+    except PdfContractError as error:
+        raise PdfQAFailure(str(error)) from error
+    grouped = {member for group in document.callout_groups for fragment in group.fragments
+               for member in fragment.source_block_ids}
     by_block = _flowables_by_block(layout)
     checked = 0
     for index, block in enumerate(document.blocks):
-        if block.semantic_role not in _CALLOUT_ROLES:
+        if block.semantic_role not in _CALLOUT_ROLES or block.id in grouped:
             continue
         parts = by_block.get(block.id, ())
         if not parts or any(item.semantic_role != block.semantic_role for item in parts):
@@ -2419,7 +2480,25 @@ def _validate_callout_layout(
                         f"detached callout content: icon {previous.id} from {block.id}"
                     )
         checked += 1
+    if grouped:
+        return f"Validated {checked} legacy callout records and {len(document.callout_groups)} source-bound callout groups."
     return f"Validated {checked} callout title/body layout records."
+
+
+def _callout_publication_evidence(
+    document: PdfDocument, layout: PdfAssemblyLayout, payloads: Mapping[str, bytes],
+) -> str:
+    """Bind native callout QA to the exact held evidence, not an approval flag."""
+    if document.schema_version != "1.3" or set(payloads) != {"document.json", "source.pdf", "layout.json", "review.json"}:
+        raise PdfQAFailure("callout QA requires exact native publication evidence")
+    if (PdfDocument.from_dict(_strict_json_mapping(payloads["document.json"], "PDF document")) != document
+            or _layout_from_value(_strict_json_mapping(payloads["layout.json"], "PDF layout")) != layout
+            or hashlib.sha256(payloads["source.pdf"]).hexdigest() != document.source_sha256):
+        raise PdfQAFailure("callout QA bytes disagree with consumed source/document/layout")
+    return _validate_callout_layout(document, layout) + " " + " ".join(
+        f"{label}_sha256={hashlib.sha256(payloads[name]).hexdigest()}"
+        for label, name in (("document", "document.json"), ("source", "source.pdf"),
+                            ("layout", "layout.json"), ("review", "review.json")))
 
 
 def _validate_generated_provenance(
@@ -2577,6 +2656,11 @@ def _validate_source(
         raise PdfQAFailure("source PDF hash does not match source.json")
     if source.byte_length != len(payload) or source.sha256 != document.source_sha256:
         raise PdfQAFailure("source/document PDF evidence does not agree")
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    try:
+        validate_callout_source(document, source_pdf_bytes=payload)
+    except PdfContractError as error:
+        raise PdfQAFailure(str(error)) from error
     return payload
 
 
@@ -2584,13 +2668,16 @@ def validate_pdf_unit_layout(document: PdfDocument, layout: PdfAssemblyLayout) -
     """Require exact logical coverage without discarding any physical member."""
     from supertranslator.pdf_units import project_protected_occurrences, validate_unit_membership
 
-    if (document.schema_version != "1.2" or document.extracted_schema_version != "1.2"
-            or layout.schema_version != "1.2"):
-        raise PdfQAFailure("unit coverage requires native 1.2 document origin and layout")
+    if (document.schema_version not in {"1.2", "1.3"}
+            or document.extracted_schema_version != document.schema_version
+            or layout.schema_version != document.schema_version):
+        raise PdfQAFailure("unit coverage requires matching native document origin and layout")
     try:
         validate_unit_membership(document)
         assembly._validate_rich_relationships(document)
         PdfAssemblyLayout.from_dict(layout.to_dict())
+        from supertranslator.pdf_callout_validation import validate_callout_layout
+        validate_callout_layout(document, layout)
     except (PdfContractError, PdfAssemblyError) as error:
         raise PdfQAFailure(f"invalid unit/member layout: {error}") from error
     if document.flow_findings:
@@ -2634,7 +2721,8 @@ def validate_pdf_unit_layout(document: PdfDocument, layout: PdfAssemblyLayout) -
     note_owners: dict[str, str] = {}
     try:
         for unit in units.values():
-            for occurrence in project_protected_occurrences(unit, blocks):
+            for occurrence in project_protected_occurrences(unit, blocks,
+                    callout_groups=document.callout_groups, document_schema_version=document.schema_version):
                 if occurrence.note_id is None or occurrence.note_id == occurrence.owner_block_id:
                     continue
                 if occurrence.note_id in note_owners:
@@ -2673,7 +2761,7 @@ def _validate_contracts(
     output_dir: Path,
 ) -> list[tuple[Any, Segment, str]]:
     try:
-        if document.schema_version == "1.2":
+        if document.schema_version in {"1.2", "1.3"}:
             validate_pdf_unit_layout(document, layout)
             normalized = [(item.source_blocks[0], item.segment, item.text)
                           for item in assembly.normalize_pdf_units(document, segments, translations, glossary,
@@ -2879,7 +2967,7 @@ def _validate_pdf_structure(
     structured_blocks = {
         link.source_block_id
         for link in layout.links
-        if link.source_block_id is not None and (link.reconstructed or document.schema_version == "1.2")
+        if link.source_block_id is not None and (link.reconstructed or document.schema_version in {"1.2", "1.3"})
     }
     expected_links = [
         (link.source_block_id, link.uri, link.destination)

@@ -215,12 +215,19 @@ def hold_pdf_semantic_inputs(run: Path | Any) -> Iterator[PdfSemanticInputSnapsh
             document = PdfDocument.from_dict(json.loads(document_bytes))
             from supertranslator.pdf_unit_bindings import require_assignable_pdf
             require_assignable_pdf(document)
-            logical_units = document.schema_version == "1.2"
+            logical_units = document.schema_version in {"1.2", "1.3"}
             if logical_units:
                 payloads["document.json"] = document_bytes
                 opened = anchored._open_anchored_input_file(run_anchor, "source.json", "PDF source record")
                 root_files["source.json"] = opened
                 payloads["source.json"] = anchored._read_opened_bytes(opened, run_anchor.path / "source.json", "PDF source record")
+                if document.schema_version == "1.3":
+                    opened = anchored._open_anchored_input_file(run_anchor, "source.pdf", "PDF callout source")
+                    root_files["source.pdf"] = opened
+                    from supertranslator.pdf_acquire import MAX_PDF_BYTES
+                    if os.fstat(opened.stream.fileno()).st_size > MAX_PDF_BYTES:
+                        raise PdfSemanticReviewError("PDF callout source exceeds 50 MiB")
+                    payloads["source.pdf"] = anchored._read_opened_bytes(opened, run_anchor.path / "source.pdf", "PDF callout source")
             inventory_present = FIGURE_TEXT_INPUT_NAME in anchored._anchored_directory_names(run_anchor)
             if any(block.kind == "figure" for block in document.blocks) and not inventory_present:
                 raise PdfSemanticReviewError("PDF figures require figure-text-input.json; run pdf-figure-review-input and inspect every source figure")
@@ -292,6 +299,8 @@ def hold_pdf_semantic_inputs(run: Path | Any) -> Iterator[PdfSemanticInputSnapsh
         snapshot.verify()
         yield_started = True
         yield snapshot
+        if "source.pdf" in payloads:
+            snapshot.verify()
     except PdfSemanticReviewError:
         raise
     except (PdfUnitBindingError, PdfContractError, UnicodeError, json.JSONDecodeError) as error:

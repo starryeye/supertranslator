@@ -162,6 +162,40 @@ class PdfCalloutGroup:
         return cls(identifier, fragments)
 
 
+@dataclass(frozen=True, slots=True)
+class PdfManifestCallout:
+    group_id: str
+    source_fragments: tuple[PdfCalloutFragment, ...]
+    unit_ids: tuple[str, ...]
+    output_parts: tuple[PdfCalloutLayoutPart, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        data = {"group_id": self.group_id,
+                "source_fragments": [fragment.to_dict() for fragment in self.source_fragments],
+                "unit_ids": list(self.unit_ids),
+                "output_parts": [part.to_dict() for part in self.output_parts]}
+        type(self).from_dict(data)
+        return data
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> PdfManifestCallout:
+        context = "PdfManifestCallout"
+        value = _require_exact_fields(value, context, set(cls.__dataclass_fields__))
+        group = PdfCalloutGroup.from_dict({"id": value["group_id"], "fragments": value["source_fragments"]})
+        units = tuple(_require_string_list(value, "unit_ids", context))
+        if (not units or len(units) != len(set(units))
+                or any(re.fullmatch(r"pdf:unit-\d{6}", unit) is None for unit in units)):
+            raise PdfContractError("manifest callout units must be unique stable unit IDs")
+        parts = tuple(PdfCalloutLayoutPart.from_dict(item)
+                      for item in _require_list(value, "output_parts", context))
+        if (not parts or any(part.group_id != group.id for part in parts)
+                or [part.split_part for part in parts] != list(range(len(parts)))
+                or [part.page_number for part in parts] != sorted(set(part.page_number for part in parts))
+                or tuple(dict.fromkeys(unit for part in parts for unit in part.unit_ids)) != units):
+            raise PdfContractError("manifest callout output parts must exactly cover ordered units")
+        return cls(group.id, group.fragments, units, parts)
+
+
 def validate_callout_group_membership(document: PdfDocument) -> None:
     """Validate source references without loading parser or media machinery."""
     if document.schema_version != "1.3":

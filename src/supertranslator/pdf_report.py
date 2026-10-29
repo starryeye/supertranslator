@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 import hashlib
 import io
@@ -23,6 +23,7 @@ from supertranslator import __version__
 from supertranslator.models import Segment, SegmentContractError, read_segments_stream
 from supertranslator.pdf_flowables import PdfAssemblyError, PdfAssemblyLayout
 from supertranslator.pdf_models import (
+    BBox,
     PdfBlock,
     PdfContractError,
     PdfDocument,
@@ -43,6 +44,8 @@ from supertranslator.pdf_review import (
     parse_pdf_preserved_names,
 )
 from supertranslator.pdf_figure_review import PdfFigureReviewError, parse_pdf_figure_text_review
+from supertranslator.pdf_callout_models import PdfManifestCallout
+from supertranslator.pdf_callout_validation import validate_callout_source
 
 
 _SEMANTIC_DIMENSIONS = {
@@ -593,7 +596,7 @@ class PdfManifestUnit:
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> PdfManifestUnit:
+    def from_dict(cls, value: object, *, source_page_boxes: Mapping[int, BBox] | None = None) -> PdfManifestUnit:
         data = _exact_report_mapping(value, "translation unit", set(cls.__dataclass_fields__))
         unit_id = _report_string(data, "unit_id", "translation unit")
         segment_id = _report_string(data, "segment_id", "translation unit")
@@ -614,11 +617,18 @@ class PdfManifestUnit:
         if not isinstance(raw_boxes, list) or len(raw_boxes) != len(members):
             raise PdfQAFailure("translation unit source bboxes must align with every member")
         boxes = []
-        for box in raw_boxes:
+        for member, box in zip(members, raw_boxes, strict=True):
             if (not isinstance(box, list) or len(box) != 4
                     or any(type(v) not in {int, float} or not math.isfinite(v) for v in box)
-                    or not (0 <= box[0] < box[2] and 0 <= box[1] < box[3])):
+                    or not (box[0] < box[2] and box[1] < box[3])):
                 raise PdfQAFailure("translation unit source bbox is invalid")
+            page_box = (source_page_boxes or {}).get(int(member.split(":")[1][5:]))
+            if page_box is None:
+                if box[0] < 0 or box[1] < 0:
+                    raise PdfQAFailure("translation unit source bbox is invalid")
+            elif not (page_box[0] <= box[0] < box[2] <= page_box[2]
+                      and page_box[1] <= box[1] < box[3] <= page_box[3]):
+                raise PdfQAFailure("translation unit source bbox exceeds actual source page")
             boxes.append(tuple(box))
         if data["anchor_granularity"] != "paragraph-start":
             raise PdfQAFailure("translation unit anchor granularity must be paragraph-start")
@@ -640,12 +650,15 @@ class PdfFinalManifest:
     qa: PdfManifestQA
     translation_units: tuple[PdfManifestUnit, ...] = ()
     semantic_input: PdfSemanticReviewInput | None = None
+    callout_groups: tuple[PdfManifestCallout, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
             **({"translation_units": [unit.to_dict() for unit in self.translation_units],
                 "semantic_input": self.semantic_input.to_dict() if self.semantic_input is not None else None}
-               if self.schema_version == "1.1" else {}),
+               if self.schema_version in {"1.1", "1.2"} else {}),
+            **({"callout_groups": [group.to_dict() for group in self.callout_groups]}
+               if self.schema_version == "1.2" else {}),
             "schema_version": self.schema_version,
             "tool_version": self.tool_version,
             "input": self.input.to_dict(),
@@ -673,11 +686,12 @@ class PdfFinalManifest:
                 "translation",
                 "output",
                 "qa",
-            } | ({"translation_units", "semantic_input"} if version == "1.1" else set()),
+            } | ({"translation_units", "semantic_input"} if version in {"1.1", "1.2"} else set())
+              | ({"callout_groups"} if version == "1.2" else set()),
         )
         schema_version = _report_string(data, "schema_version", "manifest")
-        if schema_version not in {"1.0", "1.1"}:
-            raise PdfQAFailure("manifest.schema_version must be 1.0 or 1.1")
+        if schema_version not in {"1.0", "1.1", "1.2"}:
+            raise PdfQAFailure("manifest.schema_version must be 1.0, 1.1 or 1.2")
         tool_version = _report_string(data, "tool_version", "manifest")
         if not tool_version:
             raise PdfQAFailure("manifest.tool_version must be nonempty")
@@ -698,12 +712,32 @@ class PdfFinalManifest:
             raise PdfQAFailure("final QA warnings omit extraction warnings")
         units: tuple[PdfManifestUnit, ...] = ()
         semantic_input = None
-        if qa.automated["schema_version"] != schema_version:
+        groups = ()
+        page_boxes = {}
+        if schema_version == "1.2":
+            if not isinstance(data["callout_groups"], list) or not data["callout_groups"]:
+                raise PdfQAFailure("manifest 1.2 requires callout groups")
+            try:
+                groups = tuple(PdfManifestCallout.from_dict(item) for item in data["callout_groups"])
+            except PdfContractError as error:
+                raise PdfQAFailure(str(error)) from error
+            if len({group.group_id for group in groups}) != len(groups):
+                raise PdfQAFailure("manifest callout groups must be unique")
+            for group in groups:
+                for fragment in group.source_fragments:
+                    if fragment.page_number > source.page_count:
+                        raise PdfQAFailure("manifest callout page exceeds source")
+                    box = fragment.page_bbox
+                    page = source.pages[fragment.page_number - 1]
+                    if ((box[2] - box[0], box[3] - box[1]) != (page.width, page.height)
+                            or page_boxes.setdefault(fragment.page_number, box) != box):
+                        raise PdfQAFailure("manifest callout source page geometry disagrees")
+        if qa.automated["schema_version"] != ("1.1" if schema_version == "1.2" else schema_version):
             raise PdfQAFailure("manifest and automated QA metric schemas disagree")
-        if schema_version == "1.1":
+        if schema_version in {"1.1", "1.2"}:
             if not isinstance(data["translation_units"], list):
                 raise PdfQAFailure("manifest translation_units must be an array")
-            units = tuple(PdfManifestUnit.from_dict(item) for item in data["translation_units"])
+            units = tuple(PdfManifestUnit.from_dict(item, source_page_boxes=page_boxes or None) for item in data["translation_units"])
             metrics = qa.automated["metrics"]
             members = [member for unit in units for member in unit.source_block_ids]
             if (len(units) != metrics["translation_unit_count"]
@@ -718,13 +752,49 @@ class PdfFinalManifest:
                     raise PdfQAFailure("manifest unit pages exceed source/output bounds")
                 for member, box in zip(unit.source_block_ids, unit.source_bboxes, strict=True):
                     page = source.pages[int(member.split(":")[1][5:]) - 1]
-                    if box[2] > page.width or box[3] > page.height:
+                    if page.number not in page_boxes and (box[2] > page.width or box[3] > page.height):
                         raise PdfQAFailure("manifest unit source bbox exceeds source page")
+            if groups:
+                by_unit = {unit.unit_id: unit for unit in units}
+                used_members = set()
+                used_glyphs = set()
+                first_members = []
+                all_members = [member for unit in units for member in unit.source_block_ids]
+                for group in groups:
+                    group_members = tuple(member for fragment in group.source_fragments for member in fragment.source_block_ids)
+                    actual_units = [by_unit[identifier] for identifier in group.unit_ids if identifier in by_unit]
+                    if (len(actual_units) != len(group.unit_ids)
+                            or tuple(member for unit in actual_units for member in unit.source_block_ids) != group_members
+                            or used_members.intersection(group_members)):
+                        raise PdfQAFailure("manifest callout members disagree with translation units")
+                    used_members.update(group_members)
+                    first_members.append(all_members.index(group_members[0]))
+                    for fragment in group.source_fragments:
+                        glyphs = {(fragment.page_number, index) for index in fragment.character_indexes}
+                        if glyphs & used_glyphs:
+                            raise PdfQAFailure("manifest callout glyph ownership is duplicated")
+                        used_glyphs.update(glyphs)
+                        for member in fragment.source_block_ids:
+                            unit = next(unit for unit in actual_units if member in unit.source_block_ids)
+                            box = unit.source_bboxes[unit.source_block_ids.index(member)]
+                            outer = fragment.content_bbox
+                            if not (outer[0] <= box[0] < box[2] <= outer[2] and outer[1] <= box[1] < box[3] <= outer[3]):
+                                raise PdfQAFailure("manifest callout member bbox exceeds source fragment")
+                    for unit in actual_units:
+                        if tuple(part.page_number for part in group.output_parts if unit.unit_id in part.unit_ids) != unit.output_pages:
+                            raise PdfQAFailure("manifest callout output pages disagree with unit output")
+                if first_members != sorted(set(first_members)):
+                    raise PdfQAFailure("manifest callout groups are out of source order")
             try:
                 semantic_input = PdfSemanticReviewInput.from_dict(_report_mapping(data["semantic_input"], "semantic_input"))
             except PdfSemanticReviewError as error:
                 raise PdfQAFailure(str(error)) from error
             required_files = {"document.json", "source.json", "segments.jsonl", "glossary.json", "assignments/.pdf-unit-binding.json"}
+            if schema_version == "1.2":
+                required_files.add("source.pdf")
+                source_file = next((item for item in semantic_input.files if item.path == "source.pdf"), None)
+                if source_file is None or (source_file.sha256, source_file.byte_length) != (source.sha256, source.byte_length):
+                    raise PdfQAFailure("manifest callout source differs from held semantic evidence")
             figure_review = translation.master_semantic_review.get("figure_text_review")
             if figure_review is not None:
                 required_files.add("figure-text-input.json")
@@ -760,6 +830,7 @@ class PdfFinalManifest:
             qa,
             units,
             semantic_input,
+            groups,
         )
 
 
@@ -776,9 +847,11 @@ def build_pdf_report_evidence(
     qa: PdfQAResult,
     visual_review: PdfLayoutReview,
     semantic_snapshot: PdfSemanticInputSnapshot | None = None,
+    layout_bytes: bytes | None = None,
+    review_bytes: bytes | None = None,
 ) -> PdfReportEvidence:
     """Parse and cross-validate one already captured report-evidence snapshot."""
-    native_units = document_value.get("schema_version") == "1.2"
+    native_units = document_value.get("schema_version") in {"1.2", "1.3"}
     if not native_units and (document_value.get("schema_version") != "1.1" or layout.schema_version != "1.1"):
         raise PdfQAFailure(
             "legacy PDF document/layout evidence is diagnostic only and cannot be finalized"
@@ -786,6 +859,7 @@ def build_pdf_report_evidence(
     try:
         source = PdfSourceRecord.from_dict(source_value)
         document = PdfDocument.from_dict(document_value)
+        validate_callout_source(document, source_pdf_bytes=source_pdf)
     except PdfContractError as error:
         raise PdfQAFailure(f"invalid PDF report evidence: {error}") from error
     semantic_input = None
@@ -801,12 +875,25 @@ def build_pdf_report_evidence(
         payloads = semantic_snapshot.payloads
         if (json.loads(payloads["document.json"]) != document_value
                 or json.loads(payloads["source.json"]) != source_value
+                or (document.schema_version == "1.3" and payloads.get("source.pdf") != source_pdf)
                 or payloads["segments.jsonl"] != segments_text.encode("utf-8")
                 or json.loads(payloads["glossary.json"]) != glossary_value
                 or {Path(path).stem: json.loads(value) for path, value in payloads.items()
                     if path.startswith("zones/")} != zone_values):
             raise PdfQAFailure("report evidence disagrees with held semantic unit inputs")
         semantic_input = semantic_snapshot.review_input
+        if document.schema_version == "1.3":
+            from supertranslator.pdf_qa import _callout_publication_evidence, _strict_json_mapping
+            if not isinstance(layout_bytes, bytes) or not isinstance(review_bytes, bytes):
+                raise PdfQAFailure("native callout report requires captured layout/review bytes")
+            if _strict_json_mapping(review_bytes, "PDF semantic review") != review_value:
+                raise PdfQAFailure("callout review bytes differ from consumed review")
+            expected = _callout_publication_evidence(document, layout, {
+                "document.json": payloads["document.json"], "source.pdf": source_pdf,
+                "layout.json": layout_bytes, "review.json": review_bytes,
+            })
+            if [finding.evidence for finding in qa.findings if finding.code == "publication.callouts"] != [expected]:
+                raise PdfQAFailure("callout source/document/layout/review differs from prepared QA; renew QA and visual review")
     try:
         segments = tuple(read_segments_stream(io.StringIO(segments_text)))
     except (SegmentContractError, ValueError) as error:
@@ -952,7 +1039,7 @@ def build_pdf_manifest(
             final_url=source.final_source,
         )
     manifest = PdfFinalManifest(
-        schema_version="1.1" if document.schema_version == "1.2" else "1.0",
+        schema_version="1.2" if document.schema_version == "1.3" else "1.1" if document.schema_version == "1.2" else "1.0",
         tool_version=__version__,
         input=input_record,
         source=PdfManifestSource(
@@ -1039,6 +1126,11 @@ def build_pdf_manifest(
             ) for unit in document.translation_units
         ),
         semantic_input=evidence.semantic_input,
+        callout_groups=tuple(PdfManifestCallout(group.id, group.fragments,
+            tuple(unit.id for unit in document.translation_units if unit.source_block_ids[0] in
+                  {member for fragment in group.fragments for member in fragment.source_block_ids}),
+            tuple(part for part in layout.callout_parts if part.group_id == group.id))
+            for group in document.callout_groups),
     )
     return PdfFinalManifest.from_dict(manifest.to_dict()).to_dict()
 
@@ -1111,7 +1203,7 @@ def render_pdf_review_report(manifest: Mapping[str, object]) -> str:
         "## Automated PDF QA",
         "",
     ])
-    if canonical["schema_version"] == "1.1":
+    if canonical["schema_version"] in {"1.1", "1.2"}:
         metrics = _mapping(automated, "metrics", "automated QA")
         lines.extend([
             f"- Physical translated blocks: {metrics['translated_block_count']}",
@@ -1268,16 +1360,18 @@ def _layout(path: Path) -> PdfAssemblyLayout:
 
 def _read_pdf_report_evidence(run_dir: Path) -> PdfReportEvidence:
     document_value = _read_json(run_dir / "document.json", "PDF document")
-    context = hold_pdf_semantic_inputs(run_dir) if document_value.get("schema_version") == "1.2" else nullcontext(None)
+    context = hold_pdf_semantic_inputs(run_dir) if document_value.get("schema_version") in {"1.2", "1.3"} else nullcontext(None)
     try:
-        with context as snapshot:
+        with context as snapshot, ExitStack() as held:
             qa = _read_pdf_qa(run_dir / "pdf-qa.json")
             visual_review = read_pdf_layout_review(
                 run_dir / "pdf-layout-review.json", run_dir / "pdf-qa.json"
             )
-            source_pdf = (run_dir / "source.pdf").read_bytes()
+            source_pdf = (snapshot.payloads["source.pdf"] if snapshot is not None and "source.pdf" in snapshot.payloads
+                          else (run_dir / "source.pdf").read_bytes())
             if snapshot is not None:
                 payloads = snapshot.payloads
+                source_pdf = payloads.get("source.pdf", source_pdf)
                 document_value = json.loads(payloads["document.json"])
                 source_value = json.loads(payloads["source.json"])
                 segments_text = payloads["segments.jsonl"].decode("utf-8")
@@ -1292,14 +1386,35 @@ def _read_pdf_report_evidence(run_dir: Path) -> PdfReportEvidence:
                     if _ZONE_FILE.fullmatch(path.name) is None:
                         raise PdfQAFailure(f"unexpected PDF zone evidence: {path.name}")
                     zone_values[path.stem] = _read_json(path, "PDF zone")
-            return build_pdf_report_evidence(
+            layout_bytes = review_bytes = None
+            extra_opened = {}
+            if document_value.get("schema_version") == "1.3":
+                import supertranslator.pdf_assemble as anchored
+                from supertranslator.pdf_qa import _strict_json_mapping, _verify_report_evidence_snapshot
+                for name in ("layout.json", "review.json"):
+                    opened = anchored._open_anchored_input_file(snapshot.run_anchor, name, "PDF report evidence")
+                    held.callback(anchored._close_opened_file, opened)
+                    extra_opened[name] = opened
+                exact = {name: anchored._read_opened_bytes(opened, run_dir / name, "PDF report evidence")
+                         for name, opened in extra_opened.items()}
+                layout_bytes, review_bytes = exact["layout.json"], exact["review.json"]
+                layout = PdfAssemblyLayout.from_dict(_strict_json_mapping(layout_bytes, "PDF layout"))
+                review_value = _strict_json_mapping(review_bytes, "semantic review")
+            else:
+                layout = _layout(run_dir / "layout.json")
+                review_value = _read_json(run_dir / "review.json", "semantic review")
+            evidence = build_pdf_report_evidence(
                 source_pdf=source_pdf, source_value=source_value, document_value=document_value,
                 segments_text=segments_text, glossary_value=glossary_value,
-                review_value=_read_json(run_dir / "review.json", "semantic review"),
-                zone_values=zone_values, layout=_layout(run_dir / "layout.json"),
+                review_value=review_value, zone_values=zone_values, layout=layout,
                 qa=qa, visual_review=visual_review, semantic_snapshot=snapshot,
+                layout_bytes=layout_bytes, review_bytes=review_bytes,
             )
-    except (OSError, UnicodeError, PdfSemanticReviewError) as error:
+            if extra_opened:
+                _verify_report_evidence_snapshot(snapshot.run_anchor, extra_opened,
+                    {name: hashlib.sha256(payload).hexdigest() for name, payload in exact.items()})
+            return evidence
+    except (OSError, UnicodeError, PdfSemanticReviewError, PdfAssemblyError) as error:
         raise PdfQAFailure(f"cannot read PDF report evidence: {error}") from error
 
 

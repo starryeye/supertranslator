@@ -13,7 +13,8 @@ import re
 from types import MappingProxyType
 from typing import Any
 
-from supertranslator.pdf_models import PdfContractError, PdfDocument, PdfSourceRecord
+from supertranslator.pdf_models import PdfContractError, PdfDocument, PdfSourceRecord, has_logical_pdf_units
+from supertranslator.pdf_callout_validation import validate_callout_source
 
 
 PDF_UNIT_BINDING_NAME = ".pdf-unit-binding.json"
@@ -84,8 +85,8 @@ def build_pdf_unit_binding(
 
 
 def require_assignable_pdf(document: PdfDocument) -> None:
-    if document.schema_version != "1.2" or document.extracted_schema_version != "1.2":
-        raise PdfUnitBindingError("PDF assignments require native 1.2 extraction")
+    if not has_logical_pdf_units(document) or document.extracted_schema_version != document.schema_version:
+        raise PdfUnitBindingError("PDF assignments require native 1.2 extraction or matching native 1.3 extraction")
     required = [finding.code for finding in document.flow_findings if finding.severity == "required"]
     if required:
         raise PdfUnitBindingError("PDF assignments have required flow findings: " + ", ".join(required))
@@ -99,6 +100,10 @@ def _binding_from_payloads(payloads: Mapping[str, bytes]) -> PdfUnitBinding:
         if source.sha256 != document.source_sha256:
             raise PdfUnitBindingError("PDF binding source/document SHA-256 mismatch")
         require_assignable_pdf(document)
+        if document.schema_version == "1.3":
+            validate_callout_source(document, source_pdf_bytes=payloads["source.pdf"])
+            if source.byte_length != len(payloads["source.pdf"]):
+                raise PdfUnitBindingError("PDF binding source byte length mismatch")
         actual = PdfUnitBinding.from_dict(json.loads(payloads[f"assignments/{PDF_UNIT_BINDING_NAME}"]))
         expected = build_pdf_unit_binding(
             payloads["document.json"], payloads["segments.jsonl"],
@@ -164,6 +169,17 @@ def _hold_pdf_unit_inputs(run: Path | Any, directories: tuple[str, ...]) -> Iter
             source = PdfSourceRecord.from_dict(json.loads(payloads["source.json"]))
             if source.sha256 != document.source_sha256:
                 raise PdfUnitBindingError("PDF binding source/document SHA-256 mismatch")
+            if document.schema_version == "1.3":
+                opened = anchored._open_anchored_input_file(root, "source.pdf", "PDF callout source")
+                stack.callback(anchored._close_opened_file, opened)
+                roots["source.pdf"] = opened
+                from supertranslator.pdf_acquire import MAX_PDF_BYTES
+                if os.fstat(opened.stream.fileno()).st_size > MAX_PDF_BYTES:
+                    raise PdfUnitBindingError("PDF callout source exceeds 50 MiB")
+                payloads["source.pdf"] = anchored._read_opened_bytes(opened, root.path / "source.pdf", "PDF callout source")
+                validate_callout_source(document, source_pdf_bytes=payloads["source.pdf"])
+                if source.byte_length != len(payloads["source.pdf"]):
+                    raise PdfUnitBindingError("PDF binding source byte length mismatch")
             for name in directories:
                 directory = anchored._open_existing_child_directory(root, name, "PDF binding directory")
                 stack.callback(directory.close)

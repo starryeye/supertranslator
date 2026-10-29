@@ -284,11 +284,15 @@ def test_distinct_groups_can_share_pages_but_not_members_or_character_indexes() 
 
 
 def test_logical_unit_capability_does_not_enable_native_callout_assignment() -> None:
-    from supertranslator.pdf_unit_bindings import PdfUnitBindingError, require_assignable_pdf
+    from supertranslator.pdf_unit_bindings import PdfUnitBindingError, _binding_from_payloads, require_assignable_pdf
+    from tests.pdf_fixtures import make_pdf_source_record
     document = PdfDocument.from_dict(_payload())
     assert has_logical_pdf_units(document)
-    with pytest.raises(PdfUnitBindingError, match="native 1.2 extraction"):
-        require_assignable_pdf(document)
+    require_assignable_pdf(document)  # Structural capability is not source approval.
+    source = replace(make_pdf_source_record(), sha256=document.source_sha256)
+    with pytest.raises(PdfUnitBindingError, match="source.pdf"):
+        _binding_from_payloads({"document.json": json.dumps(document.to_dict()).encode("utf-8"),
+                               "source.json": json.dumps(source.to_dict()).encode("utf-8")})
 
 
 def test_joined_callout_requires_native_group_context() -> None:
