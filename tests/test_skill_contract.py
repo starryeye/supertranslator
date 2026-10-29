@@ -46,6 +46,47 @@ def test_pdf_skill_commands_create_native_full_unit_assignments(tmp_path, capsys
     assert binding.read_bytes() == before
 
 
+def test_pdf_skill_commands_create_native_page_spanning_callout_assignments(tmp_path):
+    """Closing the native-1.3 CLI gate must reject this real source-proven run."""
+    from tests.test_pdf_callout_units import _continued_source
+    from supertranslator.cli import main
+    from supertranslator.models import read_segments
+
+    run = tmp_path / ".supertranslator" / "runs" / "연속 상자 run"
+    run.mkdir(parents=True)
+    (tmp_path / "translated-pdfs").mkdir()
+    source, _ = _continued_source(tmp_path / "입력 callout.pdf")
+    values = {"<source>": str(source), "<work-dir>": str(run)}
+    commands = [[values.get(arg, arg) for arg in line.split()[3:]]
+                for line in PDF_SKILL.read_text("utf-8").splitlines()
+                if line.startswith("<python> -m supertranslator ")]
+    by_command = {args[0]: args for args in commands}
+    for name in ["pdf-acquire", "pdf-extract", "pdf-figure-review-input", "plan-zones"]:
+        assert main(by_command[name]) == 0
+    (run / "glossary.json").write_text("{}\n", encoding="utf-8")
+    (run / "document-summary.txt").write_text("TEST ONLY native callout assignment", encoding="utf-8")
+    assert main(by_command["prepare-assignments"]) == 0
+
+    document = json.loads((run / "document.json").read_bytes())
+    assert document["schema_version"] == document["extracted_schema_version"] == "1.3"
+    assert len(document["callout_groups"]) == 1
+    group = document["callout_groups"][0]
+    assert group["id"] == "pdf:callout-000001"
+    assert [fragment["page_number"] for fragment in group["fragments"]] == [1, 2]
+    assert [fragment["source_block_ids"] for fragment in group["fragments"]] == [
+        ["pdf:page-0001:block-0001", "pdf:page-0001:block-0002"], ["pdf:page-0002:block-0001"]]
+    assert [unit["semantic_role"] for unit in document["translation_units"]] == ["callout-title", "callout-body"]
+    assert document["translation_units"][1]["source_block_ids"] == [
+        "pdf:page-0001:block-0002", "pdf:page-0002:block-0001"]
+    segments = {segment.id: segment for segment in read_segments(run / "segments.jsonl")}
+    body = segments[document["translation_units"][1]["segment_id"]]
+    assert "boundary without losing" in body.source_text
+    assert [token.value for token in body.protected] == ["12", "https://example.org/data", "24"]
+    binding = json.loads((run / "assignments/.pdf-unit-binding.json").read_bytes())
+    assert binding["schema_version"] == "1.0"
+    assert binding["assignments"].keys() == {"zone-001.json", "zone-002.json"}
+
+
 def test_skill_requires_master_review_and_isolated_subagents() -> None:
     text = SKILL.read_text("utf-8")
     for phrase in (

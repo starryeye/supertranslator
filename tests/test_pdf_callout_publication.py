@@ -3,6 +3,11 @@
 import hashlib
 import io
 import json
+import os
+import re
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 from copy import deepcopy
 from dataclasses import replace
@@ -13,6 +18,99 @@ from supertranslator.cli import main
 from supertranslator.models import Translation, read_segments
 from tests.test_pdf_callout_units import _continued_source
 from tests.test_pdf_qa import _write_review, _write_passing_layout_review
+
+
+CALLOUT_MODULES = {
+    f"tests/test_pdf_callout_{name}.py"
+    for name in ("contracts", "detection", "extract", "units", "render", "publication")
+}
+PRIOR_PDF_SELECTORS = {
+    "tests/test_pdf_pipeline.py", "tests/test_plugin_layout.py", "tests/test_renamed_identity.py",
+    "tests/test_pdf_utf8_fixtures.py", "tests/test_poppler_bootstrap.py", "tests/test_pdf_caption_evidence.py",
+    "tests/test_pdf_composite_figures.py", "tests/test_pdf_composite_figure_pipeline.py",
+    "tests/test_pdf_acquire.py::test_windows_run_anchor_requests_only_directory_list_access",
+    "tests/test_pdf_acquire.py::test_windows_run_anchor_closes_handle_when_path_validation_fails",
+    "tests/test_pdf_pipeline.py::test_windows_root_anchor_enumerates_exact_unicode_children",
+    "tests/test_pdf_assemble.py::test_windows_native_relative_rename_moves_to_held_destination",
+    "tests/test_pdf_assemble.py::test_windows_native_relative_rename_never_clobbers_existing_destination",
+    "tests/test_pdf_assemble.py::test_windows_relative_mutation_directory_requests_delete_without_write",
+    "tests/test_pdf_assemble.py::test_anchored_acquisition_keeps_successful_handle_during_outer_exception",
+    "tests/test_pdf_qa.py::test_windows_qa_directory_mutation_verifies_identity_and_closes_handle",
+    "tests/test_pdf_qa.py::test_prior_qa_descendant_release_retains_original_snapshot",
+    "tests/test_pdf_qa.py::test_remove_qa_pages_uses_windows_held_handle_to_remove_empty_directory",
+    "tests/test_pdf_qa.py::test_remove_qa_pages_uses_windows_held_handle_move_and_closes_anchors",
+    "tests/test_pdf_qa.py::test_prepare_pdf_qa_regenerates_safe_prior_evidence_and_preserves_unrelated_files",
+    "tests/test_pdf_qa.py::test_prepare_pdf_qa_cleans_post_publication_base_exception_by_identity",
+    "tests/test_pdf_qa.py::test_prepare_pdf_qa_closes_new_record_before_restoring_prior_evidence",
+    "tests/test_pdf_qa.py::test_prepare_pdf_qa_restores_prior_evidence_after_interrupted_relocation",
+    "tests/test_pdf_qa.py::test_prepare_figure_free_master_review_races_fail_closed",
+    "tests/test_pdf_qa.py::test_prepare_figure_free_review_unchanged_finalizes_exact_artifacts",
+    "tests/test_pdf_qa.py::test_windows_publishes_nonempty_qa_directory_after_releasing_descendant_handles",
+    "tests/test_pdf_qa.py::test_windows_nonempty_qa_directory_publication_never_clobbers_destination",
+    "tests/test_pdf_pipeline.py::test_windows_finalize_durably_publishes_exact_reviewed_output",
+    "tests/test_pdf_pipeline.py::test_windows_finalize_failure_cleanup_preserves_error_and_retries_immediately",
+}
+
+
+def _workflow_steps(text):
+    """Read this workflow's step scalars without an undeclared YAML dependency."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r"\s+- (uses|run|name|if|shell):", line)]
+    steps = []
+    for start, end in zip(starts, starts[1:] + [len(lines)]):
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        fields = {}
+        i = start
+        while i < end:
+            line = lines[i][indent + 2:]
+            match = re.match(r"(run|if|shell):\s*(.*)$", line)
+            if match:
+                key, value = match.groups()
+                if value in {">-", ">", "|-", "|"}:
+                    parts = []
+                    i += 1
+                    while i < end and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent + 2):
+                        parts.append(lines[i].strip())
+                        i += 1
+                    fields[key] = (" " if value.startswith(">") else "\n").join(parts)
+                    continue
+                fields[key] = value
+            i += 1
+        steps.append(fields)
+    return steps
+
+
+@pytest.mark.parametrize(("platform", "runner_os"), [("macos-15", "macOS"), ("windows-2025", "Windows")])
+def test_pdf_workflow_collects_native_callout_contracts_on_each_platform(platform, runner_os):
+    """Dropping or platform-gating a selector must lose real collected cases."""
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/pdf-cross-platform.yml").read_text("utf-8")
+    matrix = re.search(r"(?m)^\s*os:\s*\[([^]]+)\]", workflow)
+    assert matrix is not None and platform in [item.strip().strip("\"'") for item in matrix[1].split(",")]
+    commands = []
+    for step in _workflow_steps(workflow):
+        args = shlex.split(step.get("run", ""))
+        if args[:3] != ["python", "-m", "pytest"]:
+            continue
+        condition = step.get("if")
+        if condition:
+            allowed = {"runner.os == 'macOS'": "macOS", "runner.os == 'Windows'": "Windows"}
+            assert condition in allowed, f"Unsupported pytest workflow condition: {condition}"
+            if allowed[condition] != runner_os:
+                continue
+        commands.append(args[3:])
+    assert commands, f"No pytest command runs on {platform}"
+    selectors = {arg for args in commands for arg in args if arg.startswith("tests/")}
+    assert PRIOR_PDF_SELECTORS <= selectors, f"Lost existing selectors: {PRIOR_PDF_SELECTORS - selectors}"
+    collected = set()
+    for args in commands:
+        result = subprocess.run([sys.executable, "-m", "pytest", *args, "--collect-only"],
+                                cwd=root, env=os.environ.copy(), text=True, encoding="utf-8",
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        assert result.returncode == 0, result.stdout
+        collected.update(line.strip() for line in result.stdout.splitlines() if line.startswith("tests/") and "::" in line)
+    selected_modules = {node.split("::", 1)[0] for node in collected}
+    assert CALLOUT_MODULES <= selected_modules, f"Uncollected callout modules on {platform}: {CALLOUT_MODULES - selected_modules}"
 
 
 def _json(path, value):

@@ -48,6 +48,12 @@ jobs:
           tests/test_pdf_caption_evidence.py
           tests/test_pdf_composite_figures.py
           tests/test_pdf_composite_figure_pipeline.py
+          tests/test_pdf_callout_contracts.py
+          tests/test_pdf_callout_detection.py
+          tests/test_pdf_callout_extract.py
+          tests/test_pdf_callout_units.py
+          tests/test_pdf_callout_render.py
+          tests/test_pdf_callout_publication.py
           tests/test_pdf_acquire.py::test_windows_run_anchor_requests_only_directory_list_access
           tests/test_pdf_acquire.py::test_windows_run_anchor_closes_handle_when_path_validation_fails
           tests/test_pdf_pipeline.py::test_windows_root_anchor_enumerates_exact_unicode_children

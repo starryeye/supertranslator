@@ -162,8 +162,23 @@ semantic-review evidence. PDF `review.json` carries its `semantic_input_sha256`,
 the exact segments, zones, assignments, translations, and glossary policy/content before
 assembly and both QA stages.
 
-Fresh PDF extraction uses native schema/origin 1.2: one translation target owns a
-complete logical unit, including proven cross-page paragraph continuations. Physical
+Fresh PDF extraction selects formats from source-proven page-spanning callouts:
+
+| Fresh native source | Document schema/origin | Intermediate `layout.json` | Final manifest |
+|---|---|---|---|
+| No page-spanning groups | 1.2 / 1.2 | 1.2 | 1.1 |
+| Nonempty source-proven `callout_groups` | 1.3 / 1.3 | 1.3 | 1.2 |
+
+One translation target owns a complete logical unit, including proven cross-page
+paragraph or list-item continuations. A grouped callout keeps one separate title,
+complete paragraphs and list items, and selectable AI-translated text; it is not one
+undifferentiated target or a preserved illustration. Native 1.3 binds original
+fragment geometry, source glyphs and block membership, tracks rendered callout parts,
+and publishes typed source/group/unit/output provenance. Actual axis-aligned straight
+source borders (including equivalent line/path encodings) are supported; rounded,
+nested or irregular containers and embedded artwork in newly detected open-border
+chains are not newly enabled. Independent tables, artwork, captions, code, references
+and surrounding prose retain their existing ownership and protection. Physical
 block text, IDs, geometry, and relationships remain unchanged. Required extraction-flow
 findings stop planning; indivisible units exceeding the configured 12,000-character
 budget are refused. Legacy extractions remain diagnostic-only and require a fresh run
@@ -171,6 +186,15 @@ for new assignments or publication. The immutable assignment binding and semanti
 digest cover the unit map and exact reviewed bytes, so old approval cannot be reused
 merely because the source PDF is unchanged. Native manifests distinguish physical
 translated blocks from logical units and report paragraph-start member anchors.
+The assignment binding stays 1.0; native 1.3 additionally holds/verifies exact
+`source.pdf` and includes it in the schema-1.0 semantic-input file list. QA stays 1.1,
+layout review 1.0 and figure inventory 1.0. Native 1.3 QA preparation binds raw
+document/source/layout/review bytes in `publication.callouts`; finalization and
+direct report evidence must match that binding. Empty/mismatched/foreign group
+evidence is refused. Exact-byte changes require renewed affected evidence and
+QA/all-page visual review, even if text looks unchanged. Direct AI, Korean-first,
+source-artwork preservation, figure review, six semantic dimensions and all thirteen
+visual dimensions remain mandatory for both formats.
 
 Poppler/Pillow rendering is limited to 36,000,000 pixels per page, 2,000,000,000 pixels
 per PDF, 64 MiB per encoded PNG, and 4 GiB for the rendered set. Each Poppler subprocess

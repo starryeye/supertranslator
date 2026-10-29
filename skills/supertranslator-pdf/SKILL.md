@@ -173,11 +173,31 @@ if allocation or strict JSON parsing fails; do not guess either directory.
 
 ### Native logical-unit evidence
 
-Fresh `pdf-extract` writes `document.json` with both `schema_version` and
-`extracted_schema_version` equal to `1.2`. Legacy 1.0/1.1 documents remain readable
-for diagnostics; compatibility adaptation retains the old extraction origin.
-New assignments and publication require a fresh native 1.2 run, even when an old
-run has the same source-PDF hash and approved translations.
+Fresh `pdf-extract` selects the native formats from the detected source evidence:
+
+| Fresh extraction | `document.json` schema/origin | `layout.json` schema | Final manifest schema |
+|---|---|---|---|
+| No page-spanning callout groups | `1.2` / `1.2` | `1.2` | `1.1` |
+| Nonempty source-proven page-spanning `callout_groups` | `1.3` / `1.3` | `1.3` | `1.2` |
+
+Both rows support new assignments and publication when their current validators and
+reviews pass. Legacy 1.0/1.1 documents remain readable for diagnostics; compatibility
+adaptation retains the old extraction origin. Start a fresh native run for new
+assignments or publication, even when an old run has the same source-PDF hash and
+approved translations. Mismatched versions, empty 1.3 groups, and foreign evidence
+are refused rather than downgraded.
+
+Native 1.3 groups bind ordered source fragments with original page/border/content
+geometry, glyph indexes, and physical block membership. Inspect these alongside the
+unit map: one title remains separate from complete paragraphs and list items; only a
+paragraph or item proven to continue across a source page boundary is joined into one
+translation target. Do not translate the whole box as a single target or infer a join
+from roles, punctuation, repeated titles, or similar style alone. Actual axis-aligned
+straight source borders, including equivalent line/path encodings, are supported;
+rounded, nested, or irregular containers and artwork embedded in a newly detected
+open-border chain are not newly enabled. Independent artwork, tables, captions, code,
+references, and surrounding body retain their own ownership and protection. Ambiguous
+ownership or flow remains a required blocker, not a figure-preservation exception.
 
 Each `translation_units` entry owns an ordered `source_block_ids` list and one
 `segment_id`. The corresponding `Segment` contains the complete logical source
@@ -193,13 +213,16 @@ translation review does not clear it. Each unit is indivisible under the configu
 12,000-character budget. An oversized unit is refused with its unit ID, member IDs,
 measured length, and budget; retain that diagnostic and report the blocker.
 
-`prepare-assignments` publishes `assignments/.pdf-unit-binding.json`, binding the
+`prepare-assignments` publishes schema-1.0 `assignments/.pdf-unit-binding.json`, binding the
 exact document, segments, zone, and assignment bytes. The semantic-review digest
-also binds `document.json`, `source.json`, and this binding. A changed unit map or
-binding invalidates prior approval; semantic review applies to the current exact
-inputs, not merely an unchanged source-PDF hash.
+also binds `document.json`, `source.json`, and this binding. For native 1.3, holders
+additionally hold and verify exact `source.pdf` bytes, and the existing schema-1.0
+semantic-input file list includes `source.pdf`. The exact document digest binds the
+group records without changing the binding schema. Changed source/group/unit bytes or
+binding invalidate prior approval; semantic review applies to the current exact
+inputs, not merely an unchanged source-PDF hash or apparently identical text.
 
-The native final manifest uses schema 1.1. Its automated metrics distinguish
+The final manifest uses the conditional version above. Its automated metrics distinguish
 `translated_block_count` (physical members) from `translation_unit_count` (logical
 targets). Each manifest `translation_units` entry records `unit_id`, `segment_id`,
 ordered `source_block_ids`, sorted unique `source_pages`, member-aligned
@@ -207,6 +230,16 @@ ordered `source_block_ids`, sorted unique `source_pages`, member-aligned
 `anchor_granularity: "paragraph-start"`. Member anchors identify the rendered
 paragraph's start; they do not claim separate output rectangles for fragments
 translated together.
+
+Native 1.3 `layout.json` tracks rendered callout parts. Its manifest adds typed
+source/group/unit/output provenance. QA remains schema 1.1, layout review 1.0, and
+figure inventory 1.0. During `pdf-qa prepare`, native 1.3 `publication.callouts`
+evidence binds raw document/source/layout/review bytes; finalization and direct
+report evidence must match that prepared binding. Changed exact source, document,
+layout, or review bytes require renewed affected evidence and QA/all-page visual
+review; a coherent digest rebind is not approval reuse. Direct AI translation,
+six-dimension semantic review, and every-output-page thirteen-dimension visual review
+below apply to both native formats unchanged.
 
 Run the following commands in this exact order. Substitute the completed zone ID for
 `zone-001` and run that per-zone command once for every zone:
