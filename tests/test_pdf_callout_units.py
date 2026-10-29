@@ -90,6 +90,23 @@ def _extract(tmp_path, **kwargs):
                        tmp_path / "media"), expected
 
 
+@pytest.mark.parametrize("case", ["one-line-title", "one-line-body", "one-line-tail", "hanging-only"])
+def test_uncalibrated_physical_edge_preserves_one_complete_unit(tmp_path, case):
+    # Local calibration must not be needed to expose the complete logical unit.
+    from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
+    source, expected = make_uncalibrated_callout_pdf(tmp_path / "source.pdf", case=case)
+    document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
+    assert document.schema_version == "1.3"
+    assert not document.flow_findings
+    body, = [u for u in document.translation_units if u.semantic_role == "callout-body"]
+    assert len(body.source_block_ids) == 2
+    by_id = {b.id: b for b in document.blocks}
+    assert [by_id[i].page_number for i in body.source_block_ids] == [1, 2]
+    assert project_unit_text(body, by_id, callout_groups=document.callout_groups,
+                             document_schema_version="1.3").text == expected
+    assert body.kind == ("list-item" if case == "hanging-only" else "paragraph")
+
+
 @pytest.mark.parametrize("list_item,pages,one_line,hanging", [(False, 2, False, False),
     (True, 2, False, False), (False, 3, False, False), (False, 2, True, False),
     (True, 2, False, True)])

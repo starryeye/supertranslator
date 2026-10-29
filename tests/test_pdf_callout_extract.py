@@ -13,6 +13,74 @@ from supertranslator.pdf_extract import extract_pdf
 from tests.pdf_callout_fixtures import make_page_spanning_callout_pdf
 
 
+@pytest.mark.parametrize("shift,scale,origin,rotation", [
+    (0, 1.0, (0, 0), 0), (60, 1.0, (0, 0), 0),
+    (60, .8, (23, -31), 90), (0, 1.4, (-17, 29), 270),
+])
+def test_side_correspondence_preserves_independent_source_ownership(tmp_path, shift, scale, origin, rotation):
+    from pypdf import Transformation
+    from pypdf.generic import RectangleObject
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    from supertranslator.pdf_extract import logical_pdf_bytes
+    from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
+    source, expected = make_uncalibrated_callout_pdf(tmp_path / "source.pdf", shift=shift)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(PdfReader(source))
+    ox, oy = origin
+    for page in writer.pages:
+        page.add_transformation(Transformation().scale(scale).translate(ox, oy))
+        page.mediabox = RectangleObject((ox, oy, ox + 600 * scale, oy + 760 * scale))
+        page.cropbox = RectangleObject(page.mediabox)
+        page.rotate(rotation)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    original = source.read_bytes()
+    document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
+    validate_callout_source(document, source_pdf_bytes=original)
+    group, = document.callout_groups
+    assert [f.page_number for f in group.fragments] == [1, 2]
+    with pdfplumber.open(BytesIO(logical_pdf_bytes(original))) as pdf:
+        owned_text = []
+        for index, fragment in enumerate(group.fragments):
+            x = 60 + (shift if index else 0)
+            top, bottom = (300, 700) if index == 0 else (60, 460)
+            box = (ox + x * scale, -oy + top * scale, ox + (x + 420) * scale, -oy + bottom * scale)
+            assert fragment.border_bbox == pytest.approx(box)
+            indexes = tuple(i for i, c in enumerate(pdf.pages[index].chars)
+                            if c["text"].strip() and box[0] <= c["x0"] <= c["x1"] <= box[2]
+                            and box[1] <= c["top"] <= c["bottom"] <= box[3])
+            assert fragment.character_indexes == indexes
+            owned_text.extend(pdf.pages[index].chars[i]["text"] for i in indexes)
+    assert "".join(owned_text) == expected.replace(" ", "")
+    assert source.read_bytes() == original
+
+
+def test_grouped_source_keeps_genuine_closed_legacy_callout(tmp_path):
+    from tests.test_pdf_callout_units import _continued_source
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    source, _ = _continued_source(tmp_path / "chain.pdf")
+    closed = BytesIO()
+    canvas = Canvas(closed, pagesize=(600, 760), invariant=1)
+    canvas.rect(60, 400, 420, 180)
+    canvas.setFont("Helvetica-Bold", 12)
+    canvas.drawString(75, 555, "Independent closed box")
+    canvas.setFont("Helvetica", 10)
+    canvas.drawString(75, 530, "A complete legacy observation stays in its own closed frame.")
+    canvas.drawString(75, 516, "Its separate ownership does not require a spanning group.")
+    canvas.save()
+    writer = PdfWriter()
+    writer.append(PdfReader(source))
+    writer.append(PdfReader(closed))
+    with source.open("wb") as stream:
+        writer.write(stream)
+    document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
+    assert len(document.callout_groups) == 1
+    legacy = [b for b in document.blocks if b.page_number == 3]
+    assert [b.semantic_role for b in legacy] == ["callout-title", "callout-body"]
+    assert all(b.id not in f.source_block_ids for b in legacy for f in document.callout_groups[0].fragments)
+    validate_callout_source(document, source_pdf_bytes=source.read_bytes())
+
+
 @pytest.mark.parametrize("case", ["paragraph", "list"])
 @pytest.mark.parametrize("pages,border,scale,origin,mirrored", [
     (2, "lines", 1.0, (0, 0), False),

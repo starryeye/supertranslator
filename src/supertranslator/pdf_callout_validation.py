@@ -49,14 +49,16 @@ def validate_callout_source(document: PdfDocument, *, source_pdf_bytes: bytes) -
         if not 1 <= count <= 500 or count != document.page_count or len(reader.pages) != count:
             raise PdfContractError("callout source page count/limit mismatch")
         focus = sorted({fragment.page_number for group in document.callout_groups
-                        for fragment in group.fragments})
+                        for fragment in group.fragments} | {
+                            block.page_number for block in document.blocks
+                            if block.semantic_role in {"callout-title", "callout-body"}})
         if not focus or any(number < 1 or number > count for number in focus):
             raise PdfContractError("callout focus page is absent from actual source")
         with pdfplumber.open(io.BytesIO(logical_pdf_bytes(source_pdf_bytes))) as pdf:
             if len(pdf.pages) != count:
                 raise PdfContractError("callout source readers disagree on page count")
             # Geometry is cheap; text/primitives are collected only for the
-            # declared pages and fixed immediate furniture-calibration window.
+            # declared/source-callout pages and fixed physical-neighbor window.
             for declared, actual, raw in zip(document.pages, pdf.pages, reader.pages, strict=True):
                 _valid_page_bbox(actual.bbox, declared.number)
                 geometry = (_valid_dimension(actual.width, declared.number, "width"),
@@ -84,6 +86,15 @@ def validate_callout_source(document: PdfDocument, *, source_pdf_bytes: bytes) -
                 else:
                     separate.append(previous)
             components = [*separate, component]
+        # Independently inspect role-bearing pages omitted from the declared
+        # groups. Closed legacy boxes yield no chain and remain valid. Keep
+        # declared disjoint components separate so neighbors remain context.
+        covered = set().union(*components)
+        for number in sorted(set(focus) - covered):
+            if components and number - 1 in components[-1] and not components[-1] & covered:
+                components[-1].add(number)
+            else:
+                components.append({number})
         for component in sorted(components, key=min):
             group_focus = tuple(sorted(component))
             window = {number for page in group_focus for number in (page - 1, page, page + 1)}
@@ -193,10 +204,13 @@ def validate_callout_layout(document: PdfDocument, layout: PdfAssemblyLayout) ->
             if any(anchors.get(_anchor_name(member)) != parts[0].page_number for member in unit.source_block_ids):
                 raise PdfContractError("callout member anchor is detached from its owner")
         titles = [u for u in units if u.semantic_role == "callout-title"]
-        if len(titles) != 1 or titles[0] != units[0] or len(units) < 2:
-            raise PdfContractError("callout must have one leading title and body")
+        bodies = [u for u in units if u.semantic_role == "callout-body"]
+        if not bodies or len(titles) > 1 or (titles and titles[0] != units[0]):
+            raise PdfContractError("callout must have optional unique leading title and body")
+        if not titles:
+            continue
         title_records = [r for r in records if r.unit_id == units[0].id]
-        first_body = next(r for r in records if r.unit_id == units[1].id)
+        first_body = next(r for r in records if r.unit_id == bodies[0].id)
         # _append_callout_group uses spaceAfter=6 and no spaceBefore for
         # both title and body. Permit only floating-point layout roundoff;
         # source font scaling and list indentation do not change this gap.

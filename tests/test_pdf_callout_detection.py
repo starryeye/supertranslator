@@ -62,6 +62,53 @@ def test_callout_no_input():
     assert discover_callout_chains(()) == ()
 
 
+def test_absent_direct_focus_is_contextual_extraction_error():
+    # A missing focus must not leak a dictionary implementation exception.
+    with pytest.raises(PdfExtractionError, match=r"(?i)focus.*7"):
+        discover_callout_chains((), focus_pages=(7,))
+
+
+@pytest.mark.parametrize("shift", [40, 80])
+def test_unexplained_equal_width_side_shift_is_refused(tmp_path, shift):
+    from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
+    source, _ = make_uncalibrated_callout_pdf(tmp_path / "shift.pdf", shift=shift)
+    with pdfplumber.open(source) as pdf:
+        with pytest.raises(PdfExtractionError):
+            discover_callout_chains(collect_callout_pages(pdf.pages))
+
+
+@pytest.mark.parametrize("case", ["insufficient-peer", "contradictory-peer", "distant-edge", "mismatched-hanging", "inline-to-hanging"])
+def test_uncalibrated_source_refuses_unproven_peer_or_text_edge(tmp_path, case):
+    from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
+    source, _ = make_uncalibrated_callout_pdf(tmp_path / "invalid.pdf", case=case)
+    with pdfplumber.open(source) as pdf:
+        with pytest.raises(PdfExtractionError):
+            discover_callout_chains(collect_callout_pages(pdf.pages))
+
+
+def test_physical_one_line_cannot_choose_between_two_pitch_donors(tmp_path):
+    # Both peers have two measured intervals and exact direct/reflected sides.
+    source = tmp_path / "ambiguous-one-line.pdf"
+    canvas = Canvas(str(source), pagesize=(600, 760), invariant=1)
+    for page in range(2):
+        for x in ((40,) if page == 0 else (40, 360)):
+            top, bottom = (650, 700) if page == 0 else (60, 460)
+            canvas.line(x, 760 - top, x, 760 - bottom)
+            canvas.line(x + 200, 760 - top, x + 200, 760 - bottom)
+            cap = top if page == 0 else bottom
+            canvas.line(x, 760 - cap, x + 200, 760 - cap)
+            canvas.setFont("Helvetica", 10)
+            lines = ("Measured source continues",) if page == 0 else (
+                "without missing an observation", "or inventing unrelated words", "until its account is complete.")
+            for n, text in enumerate(lines):
+                canvas.drawString(x + 12, 760 - (691 if page == 0 else 78 + n * 14), text)
+        canvas.showPage()
+    canvas.save()
+    with pdfplumber.open(source) as pdf:
+        with pytest.raises(PdfExtractionError, match="ambiguous"):
+            discover_callout_chains(collect_callout_pages(pdf.pages))
+
+
 def test_callout_sparse_focus_uses_neighbors_only_as_context(tmp_path):
     # An orphan on a context page must not become an undeclared chain endpoint.
     fixture = make_page_spanning_callout_pdf(tmp_path / "pair.pdf")
@@ -87,7 +134,7 @@ def test_callout_focus_keeps_all_competing_candidates(tmp_path):
     source = tmp_path / "competitors.pdf"
     canvas = Canvas(str(source), pagesize=(600, 760))
     for page in range(2):
-        for x in (40, 340):
+        for x in (40, 360):
             top, bottom = (300, 700) if page == 0 else (60, 460)
             canvas.line(x, 760 - top, x, 760 - bottom)
             canvas.line(x + 200, 760 - top, x + 200, 760 - bottom)

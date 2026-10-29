@@ -10,6 +10,64 @@ from reportlab.pdfgen.canvas import Canvas
 from supertranslator.pdf_models import BBox
 
 
+def make_uncalibrated_callout_pdf(path: Path, *, case="body-only", shift=0):
+    """Independent real edge/list fixtures: no unrelated calibration paragraph."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    first = ["Record the initial 12 chamber readings",
+             "and retain https://example.org/data for comparison",
+             "while the measured account continues across the boundary"]
+    last = ["without losing any of the original 24 observations",
+            "and with every protected source link preserved",
+            "until this complete measured account reaches its conclusion."]
+    if case.startswith("one-line") or case in {"insufficient-peer", "contradictory-peer", "distant-edge"}:
+        first = [" ".join(first)]
+    if case == "one-line-tail":
+        first = ["Record the initial 12 chamber readings",
+                 "and retain https://example.org/data for comparison",
+                 "while the measured account continues across the boundary"]
+        last = [" ".join(last)]
+    if case == "insufficient-peer":
+        last = [last[0], " ".join(last[1:])]
+    marked = case in {"hanging-only", "mismatched-hanging", "inline-to-hanging"}
+    canvas = Canvas(str(path), pagesize=(600, 760), invariant=1)
+    for index, lines in enumerate((first, last)):
+        x = 60 + (shift if index else 0)
+        top, bottom = ((650 if len(first) == 1 else 300), 700) if index == 0 else (60, 460)
+        canvas.line(x, 760 - top, x, 760 - bottom)
+        canvas.line(x + 420, 760 - top, x + 420, 760 - bottom)
+        cap = top if index == 0 else bottom
+        canvas.line(x, 760 - cap, x + 420, 760 - cap)
+        if case == "one-line-title" and index == 0:
+            canvas.setFont("Helvetica-Bold", 12)
+            canvas.drawString(x + 15, 760 - top - 25, "Independent measured observations")
+        start = bottom - 9 - 14 * (len(lines) - 1) if index == 0 else top + 18
+        if case == "distant-edge" and index == 0:
+            start -= 30
+        for n, text in enumerate(lines):
+            indent = 30 if marked else 15
+            if case == "inline-to-hanging" and index == 0:
+                indent = 15
+            if case == "mismatched-hanging" and index:
+                indent = 36
+            baseline = start + n * 14 + (6 if case == "contradictory-peer" and index and n == 2 else 0)
+            if marked and index == 0 and n == 0:
+                obj = canvas.beginText(x + 15, 760 - baseline)
+                obj.setFont("Helvetica", 10)
+                obj.setHorizScale(15 / stringWidth("1. ", "Helvetica", 10) * 100)
+                obj.textOut("1. ")
+                canvas.drawText(obj)
+                indent = 30
+            obj = canvas.beginText(x + indent, 760 - baseline)
+            obj.setFont("Helvetica", 10)
+            obj.setHorizScale((405 - indent) / stringWidth(text, "Helvetica", 10) * 100)
+            obj.textOut(text)
+            canvas.drawText(obj)
+        canvas.showPage()
+    canvas.save()
+    expected = ("1. " if marked else "") + " ".join(first + last)
+    return path, expected
+
+
 @dataclass(frozen=True, slots=True)
 class CalloutFixture:
     source: Path
@@ -39,7 +97,7 @@ def make_page_spanning_callout_pdf(
     for index in range(pages):
         canvas.translate(*origin)
         canvas.scale(scale, scale)
-        x0 = 100 if mirrored and index % 2 else 60
+        x0 = 120 if mirrored and index % 2 else 60
         x1 = x0 + 420
         if case == "width-mismatch" and index > 0:
             x1 -= 4

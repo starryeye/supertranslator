@@ -144,16 +144,24 @@ def _write_inspected_synthetic_visual_review(run):
     _json(path, review)
 
 
-def _publication_case(root, *, origin=False, list_item=False, note=False, outside=False, long=False, groups=1):
+def _publication_case(root, *, origin=False, list_item=False, note=False, outside=False, long=False, groups=1,
+                      boundary_case=None, last_complete=False):
     """Actual acquisition, extraction and immutable assignment preparation."""
     root.mkdir(parents=True, exist_ok=True)
     source, _ = _continued_source(root / "synthetic-source.pdf", list_item=list_item)
+    if boundary_case is not None:
+        from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
+        source, _ = make_uncalibrated_callout_pdf(root / "uncalibrated-source.pdf", case=boundary_case)
     if groups > 1:
         from pypdf import PdfReader, PdfWriter
         reader = PdfReader(source)
         writer = PdfWriter()
-        for _ in range(groups):
-            writer.append(reader)
+        for index in range(groups):
+            if last_complete and index == groups - 1:
+                complete_source, _ = _continued_source(root / "complete-source.pdf", complete=True)
+                writer.append(PdfReader(complete_source))
+            else:
+                writer.append(reader)
         with source.open("wb") as stream:
             writer.write(stream)
     if note or outside:
@@ -195,7 +203,8 @@ def _publication_case(root, *, origin=False, list_item=False, note=False, outsid
     (run / "document-summary.txt").write_text("TEST ONLY independent callout fixture", encoding="utf-8")
     assert main(["prepare-assignments", "--run-dir", str(run)]) == 0
     segments = [segment for segment in read_segments(run / "segments.jsonl") if segment.target]
-    assert len(segments) == 2 * groups + int(note) + int(outside)
+    assert len(segments) == (int(boundary_case == "one-line-title") + 1 if boundary_case else
+                             2 * groups + int(note) + int(outside) + int(last_complete))
     translations = {}
     document = json.loads((run / "document.json").read_bytes())
     units = {unit["segment_id"]: unit for unit in document["translation_units"]}
@@ -217,6 +226,103 @@ def _publication_case(root, *, origin=False, list_item=False, note=False, outsid
     assert main(["validate-translations", "--run-dir", str(run)]) == 0
     _write_review(run)  # TEST ONLY canonical semantic review of this synthetic fixture.
     return run, output, translations
+
+
+@pytest.mark.parametrize("case", ["body-only", "one-line-title", "one-line-body", "one-line-tail", "hanging-only"])
+def test_uncalibrated_native_group_publishes_selectable_provenance(tmp_path, case):
+    # Requiring a fabricated title, local pitch prose or marker-edge calibration breaks this pipeline.
+    import pdfplumber
+    from supertranslator.pdf_assemble import assemble_pdf, _anchor_name
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output
+    run, output, translations = _publication_case(tmp_path, boundary_case=case, list_item=case == "hanging-only")
+    document = json.loads((run / "document.json").read_bytes())
+    assert not document["flow_findings"]
+    bodies = [u for u in document["translation_units"] if u["semantic_role"] == "callout-body"]
+    assert len(bodies) == 1 and len(bodies[0]["source_block_ids"]) == 2
+    assemble_pdf(run, translations, {}, output)
+    prepare_pdf_qa(run, output)
+    _write_passing_layout_review(run)  # TEST ONLY automated fixture; retained renders inspected separately.
+    finalize_pdf_output(run, output)
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert manifest["schema_version"] == "1.2"
+    group, = manifest["callout_groups"]
+    assert [f["page_number"] for f in group["source_fragments"]] == [1, 2]
+    assert group["unit_ids"] == [u["id"] for u in document["translation_units"]]
+    layout = json.loads((run / "layout.json").read_bytes())
+    anchors = dict(layout["anchor_pages"])
+    assert all(_anchor_name(member) in anchors for f in document["callout_groups"][0]["fragments"] for member in f["source_block_ids"])
+    with pdfplumber.open(output / "translated.pdf") as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    assert text.count("처음") == 1 and text.count("24") == 1
+    assert text.count("독립적으로") == int(case == "one-line-title")
+    if case == "hanging-only":
+        assert text.count("1.") == 1
+    assert {p.name for p in output.iterdir()} == {"translated.pdf", "manifest.json", "review-report.md"}
+
+
+@pytest.mark.parametrize("entry", ["assembly", "prepare", "finalize"])
+def test_omitted_last_singleton_group_refuses_rebound_publication(tmp_path, entry):
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_models import PdfDocument
+    run, output, translations = _publication_case(tmp_path, groups=2, last_complete=True)
+    if entry != "assembly":
+        assemble_pdf(run, translations, {}, output)
+        prepare_pdf_qa(run, output)
+        _write_passing_layout_review(run)
+    before = _evidence(run)
+    _mutate_source(run, "omitted-group")
+    forged = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
+    assert [len(u.source_block_ids) for u in forged.translation_units] == [1, 2, 1, 1, 1]
+    with pytest.raises((PdfAssemblyError, PdfQAFailure), match="callout source chains"):
+        if entry == "assembly": assemble_pdf(run, translations, {}, output)
+        elif entry == "prepare": prepare_pdf_qa(run, output)
+        else: finalize_pdf_output(run, output)
+    assert not output.exists()
+    assert _evidence(run) == before
+
+
+@pytest.mark.parametrize("list_items", [False, True])
+def test_independent_source_focus_finds_omitted_singleton_paragraphs_or_items(tmp_path, list_items):
+    from pypdf import PdfReader, PdfWriter
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.pdf_models import PdfDocument, PdfContractError
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    writer = PdfWriter()
+    first, _ = _continued_source(tmp_path / "first.pdf")
+    last, _ = _continued_source(tmp_path / "last.pdf", complete=True,
+                                list_item=list_items, new_marker=list_items)
+    writer.append(PdfReader(first))
+    writer.append(PdfReader(last))
+    source = tmp_path / "combined.pdf"
+    with source.open("wb") as stream:
+        writer.write(stream)
+    document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl", tmp_path / "media")
+    assert not document.flow_findings
+    assert [len(u.source_block_ids) for u in document.translation_units] == [1, 2, 1, 1, 1]
+    assert [u.kind for u in document.translation_units[-2:]] == (["list-item"] * 2 if list_items else ["paragraph"] * 2)
+    forged = document.to_dict()
+    forged["callout_groups"].pop()
+    with pytest.raises(PdfContractError, match="source chains"):
+        validate_callout_source(PdfDocument.from_dict(forged), source_pdf_bytes=source.read_bytes())
+
+
+@pytest.mark.parametrize("mutation", ["multiple-titles", "no-body"])
+def test_optional_title_still_requires_unique_title_and_real_body(tmp_path, mutation):
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_models import PdfDocument, PdfContractError
+    from supertranslator.pdf_flowables import PdfAssemblyLayout
+    from supertranslator.pdf_callout_validation import validate_callout_layout
+    run, output, translations = _publication_case(tmp_path)
+    assemble_pdf(run, translations, {}, output)
+    document = PdfDocument.from_dict(json.loads((run / "document.json").read_bytes()))
+    layout = PdfAssemblyLayout.from_dict(json.loads((run / "layout.json").read_bytes()))
+    body = document.translation_units[1]
+    document.translation_units[1] = replace(body, semantic_role="callout-title")
+    if mutation == "no-body":
+        document.translation_units[0] = replace(document.translation_units[0], semantic_role="body")
+    with pytest.raises(PdfContractError):
+        validate_callout_layout(document, layout)
 
 
 @pytest.mark.parametrize("empty_inventory", [False, True])
@@ -263,7 +369,7 @@ def _renew_outer_digests(run):
 
 
 def _evidence(run):
-    return {str(path.relative_to(run)): path.read_bytes()
+    return {path.relative_to(run).as_posix(): path.read_bytes()
             for name in ("staged-output", "qa-pages") for path in (run / name).rglob("*") if path.is_file()} | {
         name: (run / name).read_bytes() for name in ("pdf-qa.json", "pdf-layout-review.json") if (run / name).exists()}
 
