@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 
 import pdfplumber
@@ -10,13 +11,108 @@ from PIL import Image, ImageChops
 import pytest
 
 from supertranslator.pdf_extract import extract_pdf
-from supertranslator.pdf_layout import PdfExtractionError
+from supertranslator.pdf_layout import PdfExtractionError, group_words_into_lines
 from supertranslator.pdf_media import (
     PdfMediaError, partition_graphic_regions, render_pdf_pages,
 )
 from supertranslator.models import read_segments
 from supertranslator.protection import restore_tokens
-from tests.pdf_composite_figure_fixtures import make_composite_figure_pdf
+from tests.pdf_composite_figure_fixtures import (
+    make_composite_figure_pdf, make_figure_callout_regression_pdf,
+)
+
+
+@pytest.mark.parametrize(("frame", "font", "scale", "origin", "expected"), [
+    ("lines", "Helvetica", 1.0, (0.0, 0.0), (70.0, 180.0, 530.0, 460.0)),
+    ("path", "Times-Roman", 0.8, (0.0, 0.0), (56.0, 144.0, 424.0, 368.0)),
+    ("rect", "Helvetica", 1.4, (0.0, 0.0), (98.0, 252.0, 742.0, 644.0)),
+    ("lines", "Times-Roman", 0.8, (23.0, -31.0), (79.0, 175.0, 447.0, 399.0)),
+    ("path", "Helvetica", 1.4, (-17.0, 29.0), (81.0, 223.0, 725.0, 615.0)),
+    ("rect", "Times-Roman", 1.0, (19.0, 11.0), (89.0, 169.0, 549.0, 449.0)),
+])
+def test_source_composite_witness_reuses_cached_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame: str, font: str,
+    scale: float, origin: tuple[float, float], expected: tuple[float, ...],
+) -> None:
+    # Returning no proof, re-extracting words, or changing normal glyph ownership
+    # must fail independently of the detector's own candidate construction.
+    from supertranslator.pdf_media import source_proven_composite_bboxes
+
+    fixture = make_figure_callout_regression_pdf(
+        tmp_path / "source.pdf", frame=frame, font=font, scale=scale, origin=origin,
+    )
+    assert fixture.frame_bbox == pytest.approx(expected)
+    with pdfplumber.open(fixture.source) as pdf:
+        page = pdf.pages[0]
+        lines = group_words_into_lines(page.extract_words(
+            return_chars=True, extra_attrs=["fontname", "size"],
+        ))
+        original_lines = deepcopy(lines)
+        original_source = deepcopy((page.chars, page.lines, page.rects, page.curves, page.images))
+
+        def reject_word_reextraction(*args: object, **kwargs: object) -> None:
+            pytest.fail("cached source lines must prevent word re-extraction")
+
+        monkeypatch.setattr(page, "extract_words", reject_word_reextraction)
+        observed = source_proven_composite_bboxes(page, page_number=1, page_lines=lines)
+        assert len(observed) == 1
+        assert observed[0] == pytest.approx(fixture.frame_bbox)
+        partition = partition_graphic_regions(page, page_number=1, page_lines=lines)
+        assert [figure.bbox for figure in partition.figures] == [pytest.approx(expected)]
+        indices = {
+            index for index, char in enumerate(page.chars) if char["text"].strip()
+            and expected[0] <= char["x0"] <= char["x1"] <= expected[2]
+            and expected[1] <= char["top"] <= char["bottom"] <= expected[3]
+        }
+        assert "".join(page.chars[i]["text"] for i in sorted(indices)) == (
+            fixture.figure_text.replace(" ", "")
+        )
+        assert partition.figures[0].owned_selectable_characters == len(indices)
+        assert lines == original_lines
+        assert (page.chars, page.lines, page.rects, page.curves, page.images) == original_source
+
+
+@pytest.mark.parametrize(("frame", "case"), [
+    ("none", "valid"), ("false-frame", "valid"),
+    ("missing-side", "valid"), ("unclosed-path", "valid"),
+    ("lines", "missing-caption"), ("lines", "ambiguous-caption"),
+    ("lines", "intervening-caption"), ("lines", "table-caption"),
+    ("legacy-rect", "no-artwork"), ("legacy-split-lines", "no-artwork"),
+    ("legacy-rect", "perimeter-path"), ("legacy-rect", "perimeter-curved-path"),
+    ("legacy-rect", "text-only"), ("legacy-rect", "filled-frame-text-only"),
+])
+def test_composite_exclusion_requires_existing_positive_witness(
+    tmp_path: Path, frame: str, case: str,
+) -> None:
+    # A frame, prose, a table caption, or perimeter ink alone cannot approve
+    # figure ownership; relaxing any existing witness condition breaks this.
+    from supertranslator.pdf_media import source_proven_composite_bboxes
+
+    factory = make_figure_callout_regression_pdf
+    if frame.startswith("legacy-"):
+        factory = make_composite_figure_pdf
+        frame = frame.removeprefix("legacy-")
+    fixture = factory(tmp_path / "source.pdf", frame=frame, case=case)
+    with pdfplumber.open(fixture.source) as pdf:
+        page = pdf.pages[0]
+        lines = group_words_into_lines(page.extract_words(
+            return_chars=True, extra_attrs=["fontname", "size"],
+        ))
+        assert source_proven_composite_bboxes(page, page_number=1, page_lines=lines) == ()
+
+
+def test_source_composite_witness_refuses_crossing_glyph(tmp_path: Path) -> None:
+    # A positive caption/frame witness cannot bypass complete glyph ownership.
+    from supertranslator.pdf_media import source_proven_composite_bboxes
+
+    fixture = make_figure_callout_regression_pdf(tmp_path / "source.pdf", case="partial-glyph")
+    with pdfplumber.open(fixture.source) as pdf:
+        page = pdf.pages[0]
+        lines = group_words_into_lines(page.extract_words(
+            return_chars=True, extra_attrs=["fontname", "size"],
+        ))
+        with pytest.raises(PdfMediaError, match="partial glyph overlap"):
+            source_proven_composite_bboxes(page, page_number=1, page_lines=lines)
 
 
 @pytest.mark.parametrize(("frame", "font", "scale", "origin"), [

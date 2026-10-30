@@ -849,13 +849,12 @@ def _caption_witnessed_graphics(
     return witnessed
 
 
-def partition_graphic_regions(
-    page: object, *, page_number: int,
-    excluded_bboxes: Sequence[tuple[float, float, float, float]] = (),
+def _graphic_region_evidence(
+    page: object, *, excluded_bboxes: Sequence[BBox] = (),
     proven_callouts: Sequence[BBox] = (),
     page_lines: Sequence[PdfLine] | None = None,
-) -> GraphicPartition:
-    """Partition decoration and artwork using source text and object geometry."""
+) -> tuple[list[BBox], list[PdfLine], list[BBox]]:
+    """Compute the normal graphic candidates without assigning text ownership."""
     page_width = _positive_number(getattr(page, "width", None), "page width")
     page_height = _positive_number(getattr(page, "height", None), "page height")
     page_x0, page_top = _page_origin(page)
@@ -902,6 +901,41 @@ def partition_graphic_regions(
             is not None
         },
         key=lambda bbox: (bbox[1], bbox[0], bbox[3], bbox[2]),
+    )
+    return semantic, lines, decorated
+
+
+def source_proven_composite_bboxes(
+    page: object, *, page_number: int, page_lines: Sequence[PdfLine],
+) -> tuple[BBox, ...]:
+    """Return only existing positive composite witnesses with whole glyphs."""
+    semantic, lines, decorated = _graphic_region_evidence(page, page_lines=page_lines)
+    witnessed = _caption_witnessed_graphics(page, page_number, semantic, lines, decorated)
+    proven = []
+    for bbox in semantic:
+        if bbox not in witnessed:
+            continue
+        for character in getattr(page, "chars", ()):
+            if _object_bbox(character) is None or not str(character.get("text", "")).strip():
+                continue
+            figure_owns_character(character, bbox, page_number=page_number)
+        proven.append(bbox)
+    return tuple(proven)
+
+
+def partition_graphic_regions(
+    page: object, *, page_number: int,
+    excluded_bboxes: Sequence[tuple[float, float, float, float]] = (),
+    proven_callouts: Sequence[BBox] = (),
+    page_lines: Sequence[PdfLine] | None = None,
+) -> GraphicPartition:
+    """Partition decoration and artwork using source text and object geometry."""
+    page_width = _positive_number(getattr(page, "width", None), "page width")
+    page_height = _positive_number(getattr(page, "height", None), "page height")
+    page_x0, page_top = _page_origin(page)
+    semantic, lines, decorated = _graphic_region_evidence(
+        page, excluded_bboxes=excluded_bboxes,
+        proven_callouts=proven_callouts, page_lines=page_lines,
     )
     # Containers include their nested artwork. Only actual text runs outside
     # accepted artwork supply translatable ownership, not the container's area.
