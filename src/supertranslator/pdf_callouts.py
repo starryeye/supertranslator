@@ -16,8 +16,8 @@ from supertranslator.pdf_layout import (
     _find_caption_matching, classify_document_lines, group_words_into_lines, split_list_marker,
 )
 from supertranslator.pdf_media import (
-    _box_sides, _curve_has_interior_artwork, _object_bbox, _straight_path_edges,
-    source_axis_aligned_edges,
+    PdfMediaError, _box_sides, _curve_has_interior_artwork, _object_bbox, _straight_path_edges,
+    source_axis_aligned_edges, source_proven_composite_bboxes,
 )
 from supertranslator.pdf_models import BBox, PdfBlock
 from supertranslator.pdf_callout_models import PdfCalloutFragment, PdfCalloutGroup
@@ -168,7 +168,20 @@ def _vertical_runs(edges: Sequence[BBox]) -> tuple[BBox, ...]:
 
 def _candidates(page: PdfCalloutPageEvidence,
                 by_number: Mapping[int, PdfCalloutPageEvidence]) -> tuple[_Candidate, ...]:
-    primitive_page = SimpleNamespace(**page.primitives)
+    primitive_page = SimpleNamespace(
+        **page.primitives, chars=page.characters, bbox=page.page_bbox,
+        width=page.page_bbox[2] - page.page_bbox[0],
+        height=page.page_bbox[3] - page.page_bbox[1],
+    )
+    try:
+        figures = source_proven_composite_bboxes(
+            primitive_page, page_number=page.page_number, page_lines=page.lines,
+        )
+    except PdfMediaError as error:
+        raise PdfExtractionError(
+            f"callout page {page.page_number} bounds {page.page_bbox}: "
+            f"reason source figure ownership: {error}"
+        ) from error
     edges = source_axis_aligned_edges(primitive_page)
     runs = _vertical_runs(edges)
     non_furniture = _furniture_lines(page, by_number)
@@ -206,6 +219,14 @@ def _candidates(page: PdfCalloutPageEvidence,
             if not indexes:
                 continue
             content = _union(glyph_boxes)
+            owners = [figure for figure in figures if _intersects(figure, box)]
+            if (len(owners) == 1 and _inside(box, owners[0])
+                    and all(_character_fully_inside_bbox(char, owners[0])
+                            for char in page.characters
+                            if str(char.get("text", "")).strip()
+                            and (char_box := _character_bbox(char)) is not None
+                            and _intersects(char_box, box))):
+                continue  # Only the complete, independently witnessed figure owns this ink.
             # All ink inside the proposed text-only container must be perimeter.
             sides = _box_sides(box)
             def on_border(ink):

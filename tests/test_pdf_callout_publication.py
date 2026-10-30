@@ -145,10 +145,13 @@ def _write_inspected_synthetic_visual_review(run):
 
 
 def _publication_case(root, *, origin=False, list_item=False, note=False, outside=False, long=False, groups=1,
-                      boundary_case=None, last_complete=False):
+                      boundary_case=None, last_complete=False, mixed=False):
     """Actual acquisition, extraction and immutable assignment preparation."""
     root.mkdir(parents=True, exist_ok=True)
     source, _ = _continued_source(root / "synthetic-source.pdf", list_item=list_item)
+    if mixed:
+        from tests.test_pdf_callout_extract import _mixed_figure_callout_source
+        source, _, _ = _mixed_figure_callout_source(source)
     if boundary_case is not None:
         from tests.pdf_callout_fixtures import make_uncalibrated_callout_pdf
         source, _ = make_uncalibrated_callout_pdf(root / "uncalibrated-source.pdf", case=boundary_case)
@@ -204,7 +207,7 @@ def _publication_case(root, *, origin=False, list_item=False, note=False, outsid
     assert main(["prepare-assignments", "--run-dir", str(run)]) == 0
     segments = [segment for segment in read_segments(run / "segments.jsonl") if segment.target]
     assert len(segments) == (int(boundary_case == "one-line-title") + 1 if boundary_case else
-                             2 * groups + int(note) + int(outside) + int(last_complete))
+                             2 * groups + int(note) + int(outside) + int(last_complete) + 2 * int(mixed))
     translations = {}
     document = json.loads((run / "document.json").read_bytes())
     units = {unit["segment_id"]: unit for unit in document["translation_units"]}
@@ -217,6 +220,8 @@ def _publication_case(root, *, origin=False, list_item=False, note=False, outsid
             if list_item: decision = "1. " + decision
             if note: decision += " *"
         elif unit["kind"] == "footnote": decision = "* 이어지는 관측의 출처 각주"
+        elif unit["kind"] == "caption": decision = "그림 9. 계전기와 코일 관측."
+        elif mixed: decision = "독립적인 기록은 측정한 도표 밖에 남습니다."
         else: decision = "상자 다음의 독립 본문"
         for token in segment.protected:
             decision = decision.replace(token.value, token.token, 1)
@@ -224,8 +229,151 @@ def _publication_case(root, *, origin=False, list_item=False, note=False, outsid
     (run / "translations").mkdir()
     (run / "translations/zone-001.jsonl").write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in translations.values()), encoding="utf-8")
     assert main(["validate-translations", "--run-dir", str(run)]) == 0
+    if mixed:
+        assert main(["pdf-figure-review-input", "--run-dir", str(run)]) == 0
     _write_review(run)  # TEST ONLY canonical semantic review of this synthetic fixture.
+    if mixed:
+        inventory_bytes = (run / "figure-text-input.json").read_bytes()
+        inventory = json.loads(inventory_bytes)
+        figure, = inventory["figures"]
+        labels = []
+        remaining = list(figure["characters"])
+        for text, reason in (
+            ("A silver relay measures the incoming wave",
+             "TEST ONLY upper relay annotation within the green chamber diagram."),
+            ("and a separate coil records its changing strength.",
+             "TEST ONLY lower coil annotation; neither callout prose nor external caption."),
+        ):
+            expected = text.replace(" ", "")
+            characters, remaining = remaining[:len(expected)], remaining[len(expected):]
+            assert "".join(character["text"] for character in characters) == expected
+            labels.append({"character_indexes": [character["index"] for character in characters],
+                           "text": expected, "reason": reason})
+        assert not remaining
+        review = json.loads((run / "review.json").read_bytes())
+        review["figure_text_review"] = {
+            "schema_version": "1.0", "inventory_sha256": hashlib.sha256(inventory_bytes).hexdigest(),
+            "figures": {figure["block_id"]: {"verdict": "pass", "labels": labels,
+                "evidence": "TEST ONLY fixed synthetic label review: green chamber, connector and two in-frame relay/coil annotations; body, Figure 9 caption and continued callout remain separate targets."}},
+        }
+        _json(run / "review.json", review)
     return run, output, translations
+
+
+def test_mixed_figure_callout_native_publication_preserves_provenance(tmp_path):
+    # Losing figure review, selectable external text or native group provenance breaks finalization.
+    import pdfplumber
+    from PIL import Image, ImageChops
+    from pypdf import PdfReader
+    from supertranslator.pdf_assemble import assemble_pdf
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output
+
+    run, output, translations = _publication_case(tmp_path, mixed=True)
+    document = json.loads((run / "document.json").read_bytes())
+    inventory_bytes = (run / "figure-text-input.json").read_bytes()
+    inventory = json.loads(inventory_bytes)
+    figure, = inventory["figures"]
+    group, = document["callout_groups"]
+    assert figure["page_number"] == group["fragments"][0]["page_number"] == 1
+    assert {character["index"] for character in figure["characters"]}.isdisjoint(
+        group["fragments"][0]["character_indexes"])
+    assemble_pdf(run, translations, {}, output)
+    qa = prepare_pdf_qa(run, output)
+    assert qa.passed
+    _write_passing_layout_review(run)  # TEST ONLY; every retained synthetic page inspected separately.
+    finalize_pdf_output(run, output)
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert manifest["schema_version"] == "1.2"
+    recorded, = manifest["callout_groups"]
+    assert recorded["source_fragments"] == group["fragments"]
+    assert recorded["unit_ids"] == [unit["id"] for unit in document["translation_units"]
+        if unit["semantic_role"] in {"callout-title", "callout-body"}]
+    files = {item["path"]: item for item in manifest["semantic_input"]["files"]}
+    for name in ("source.pdf", "document.json", "figure-text-input.json"):
+        assert files[name]["sha256"] == hashlib.sha256((run / name).read_bytes()).hexdigest()
+        assert files[name]["byte_length"] == (run / name).stat().st_size
+    assert files["figure-text-input.json"]["sha256"] == hashlib.sha256(inventory_bytes).hexdigest()
+    with pdfplumber.open(output / "translated.pdf") as pdf:
+        assert len(pdf.pages) == len(list((run / "qa-pages").glob("page-*.png")))
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    assert text.count("독립적인 기록은 측정한 도표 밖에 남습니다.") == text.count("그림 9. 계전기와 코일 관측.") == 1
+    assert text.count("독립적으로 측정한 관측") == text.count("처음") == text.count("24") == 1
+    assert "A silver relay" not in text and "separate coil" not in text
+    images = [image.image.convert("RGB") for page in PdfReader(output / "translated.pdf").pages for image in page.images]
+    assert len(images) == 1
+    block = next(block for block in document["blocks"] if block["id"] == figure["block_id"])
+    with Image.open(run / block["media_path"]) as source_image:
+        assert ImageChops.difference(images[0], source_image.convert("RGB")).getbbox() is None
+    assert {path.name for path in output.iterdir()} == {"translated.pdf", "manifest.json", "review-report.md"}
+
+
+@pytest.mark.parametrize("entry", ["assembly", "prepare", "finalize"])
+@pytest.mark.parametrize("mutation", ["frame", "caption", "side"])
+def test_mixed_figure_callout_rebind_cannot_reuse_exclusion(tmp_path, entry, mutation):
+    # Recompute ownership from the current held source, even after independent outer renewal.
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_qa import prepare_pdf_qa, finalize_pdf_output, PdfQAFailure
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    from supertranslator.pdf_figure_review import canonical_figure_text_input_bytes
+    from supertranslator.pdf_models import PdfDocument, PdfContractError
+    from tests.test_pdf_callout_extract import _mixed_figure_callout_source
+    from tests.test_pdf_composite_figure_pipeline import _publication_evidence
+
+    run, output, translations = _publication_case(tmp_path, mixed=True)
+    if entry != "assembly":
+        assemble_pdf(run, translations, {}, output)
+        prepare_pdf_qa(run, output)
+        _write_passing_layout_review(run)  # TEST ONLY previous successful synthetic evidence.
+    unrelated = run / "unrelated-retained.txt"
+    unrelated.write_bytes(b"TEST ONLY unrelated prior evidence must survive\n")
+    unrelated_bytes = unrelated.read_bytes()
+    retained = _publication_evidence(run)
+    changed, _, _ = _mixed_figure_callout_source(tmp_path / "changed.pdf", mutation=mutation)
+    payload = changed.read_bytes()
+    assert payload != (run / "source.pdf").read_bytes()
+    (run / "source.pdf").write_bytes(payload)
+    source = json.loads((run / "source.json").read_bytes())
+    source.update(sha256=hashlib.sha256(payload).hexdigest(), byte_length=len(payload))
+    _json(run / "source.json", source)
+    document = json.loads((run / "document.json").read_bytes())
+    document["source_sha256"] = source["sha256"]
+    _json(run / "document.json", document)
+    inventory = json.loads((run / "figure-text-input.json").read_bytes())
+    inventory.update(source_sha256=source["sha256"],
+                     document_sha256=hashlib.sha256((run / "document.json").read_bytes()).hexdigest())
+    inventory_bytes = canonical_figure_text_input_bytes(inventory)
+    (run / "figure-text-input.json").write_bytes(inventory_bytes)
+    review = json.loads((run / "review.json").read_bytes())
+    review["figure_text_review"]["inventory_sha256"] = hashlib.sha256(inventory_bytes).hexdigest()
+    _json(run / "review.json", review)
+    _renew_outer_digests(run)
+    # The source proof itself must fail, not a stale source, binding or review digest.
+    with pytest.raises(PdfContractError, match=r"invalid callout source evidence:.*callout page .*bounds"):
+        validate_callout_source(PdfDocument.from_dict(document), source_pdf_bytes=payload)
+    with pytest.raises((PdfAssemblyError, PdfQAFailure), match=r"invalid callout source evidence:.*callout page .*bounds"):
+        if entry == "assembly": assemble_pdf(run, translations, {}, output)
+        elif entry == "prepare": prepare_pdf_qa(run, output)
+        else: finalize_pdf_output(run, output)
+    assert not output.exists()
+    assert _publication_evidence(run) == retained
+    assert unrelated.read_bytes() == unrelated_bytes
+
+
+def test_mixed_figure_callout_existing_staging_is_never_clobbered(tmp_path):
+    # Existing real staging/layout is a separate destination guard, not a source-proof test.
+    from supertranslator.pdf_assemble import assemble_pdf, PdfAssemblyError
+    from supertranslator.pdf_qa import prepare_pdf_qa
+    from tests.test_pdf_composite_figure_pipeline import _publication_evidence
+
+    run, output, translations = _publication_case(tmp_path, mixed=True)
+    assemble_pdf(run, translations, {}, output)
+    prepare_pdf_qa(run, output)
+    _write_passing_layout_review(run)  # TEST ONLY previous successful synthetic evidence.
+    retained = _publication_evidence(run)
+    with pytest.raises(PdfAssemblyError, match="assembly destination already exists"):
+        assemble_pdf(run, translations, {}, output)
+    assert _publication_evidence(run) == retained
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("case", ["body-only", "one-line-title", "one-line-body", "one-line-tail", "hanging-only"])
@@ -359,7 +507,7 @@ def _renew_outer_digests(run):
     from supertranslator.pdf_review import _semantic_digest
     _json(run / "assignments/.pdf-unit-binding.json", manual_binding(run))
     payloads = {name: (run / name).read_bytes() for name in
-                ("document.json", "source.json", "source.pdf", "segments.jsonl", "glossary.json")
+                ("document.json", "source.json", "source.pdf", "segments.jsonl", "glossary.json", "figure-text-input.json")
                 if (run / name).exists()}
     for directory in ("zones", "assignments", "translations"):
         payloads.update({f"{directory}/{path.name}": path.read_bytes() for path in (run / directory).iterdir()})

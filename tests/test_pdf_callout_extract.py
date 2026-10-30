@@ -11,6 +11,108 @@ from reportlab.pdfgen.canvas import Canvas
 
 from supertranslator.pdf_extract import extract_pdf
 from tests.pdf_callout_fixtures import make_page_spanning_callout_pdf
+from tests.pdf_composite_figure_fixtures import make_figure_callout_regression_pdf
+
+
+def _mixed_figure_callout_source(path, *, mutation=None):
+    """Real diagram above the opening fragment, never a context-only page."""
+    from pypdf import Transformation
+    from tests.test_pdf_callout_units import _continued_source
+
+    source, expected = _continued_source(path)
+    diagram = make_figure_callout_regression_pdf(
+        path.with_name(path.stem + "-diagram.pdf"),
+        frame="missing-side" if mutation == "frame" else "lines",
+        case={"caption": "missing-caption", "glyph": "partial-glyph"}.get(mutation, "valid"),
+    )
+    diagram_reader = PdfReader(diagram.source)
+    if mutation == "side":
+        from pypdf.generic import DecodedStreamObject
+        # Keep the proven frame and all label glyphs; only the inner side escapes.
+        diagram_writer = PdfWriter()
+        diagram_writer.clone_document_from_reader(diagram_reader)
+        original = diagram_writer.pages[0].get_contents().get_data()
+        assert original.count(b"500 390 m 500 590 l") == 1
+        changed = DecodedStreamObject()
+        changed.set_data(original.replace(b"500 390 m 500 590 l", b"550 390 m 550 590 l"))
+        diagram_writer.pages[0].replace_contents(changed)
+        payload = BytesIO()
+        diagram_writer.write(payload)
+        payload.seek(0)
+        diagram_reader = PdfReader(payload)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(PdfReader(source))
+    writer.pages[0].merge_transformed_page(diagram_reader.pages[0],
+                                          Transformation().scale(.5).translate(60, 360))
+    with source.open("wb") as stream:
+        writer.write(stream)
+    return source, diagram, expected
+
+
+def test_native_diagram_extraction_does_not_invent_a_callout(tmp_path):
+    # Exercise extraction independently: discovery's failure must not mask this consumer.
+    fixture = make_figure_callout_regression_pdf(tmp_path / "diagram.pdf")
+    original = fixture.source.read_bytes()
+    document = extract_pdf(fixture.source, tmp_path / "document.json",
+                           tmp_path / "segments.jsonl", tmp_path / "media")
+    assert document.schema_version == document.extracted_schema_version == "1.2"
+    assert not document.callout_groups
+    assert [block.kind for block in document.blocks] == ["paragraph", "figure", "caption"]
+    assert [block.source_text for block in document.blocks if block.kind != "figure"] == [
+        fixture.body_text, fixture.caption_text,
+    ]
+    assert sha256(original).hexdigest() == document.source_sha256
+    assert fixture.source.read_bytes() == original
+
+
+def test_mixed_figure_callout_source_ownership_is_revalidated(tmp_path):
+    # Removing shared source exclusion or capturing diagram labels in the group breaks this.
+    from supertranslator.pdf_callout_validation import validate_callout_source
+    from supertranslator.pdf_units import project_unit_text
+    from supertranslator.models import read_segments
+    from supertranslator.protection import restore_tokens
+
+    source, diagram, expected = _mixed_figure_callout_source(tmp_path / "mixed.pdf")
+    original = source.read_bytes()
+    document = extract_pdf(source, tmp_path / "document.json", tmp_path / "segments.jsonl",
+                           tmp_path / "media")
+    assert document.schema_version == document.extracted_schema_version == "1.3"
+    group, = document.callout_groups
+    assert [fragment.page_number for fragment in group.fragments] == [1, 2]
+    assert [fragment.border_bbox for fragment in group.fragments] == [
+        (60.0, 300.0, 480.0, 700.0), (60.0, 60.0, 480.0, 460.0),
+    ]
+    figure, = [block for block in document.blocks if block.kind == "figure"]
+    assert figure.page_number == 1 and figure.bbox == (95.0, 90.0, 325.0, 230.0)
+    by_id = {block.id: block for block in document.blocks}
+    title, body = [unit for unit in document.translation_units
+                   if unit.semantic_role in {"callout-title", "callout-body"}]
+    assert [by_id[member].page_number for member in body.source_block_ids] == [1, 2]
+    assert project_unit_text(body, by_id, callout_groups=document.callout_groups,
+                             document_schema_version="1.3").text == expected
+    assert tuple(member for unit in (title, body) for member in unit.source_block_ids) == tuple(
+        member for fragment in group.fragments for member in fragment.source_block_ids)
+    with pdfplumber.open(source) as pdf:
+        page = pdf.pages[0]
+        diagram_indexes = {index for index, char in enumerate(page.chars) if char["text"].strip()
+                           and 95 <= char["x0"] <= char["x1"] <= 325
+                           and 90 <= char["top"] <= char["bottom"] <= 230}
+        assert "".join(page.chars[index]["text"] for index in sorted(diagram_indexes)) == (
+            diagram.figure_text.replace(" ", ""))
+        assert diagram_indexes.isdisjoint(group.fragments[0].character_indexes)
+        for fragment, actual in zip(group.fragments, pdf.pages):
+            x0, top, x1, bottom = fragment.border_bbox
+            assert fragment.character_indexes == tuple(index for index, char in enumerate(actual.chars)
+                if char["text"].strip() and x0 <= char["x0"] <= char["x1"] <= x1
+                and top <= char["top"] <= char["bottom"] <= bottom)
+    targets = [restore_tokens(segment.source_text, segment.protected)
+               for segment in read_segments(tmp_path / "segments.jsonl") if segment.target]
+    assert targets == [diagram.body_text, diagram.caption_text,
+                       "Independent measured observations", expected]
+    assert not document.flow_findings
+    validate_callout_source(document, source_pdf_bytes=original)
+    assert document.source_sha256 == sha256(original).hexdigest()
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize("shift,scale,origin,rotation", [

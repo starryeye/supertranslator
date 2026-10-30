@@ -13,6 +13,141 @@ from supertranslator.pdf_callouts import (
 from supertranslator.pdf_layout import PdfExtractionError
 from supertranslator.pdf_media import source_axis_aligned_edges, _has_closed_graphic_frame
 from tests.pdf_callout_fixtures import make_page_spanning_callout_pdf
+from tests.pdf_composite_figure_fixtures import make_figure_callout_regression_pdf
+
+
+@pytest.mark.parametrize(("frame", "font", "scale", "origin"), [
+    ("lines", "Helvetica", 1.0, (0.0, 0.0)),
+    ("path", "Times-Roman", 0.8, (0.0, 0.0)),
+    ("rect", "Helvetica", 1.4, (0.0, 0.0)),
+    ("lines", "Times-Roman", 0.8, (23.0, -31.0)),
+    ("path", "Helvetica", 1.4, (-17.0, 29.0)),
+    ("rect", "Times-Roman", 1.0, (19.0, 11.0)),
+])
+def test_proven_diagram_internal_strokes_are_not_callouts(tmp_path, frame, font, scale, origin):
+    # Enumerating inner figure strokes as text-only fragments must fail here.
+    from hashlib import sha256
+    from supertranslator.pdf_extract import extract_pdf
+    from supertranslator.models import read_segments
+    from supertranslator.protection import restore_tokens
+
+    fixture = make_figure_callout_regression_pdf(
+        tmp_path / "diagram.pdf", frame=frame, font=font, scale=scale, origin=origin,
+    )
+    source_sha = sha256(fixture.source.read_bytes()).hexdigest()
+    with pdfplumber.open(fixture.source) as pdf:
+        assert discover_callout_chains(collect_callout_pages(pdf.pages)) == ()
+    document = extract_pdf(fixture.source, tmp_path / "document.json",
+                           tmp_path / "segments.jsonl", tmp_path / "media")
+    assert document.schema_version == document.extracted_schema_version == "1.2"
+    assert not document.callout_groups
+    figure, = [block for block in document.blocks if block.kind == "figure"]
+    assert figure.bbox == pytest.approx(fixture.frame_bbox)
+    assert [block.source_text for block in document.blocks if block.kind != "figure"] == [
+        fixture.body_text, fixture.caption_text,
+    ]
+    targets = [segment for segment in read_segments(tmp_path / "segments.jsonl") if segment.target]
+    assert [restore_tokens(segment.source_text, segment.protected) for segment in targets] == [
+        fixture.body_text, fixture.caption_text,
+    ]
+    assert document.source_sha256 == source_sha == sha256(fixture.source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("case", ["outside-side", "partial-glyph", "ambiguous-caption",
+                                  "missing-caption", "missing-side", "false-frame"])
+def test_callout_exclusion_requires_one_complete_figure_owner(tmp_path, case):
+    # Border containment, whole glyphs and unique caption evidence are separate gates.
+    from pypdf.generic import DecodedStreamObject
+    from supertranslator.pdf_media import PdfMediaError, source_proven_composite_bboxes
+
+    frame = case if case in {"missing-side", "false-frame"} else "lines"
+    fixture = make_figure_callout_regression_pdf(tmp_path / "source.pdf", frame=frame, case=case)
+    if case == "outside-side":
+        writer = PdfWriter()
+        writer.clone_document_from_reader(PdfReader(fixture.source))
+        original = writer.pages[0].get_contents().get_data()
+        assert original.count(b"500 390 m 500 590 l") == 1
+        stream = DecodedStreamObject()
+        stream.set_data(original.replace(b"500 390 m 500 590 l", b"550 390 m 550 590 l"))
+        writer.pages[0].replace_contents(stream)
+        with fixture.source.open("wb") as output:
+            writer.write(output)
+    with pdfplumber.open(fixture.source) as pdf:
+        page = pdf.pages[0]
+        assert any(rect["fill"] for rect in page.rects)  # Substantial artwork remains.
+        evidence = collect_callout_pages(pdf.pages)
+        if case == "outside-side":
+            # A genuine owner survives, but cannot exempt the crossing border.
+            assert source_proven_composite_bboxes(page, page_number=1,
+                                                  page_lines=evidence[0].lines) == (fixture.frame_bbox,)
+        elif case != "partial-glyph":
+            assert source_proven_composite_bboxes(page, page_number=1,
+                                                  page_lines=evidence[0].lines) == ()
+        reason = "partial glyph overlap" if case == "partial-glyph" else r"callout page .*bounds.*reason"
+        with pytest.raises(PdfExtractionError, match=reason) as refusal:
+            discover_callout_chains(evidence)
+        if case == "partial-glyph":
+            assert isinstance(refusal.value.__cause__, PdfMediaError)
+
+
+def _mixed_source_with_crossing_glyph(tmp_path, x):
+    """Native source overlay; neither figure bounds nor approval is injected."""
+    from io import BytesIO
+    from tests.test_pdf_callout_extract import _mixed_figure_callout_source
+
+    source, _, _ = _mixed_figure_callout_source(tmp_path / "crossing.pdf")
+    overlay = BytesIO()
+    canvas = Canvas(overlay, pagesize=(600, 760), invariant=1)
+    canvas.setFont("Helvetica", 10)
+    canvas.drawString(x, 600, "W")
+    canvas.save()
+    writer = PdfWriter()
+    writer.clone_document_from_reader(PdfReader(source))
+    writer.pages[0].merge_page(PdfReader(overlay).pages[0])
+    with source.open("wb") as output:
+        writer.write(output)
+    return source
+
+
+def test_figure_exclusion_cannot_skip_proposed_box_partial_glyph(tmp_path):
+    # The W is wholly in a real proven figure but crosses the artificial inner side.
+    from supertranslator.pdf_media import source_proven_composite_bboxes
+
+    source = _mixed_source_with_crossing_glyph(tmp_path, 108)
+    original = source.read_bytes()
+    with pdfplumber.open(source) as pdf:
+        evidence = collect_callout_pages(pdf.pages)
+        assert source_proven_composite_bboxes(pdf.pages[0], page_number=1,
+                                              page_lines=evidence[0].lines) == ((95, 90, 325, 230),)
+        glyph, = [char for char in pdf.pages[0].chars if char["text"] == "W"]
+        assert (glyph["x0"], glyph["top"], glyph["x1"], glyph["bottom"]) == pytest.approx(
+            (108, 152.07, 117.44, 162.07))
+        assert glyph["x0"] < 110 < glyph["x1"]  # Proposed box left side, not figure edge.
+        with pytest.raises(PdfExtractionError, match=r"callout page 1 bounds .*reason partial glyph overlap"):
+            discover_callout_chains(evidence)
+    assert source.read_bytes() == original
+
+
+def test_source_figure_error_is_contextual_extraction_refusal(tmp_path):
+    # The same direct discovery API must normalize source proof errors and retain their cause.
+    from supertranslator.pdf_media import PdfMediaError, source_proven_composite_bboxes
+
+    source = _mixed_source_with_crossing_glyph(tmp_path, 323)
+    original = source.read_bytes()
+    with pdfplumber.open(source) as pdf:
+        evidence = collect_callout_pages(pdf.pages)
+        glyph, = [char for char in pdf.pages[0].chars if char["text"] == "W"]
+        assert (glyph["x0"], glyph["top"], glyph["x1"], glyph["bottom"]) == pytest.approx(
+            (323, 152.07, 332.44, 162.07))
+        assert glyph["x0"] < 325 < glyph["x1"]  # Real outer figure edge.
+        with pytest.raises(PdfMediaError, match="partial glyph overlap"):
+            source_proven_composite_bboxes(pdf.pages[0], page_number=1,
+                                           page_lines=evidence[0].lines)
+        with pytest.raises(PdfExtractionError, match=r"callout page 1 bounds .*reason .*partial glyph overlap") as refusal:
+            discover_callout_chains(evidence)
+        assert isinstance(refusal.value.__cause__, PdfMediaError)
+        assert "page 1 graphic bounds (95.0, 90.0, 325.0, 230.0)" in str(refusal.value.__cause__)
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize(("pages", "border", "font", "scale", "origin", "mirrored"), [
