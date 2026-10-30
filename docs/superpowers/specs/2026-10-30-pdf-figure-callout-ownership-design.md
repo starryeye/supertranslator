@@ -1,6 +1,6 @@
 # Preserve proven diagram ownership before callout discovery
 
-Status: the user selected the recommended minimal correction on 2026-10-30. This short design awaits approval; no implementation has started.
+Status: the user selected the recommended minimal correction and approved this short design through subsequent “네” replies on 2026-10-30. Implementation planning is authorized; no implementation has started.
 
 ## Intent and evidence
 
