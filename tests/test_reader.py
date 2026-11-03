@@ -280,3 +280,23 @@ def test_malformed_editorial_review_is_cli_contract_failure(bundle):
     review.write_text(json.dumps(data))
     assert main(["export-reader", "--input-dir", str(source), "--review", str(review), "--output-dir", str(output)]) == 4
     assert not output.exists()
+
+
+def test_host_theme_cannot_shrink_nested_reader_lists(bundle):
+    from playwright.sync_api import sync_playwright
+    change_html(bundle, '<h1 id="title">', '<ul><li>첫 항목<ul><li id="nested">중첩된 항목</li></ul></li></ul><h1 id="title">')
+    path = export(bundle)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width":390,"height":844})
+            page.goto(path.as_uri())
+            page.evaluate('''() => {
+              document.body.classList.add('host');
+              const style=document.createElement('style');
+              style.textContent='.host ul {font-size:.75em}';
+              document.head.insertBefore(style, document.head.firstChild);
+            }''')
+            assert page.locator('#nested').evaluate('(el) => parseFloat(getComputedStyle(el).fontSize)') == 16
+        finally:
+            browser.close()
