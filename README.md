@@ -100,6 +100,74 @@ Allocation keeps absolute lexical paths and requires the run and reserved output
 exact children of the held `.supertranslator/runs` and `translated-pages` roots. A symlink
 or reparse ancestor, dangling link, or replacement race fails closed.
 
+### Reading editions and blog publication
+
+The existing webpage output preserves source layout. When a readable independent
+edition is requested, export an already reviewed bundle using an explicit editorial
+review, without modifying the source capture or historical output:
+
+```text
+<PYTHON> -m supertranslator export-reader --input-dir <completed-bundle> --review <reader-review.json> --output-dir <new-reader-directory>
+<PYTHON> -m supertranslator qa-reader --output-dir <new-reader-directory>
+```
+
+`reader-review.json` has exactly these fields:
+
+```json
+{
+  "schema_version": "1.0",
+  "input_html_sha256": "<SHA256 of the exact input index.html bytes>",
+  "content_selector": "article",
+  "title": "Document title",
+  "removals": [],
+  "joins": [],
+  "heading_levels": {},
+  "list_items": []
+}
+```
+
+The selector must match exactly one document region. Inspect it against the source;
+do not omit introductory matter, notices, references, figures or appendices. Each
+`removals` entry has `selector`, `text_sha256` (the selected element's UTF-8 text),
+and a nonempty `reason`; it moves reviewed running-page furniture into collapsed
+source notes, not into the trash. Only `pre`, `table`, `header`, and `footer` can be
+moved. A `joins` entry is `{"selectors": ["#paragraph-a", "#paragraph-b"]}`: it joins
+adjacent prose in order after furniture/blank-spacer removal, preserving inline DOM,
+IDs and text. Inspect the full English/Korean paragraph before approving a join;
+unrelated paragraphs, lists and parameter definitions remain separate. Rephrasing is
+not automated by this exporter. `heading_levels` maps reviewed heading selectors to
+levels 1..6; `list_items` names source list paragraphs needing hanging indentation.
+
+The output contains standalone `index.html`, reusable `article.html`, a scoped
+`assets/reader.css`, captured assets, `manifest.json`, `review-report.md` and exact
+input/editorial evidence. Prose is 18px desktop / 16px narrow, line-height 1.75, with
+a 48rem maximum reading column. Code and diagrams keep fixed spacing and local
+horizontal scrolling. Article colors inherit an embedding blog's light/dark theme.
+
+QA checks exact HTML/article/CSS/asset bytes and real Chromium rendering at
+1440/768/390px. The first QA run retains full screenshots and leaves the edition
+`pending-visual-review`. After personally comparing source and full screenshots,
+write a visual review with exactly `render_input_sha256` (from the new manifest),
+`verdict` (`pass`), and meaningful
+`evidence`, then run:
+
+```text
+<PYTHON> -m supertranslator qa-reader --output-dir <new-reader-directory> --visual-review <visual-review.json>
+```
+
+Only this successful final run marks the derivative `passed`. It does not replace
+or invent a new semantic approval for the original AI translation. When embedding
+`article.html`, copy its assets and scope CSS, rewrite only the local asset base,
+and disable template interpretation of literal technical text (for example Jekyll
+Liquid). Publishing or removing blog posts requires the user's authorization; it is
+not an automatic side effect of translation or reader export.
+
+The rendering digest includes HTML, reusable article, CSS and captured asset hashes;
+changing only a figure still requires fresh visual approval. Simple static inline SVG
+geometry is preserved. Inline SVG requiring external styling or unsupported attributes
+is refused rather than silently damaged; the existing source-preserving mode remains
+available for those pages.
+
 ### Local, attached, or public PDF
 
 Ask Codex to translate exactly one supported PDF. Local paths containing spaces and

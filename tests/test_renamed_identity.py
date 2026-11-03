@@ -12,6 +12,7 @@ import sysconfig
 import tomllib
 
 import pytest
+from supertranslator import __version__
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ def test_distribution_and_plugin_expose_only_new_identity(tmp_path):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_bytes())
     assert project["name"] == "supertranslator"
-    assert project["version"] == manifest["version"] == "0.8.0"
+    assert project["version"] == manifest["version"] == __version__
     assert project["scripts"] == {"supertranslator": "supertranslator.cli:console_main"}
     assert manifest["name"] == manifest["interface"]["displayName"] == "supertranslator"
     assert manifest["repository"] == "https://github.com/starryeye/supertranslator"
@@ -57,7 +58,7 @@ def test_distribution_and_plugin_expose_only_new_identity(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "usage: supertranslator" in result.stdout
     if os.environ.get("SUPERTRANSLATOR_FORBID_SOURCE_ROOT"):
-        result = _invoke(tmp_path, "-c", "from importlib.metadata import distribution; import shutil; d=distribution('supertranslator'); assert d.version == '0.8.0'; assert {(e.name, e.value) for e in d.entry_points if e.group == 'console_scripts'} == {('supertranslator', 'supertranslator.cli:console_main')}; assert shutil.which('web-translator') is None")
+        result = _invoke(tmp_path, "-c", "from importlib.metadata import distribution; import shutil; from supertranslator import __version__; d=distribution('supertranslator'); assert d.version == __version__; assert {(e.name, e.value) for e in d.entry_points if e.group == 'console_scripts'} == {('supertranslator', 'supertranslator.cli:console_main')}; assert shutil.which('web-translator') is None")
         assert result.returncode == 0, result.stderr
 
 

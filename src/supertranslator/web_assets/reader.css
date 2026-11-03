@@ -1,0 +1,34 @@
+/* Scoped styles: safe to reuse inside an existing light or dark blog theme. */
+.st-reader-page { margin: 0; background: #fafafa; color: #24292f; }
+.st-reader { box-sizing: border-box; width: 100%; max-width: min(48rem, 768px); margin: 0 auto;
+  padding: 2rem 1.25rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 18px; line-height: 1.75; overflow-wrap: anywhere; text-align: start; }
+.st-reader *, .st-reader *::before, .st-reader *::after { box-sizing: border-box; }
+.st-reader :is(div, section, article, figure, blockquote, dl, ul, ol) { min-width: 0; max-width: 100%; }
+.st-reader p { font-size: 1em; line-height: inherit; margin: 0 0 1em; }
+.st-reader h1 { font-size: 1.9em; }
+.st-reader h2 { font-size: 1.5em; }
+.st-reader h3 { font-size: 1.25em; }
+.st-reader :is(h4,h5,h6) { font-size: 1.1em; }
+.st-reader :is(h1,h2,h3,h4,h5,h6) { line-height: 1.4; margin: 1.8em 0 .65em; font-weight: 700; }
+.st-reader :is(h1,h2,h3,h4,h5,h6):first-child { margin-top: 0; }
+.st-reader :is(ul,ol) { padding-inline-start: 1.5em; margin: 0 0 1em; }
+.st-reader li { margin-bottom: .5em; }
+.st-reader .st-list-item { padding-inline-start: 1.5em; text-indent: -1.5em; margin-bottom: .75em; }
+.st-reader pre { display: block; max-width: 100%; overflow-x: auto; white-space: pre;
+  font-size: 14px; line-height: 1.55; padding: 1em; margin: 1.25em 0;
+  background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.3); border-radius: .35rem; }
+.st-reader :is(pre,code,kbd,samp,var) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.st-reader pre code { font-size: inherit; white-space: inherit; }
+.st-reader img { max-width: 100%; height: auto; }
+.st-reader figure { margin: 1.5em 0; }
+.st-reader figcaption { margin-top: .5em; font-size: .9em; }
+.st-reader table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.st-reader :is(th,td) { padding: .5em .75em; border: 1px solid rgba(127,127,127,.4); }
+.st-reader a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }
+.st-reader [id] { scroll-margin-top: 5rem; }
+.st-reader .st-source-notes { margin: 2em 0; border-top: 1px solid rgba(127,127,127,.4); padding-top: 1em; }
+.st-reader .st-attribution { margin-top: 2em; font-size: .85em; }
+@media (max-width: 600px) {
+  .st-reader { font-size: 16px; padding: 1.25rem 1rem; }
+}

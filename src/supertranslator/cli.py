@@ -148,6 +148,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = str(namespace.command)
     handler: Handler = namespace.handler
     try:
+        if command in {"export-reader", "qa-reader"}:
+            handler(namespace)
+            _emit_status(command, "ok", 0)
+            return 0
         with _hold_command_run_contract(namespace) as run_contract:
             handler(namespace)
             try:
@@ -252,6 +256,16 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command", required=True, parser_class=_CommandArgumentParser
     )
+
+    reader = subparsers.add_parser("export-reader", help="Export a review-bound reading edition of a completed HTML bundle.")
+    reader.add_argument("--input-dir", type=Path, required=True)
+    reader.add_argument("--review", type=Path, required=True)
+    reader.add_argument("--output-dir", type=Path, required=True)
+    reader.set_defaults(handler=_export_reader_command)
+    reader_qa = subparsers.add_parser("qa-reader", help="Verify reading-edition bytes and responsive browser layout.")
+    reader_qa.add_argument("--output-dir", type=Path, required=True)
+    reader_qa.add_argument("--visual-review", type=Path)
+    reader_qa.set_defaults(handler=_qa_reader_command)
 
     capture = subparsers.add_parser("capture", help="Capture a public web page.")
     capture.add_argument("url")
@@ -674,6 +688,23 @@ def _assemble_command(args: argparse.Namespace) -> None:
             _assemble_selected_command(args, source)
             source.verify()
     except ValueError as error:
+        raise CLIContractError(str(error)) from error
+
+
+def _export_reader_command(args: argparse.Namespace) -> None:
+    from supertranslator.reader import ReaderError, export_reader
+    try:
+        export_reader(args.input_dir, args.review, args.output_dir)
+    except ReaderError as error:
+        raise CLIContractError(str(error)) from error
+
+
+def _qa_reader_command(args: argparse.Namespace) -> None:
+    from supertranslator.reader import ReaderError
+    from supertranslator.reader_qa import qa_reader
+    try:
+        qa_reader(args.output_dir, args.visual_review)
+    except (ReaderError, OSError, ValueError) as error:
         raise CLIContractError(str(error)) from error
 
 
