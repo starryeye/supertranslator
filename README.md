@@ -145,7 +145,8 @@ a 48rem maximum reading column. Code and diagrams keep fixed spacing and local
 horizontal scrolling. Article colors inherit an embedding blog's light/dark theme.
 
 QA checks exact HTML/article/CSS/asset bytes and real Chromium rendering at
-1440/768/390px. The first QA run retains full screenshots and leaves the edition
+1440/768/390px. The first QA run retains numbered, at-most-3000px-high screenshot
+tiles covering the complete document (rather than unreliable giant screenshots) and leaves the edition
 `pending-visual-review`. After personally comparing source and full screenshots,
 write a visual review with exactly `render_input_sha256` (from the new manifest),
 `verdict` (`pass`), and meaningful

@@ -58,6 +58,7 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
         if _is_link_or_reparse(path):
             raise ReaderError("linked reader screenshot")
     metrics = {}
+    screenshot_tiles = {}
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
@@ -84,7 +85,20 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
                         raise ReaderError(f"unreadable reader layout at {width}: {result}")
                     if any(p["font"] < 13 or p["whiteSpace"] != "pre" or p["overflow"] != "auto" for p in result["literals"]):
                         raise ReaderError(f"unreadable literal layout at {width}")
-                    _replace_file(screenshots / f"{width}.png", page.screenshot(full_page=True))
+                    # Very tall full-page captures can silently paint blank tails.
+                    # Scroll a bounded viewport so every captured region is rasterized.
+                    page.set_viewport_size({"width": width, "height": 3000})
+                    document_height = page.evaluate("document.documentElement.scrollHeight")
+                    result["documentHeight"] = document_height
+                    tiles = []
+                    for index, requested_y in enumerate(range(0, document_height, 3000), 1):
+                        page.evaluate("y => window.scrollTo(0,y)", requested_y)
+                        page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                        actual_y = page.evaluate("window.scrollY")
+                        name = f"{width}-{index:04d}.png"
+                        _replace_file(screenshots / name, page.screenshot())
+                        tiles.append({"path": f"reader-screenshots/{name}", "y": actual_y, "height": 3000})
+                    screenshot_tiles[str(width)] = tiles
                     metrics[str(width)] = result
                     context.close()
             finally:
@@ -93,7 +107,7 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
         raise ReaderError(f"reader browser QA failed: {error}") from error
     _check_bytes(output, manifest)
     result = {"html_sha256": manifest["html_sha256"], "render_input_sha256": manifest["render_input_sha256"], "automated_status": "passed",
-              "visual_status": "pending", "viewports": metrics}
+              "visual_status": "pending", "viewports": metrics, "screenshot_tiles": screenshot_tiles}
     if visual_review is not None:
         raw = _read(Path(visual_review).absolute())
         visual = json.loads(raw)

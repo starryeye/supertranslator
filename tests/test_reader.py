@@ -300,3 +300,20 @@ def test_host_theme_cannot_shrink_nested_reader_lists(bundle):
             assert page.locator('#nested').evaluate('(el) => parseFloat(getComputedStyle(el).fontSize)') == 16
         finally:
             browser.close()
+
+
+def test_long_reader_qa_records_complete_bounded_screenshot_tiles(bundle):
+    from supertranslator.reader_qa import qa_reader
+    change_html(bundle, '<h1 id="title">', ('<p>긴 문서의 본문과 문단 간격을 실제 화면에서 검사합니다. '+ '내용을 보존합니다. '*25+'</p>')*80+'<h1 id="title">')
+    path = export(bundle)
+    result = qa_reader(path.parent)
+    for width in ["1440", "768", "390"]:
+        tiles = result["screenshot_tiles"][width]
+        assert len(tiles) > 1
+        covered = 0
+        for tile in tiles:
+            assert tile["y"] <= covered
+            assert tile["height"] <= 3000
+            covered = tile["y"] + tile["height"]
+            assert (path.parent / tile["path"]).is_file()
+        assert covered >= result["viewports"][width]["documentHeight"]
