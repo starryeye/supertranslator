@@ -35,4 +35,7 @@
 .st-reader .st-attribution { margin-top: 2em; font-size: .85em; }
 @media (max-width: 600px) {
   .st-reader { font-size: 16px; padding: 1.25rem 1rem; }
+  .st-reader dl { display: block; }
+  .st-reader dt { margin-top: .75em; }
+  .st-reader dd { margin-inline-start: 1em; }
 }

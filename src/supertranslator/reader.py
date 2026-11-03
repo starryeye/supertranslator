@@ -278,7 +278,7 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
         (staging / "assets").mkdir(exist_ok=True)
         (staging / "assets" / "reader.css").write_bytes(css)
         (staging / "index.html").write_bytes(html)
-        (staging / "article.html").write_text(fragment, encoding="utf-8")
+        (staging / "article.html").write_bytes(fragment.encode("utf-8"))
         (staging / "input-manifest.json").write_bytes(manifest_bytes)
         (staging / "input-review-report.md").write_bytes(report_bytes)
         (staging / "reader-review.json").write_bytes(review_bytes)
@@ -299,12 +299,12 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
             "transformations": {key: review[key] for key in ("removals", "joins", "heading_levels", "list_items")},
         }
         output_manifest["render_input_sha256"] = rendering_digest(output_manifest)
-        (staging / "manifest.json").write_text(json.dumps(output_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (staging / "manifest.json").write_text(json.dumps(output_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
         (staging / "review-report.md").write_text(
             "# 읽기용 번역본\n\n기존 AI 번역에서 생성한 파생본입니다. 번역 의미 검토를 새로 승인한 것이 아닙니다.\n\n"
             "- 입력 HTML·편집 검토: SHA256 결합\n- 코드·도식·그림·링크·ID: 편집 전후 보존 검사\n"
             "- 페이지 표기: 문서 말미 접힌 원문 표기로 이동\n- 브라우저·시각 검토: 아직 미완료\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         if _read(input_dir / "index.html") != input_bytes or _read(input_dir / "manifest.json") != manifest_bytes or _read(review_path) != review_bytes:
             raise ReaderError("input evidence changed during export")

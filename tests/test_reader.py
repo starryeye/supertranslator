@@ -317,3 +317,28 @@ def test_long_reader_qa_records_complete_bounded_screenshot_tiles(bundle):
             covered = tile["y"] + tile["height"]
             assert (path.parent / tile["path"]).is_file()
         assert covered >= result["viewports"][width]["documentHeight"]
+
+
+def test_mobile_long_definition_labels_leave_readable_description_width(bundle):
+    from playwright.sync_api import sync_playwright
+    change_html(bundle, '<h1 id="title">', '<dl><dt>[W3C.webappsec-referrer-policy]</dt><dd id="citation">저자와 참고 문헌의 제목 및 원문 주소를 읽을 수 있어야 합니다.</dd></dl><h1 id="title">')
+    path = export(bundle)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width":390,"height":844})
+            page.goto(path.as_uri())
+            assert page.locator('#citation').bounding_box()["width"] >= 300
+        finally:
+            browser.close()
+
+
+def test_export_hashes_match_written_bytes_under_windows_text_defaults(bundle, monkeypatch):
+    original_write = Path.write_text
+    def windows_write(path, data, encoding=None, errors=None, newline=None):
+        return original_write(path, data, encoding=encoding or "cp1252", errors=errors,
+                              newline="\r\n" if newline is None else newline)
+    monkeypatch.setattr(Path, "write_text", windows_write)
+    path = export(bundle)
+    manifest = json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["article_sha256"] == hashlib.sha256((path.parent / "article.html").read_bytes()).hexdigest()
