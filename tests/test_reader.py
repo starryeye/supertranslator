@@ -18,7 +18,7 @@ def bundle(tmp_path):
     (source / "assets").mkdir()
     (source / "assets" / "picture.svg").write_text(
         '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
-    )
+    , encoding="utf-8", newline="")
     html = '''<!doctype html><html><head><title>Viewer</title></head><body>
     <nav>원문 사이트 메뉴</nav><article id="doc" style="font-size:8px">
     <h1 id="title">테스트 문서</h1><h2 id="section-1">1. 소개</h2>
@@ -29,12 +29,12 @@ def bundle(tmp_path):
     <pre id="code">GET /?a=1&amp;b=2 HTTP/1.1\n+------------------------------+\n| Client             Server    |\n+------------------------------+</pre>
     <img src="assets/picture.svg" alt="그림"><script>alert(1)</script>
     </article><aside>원문 사이트 패널</aside></body></html>'''
-    (source / "index.html").write_text(html)
+    (source / "index.html").write_text(html, encoding="utf-8", newline="")
     (source / "manifest.json").write_text(json.dumps({
         "qa_status": "passed", "required_findings": [],
         "source_url": "https://example.com/spec", "tool": {"version": "0.8.0"},
-    }))
-    (source / "review-report.md").write_text("Input review")
+    }), encoding="utf-8", newline="")
+    (source / "review-report.md").write_text("Input review", encoding="utf-8", newline="")
     review = {
         "schema_version": "1.0", "input_html_sha256": hashlib.sha256(html.encode()).hexdigest(),
         "content_selector": "#doc", "title": "테스트 문서",
@@ -43,7 +43,7 @@ def bundle(tmp_path):
         "heading_levels": {}, "list_items": ["#item"],
     }
     review_path = tmp_path / "review.json"
-    review_path.write_text(json.dumps(review))
+    review_path.write_text(json.dumps(review), encoding="utf-8", newline="")
     return source, review_path, tmp_path / "output"
 
 
@@ -51,15 +51,15 @@ def export(bundle, change=None):
     from supertranslator import reader
     source, review_path, output = bundle
     if change:
-        review = json.loads(review_path.read_text())
+        review = json.loads(review_path.read_text(encoding="utf-8"))
         change(review)
-        review_path.write_text(json.dumps(review))
+        review_path.write_text(json.dumps(review), encoding="utf-8", newline="")
     return reader.export_reader(source, review_path, output)
 
 
 def test_exports_reading_article_without_viewer_and_preserves_exact_literals(bundle):
     path = export(bundle)
-    soup = BeautifulSoup(path.read_text(), "lxml")
+    soup = BeautifulSoup(path.read_text(encoding="utf-8"), "lxml")
     assert soup.select_one("nav, script, aside") is None
     article = soup.select_one(".st-reader")
     assert article is not None
@@ -70,12 +70,12 @@ def test_exports_reading_article_without_viewer_and_preserves_exact_literals(bun
     assert article.find(id="code").get_text() == "GET /?a=1&b=2 HTTP/1.1\n+------------------------------+\n| Client             Server    |\n+------------------------------+"
     assert article.select_one("a[href='#section-1']").get_text() == "허용"
     assert article.find(id="item").get("role") == "listitem"
-    fragment = BeautifulSoup((path.parent / "article.html").read_text(), "html.parser")
+    fragment = BeautifulSoup((path.parent / "article.html").read_text(encoding="utf-8"), "html.parser")
     assert str(fragment.select_one(".st-reader")) == str(article)
     assert (path.parent / "assets/picture.svg").read_bytes() == (bundle[0] / "assets/picture.svg").read_bytes()
-    manifest = json.loads((path.parent / "manifest.json").read_text())
+    manifest = json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["qa_status"] == "pending-visual-review"
-    assert manifest["input_html_sha256"] == json.loads(bundle[1].read_text())["input_html_sha256"]
+    assert manifest["input_html_sha256"] == json.loads(bundle[1].read_text(encoding="utf-8"))["input_html_sha256"]
 
 
 @pytest.mark.parametrize("mutation", [
@@ -102,15 +102,15 @@ def test_input_change_after_review_is_rejected(bundle):
 
 def test_existing_output_is_never_overwritten(bundle):
     bundle[2].mkdir()
-    (bundle[2] / "keep").write_text("keep")
+    (bundle[2] / "keep").write_text("keep", encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         export(bundle)
-    assert (bundle[2] / "keep").read_text() == "keep"
+    assert (bundle[2] / "keep").read_text(encoding="utf-8") == "keep"
 
 
 def test_symlink_asset_is_rejected(bundle, tmp_path):
     secret = tmp_path / "secret"
-    secret.write_text("not an asset")
+    secret.write_text("not an asset", encoding="utf-8", newline="")
     (bundle[0] / "assets" / "escape").symlink_to(secret)
     with pytest.raises(ValueError):
         export(bundle)
@@ -119,9 +119,9 @@ def test_symlink_asset_is_rejected(bundle, tmp_path):
 
 def test_failed_input_qa_is_not_exported(bundle):
     manifest = bundle[0] / "manifest.json"
-    data = json.loads(manifest.read_text())
+    data = json.loads(manifest.read_text(encoding="utf-8"))
     data["qa_status"] = "failed"
-    manifest.write_text(json.dumps(data))
+    manifest.write_text(json.dumps(data), encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         export(bundle)
 
@@ -134,24 +134,24 @@ def test_command_exports_without_legacy_run_allocation(bundle):
 
 def test_non_preformatted_print_furniture_is_archived_without_losing_anchors(bundle):
     source, review_path, output = bundle
-    html = (source / "index.html").read_text().replace('<pre id="page">', '<table id="page"><tr><td>').replace('Author [Page 2]</pre>', 'Author [Page 2]</td></tr></table>')
-    (source / "index.html").write_text(html)
-    data = json.loads(review_path.read_text())
+    html = (source / "index.html").read_text(encoding="utf-8").replace('<pre id="page">', '<table id="page"><tr><td>').replace('Author [Page 2]</pre>', 'Author [Page 2]</td></tr></table>')
+    (source / "index.html").write_text(html, encoding="utf-8", newline="")
+    data = json.loads(review_path.read_text(encoding="utf-8"))
     data["input_html_sha256"] = hashlib.sha256(html.encode()).hexdigest()
-    review_path.write_text(json.dumps(data))
+    review_path.write_text(json.dumps(data), encoding="utf-8", newline="")
     result = export(bundle)
-    soup = BeautifulSoup(result.read_text(), "lxml")
+    soup = BeautifulSoup(result.read_text(encoding="utf-8"), "lxml")
     assert soup.find(id="page").find_parent("details") is not None
     assert soup.find(id="page-2") is not None
 
 
 def test_reader_rejects_traversal_media_and_leaves_no_output(bundle):
     source, review_path, output = bundle
-    html = (source / "index.html").read_text().replace('src="assets/picture.svg"', 'src="assets/%2e%2e/secret.svg"')
-    (source / "index.html").write_text(html)
-    data = json.loads(review_path.read_text())
+    html = (source / "index.html").read_text(encoding="utf-8").replace('src="assets/picture.svg"', 'src="assets/%2e%2e/secret.svg"')
+    (source / "index.html").write_text(html, encoding="utf-8", newline="")
+    data = json.loads(review_path.read_text(encoding="utf-8"))
     data["input_html_sha256"] = hashlib.sha256(html.encode()).hexdigest()
-    review_path.write_text(json.dumps(data))
+    review_path.write_text(json.dumps(data), encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         export(bundle)
     assert not output.exists()
@@ -191,7 +191,7 @@ def test_browser_keeps_prose_readable_and_literals_scroll_locally(bundle):
 def test_reader_qa_rejects_changed_plain_text_even_if_protected_tokens_match(bundle):
     from supertranslator.reader_qa import qa_reader
     path = export(bundle)
-    path.write_text(path.read_text().replace("허용", "거부"))
+    path.write_text(path.read_text(encoding="utf-8").replace("허용", "거부"), encoding="utf-8", newline="")
     with pytest.raises(ValueError, match="digest"):
         qa_reader(path.parent)
     assert not (path.parent / "browser-qa.json").exists()
@@ -202,25 +202,25 @@ def test_reader_qa_requires_exact_visual_review_for_final_success(bundle, tmp_pa
     path = export(bundle)
     first = qa_reader(path.parent)
     assert first["automated_status"] == "passed"
-    assert json.loads((path.parent / "manifest.json").read_text())["qa_status"] == "pending-visual-review"
+    assert json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))["qa_status"] == "pending-visual-review"
     visual = tmp_path / "visual.json"
-    visual.write_text(json.dumps({"render_input_sha256": "0" * 64, "verdict": "pass", "evidence": "Looked at all layouts"}))
+    visual.write_text(json.dumps({"render_input_sha256": "0" * 64, "verdict": "pass", "evidence": "Looked at all layouts"}), encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         qa_reader(path.parent, visual)
-    manifest = json.loads((path.parent / "manifest.json").read_text())
-    visual.write_text(json.dumps({"render_input_sha256": manifest["render_input_sha256"], "verdict": "pass", "evidence": "Compared source and desktop/mobile full article screenshots"}))
+    manifest = json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))
+    visual.write_text(json.dumps({"render_input_sha256": manifest["render_input_sha256"], "verdict": "pass", "evidence": "Compared source and desktop/mobile full article screenshots"}), encoding="utf-8", newline="")
     result = qa_reader(path.parent, visual)
     assert result["visual_status"] == "passed"
-    assert json.loads((path.parent / "manifest.json").read_text())["qa_status"] == "passed"
+    assert json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))["qa_status"] == "passed"
 
 
 def change_html(bundle, old, new):
     source, review, _ = bundle
-    raw = (source / "index.html").read_text().replace(old, new)
-    (source / "index.html").write_text(raw)
-    data = json.loads(review.read_text())
+    raw = (source / "index.html").read_text(encoding="utf-8").replace(old, new)
+    (source / "index.html").write_text(raw, encoding="utf-8", newline="")
+    data = json.loads(review.read_text(encoding="utf-8"))
     data["input_html_sha256"] = hashlib.sha256(raw.encode()).hexdigest()
-    review.write_text(json.dumps(data))
+    review.write_text(json.dumps(data), encoding="utf-8", newline="")
 
 
 @pytest.mark.parametrize("name", ["browser-qa.json", "visual-review.json", "review-report.md"])
@@ -228,19 +228,19 @@ def test_qa_never_follows_evidence_symlinks(bundle, tmp_path, name):
     from supertranslator.reader_qa import qa_reader
     path = export(bundle)
     target = tmp_path / "unrelated"
-    target.write_text("keep this")
+    target.write_text("keep this", encoding="utf-8", newline="")
     evidence = path.parent / name
     evidence.unlink(missing_ok=True)
     evidence.symlink_to(target)
     with pytest.raises(ValueError):
         qa_reader(path.parent)
-    assert target.read_text() == "keep this"
+    assert target.read_text(encoding="utf-8") == "keep this"
 
 
 def test_static_svg_geometry_and_numbered_list_semantics_survive(bundle):
     change_html(bundle, '<h1 id="title">', '<svg viewBox="0 0 100 100"><path d="M0,0 L100,100" stroke="black"/></svg><ol start="7"><li value="9">Ninth</li></ol><h1 id="title">')
     path = export(bundle)
-    soup = BeautifulSoup(path.read_text(), "lxml")
+    soup = BeautifulSoup(path.read_text(encoding="utf-8"), "lxml")
     assert soup.svg["viewbox"] == "0 0 100 100"
     assert soup.path["d"] == "M0,0 L100,100"
     assert soup.path["stroke"] == "black"
@@ -263,21 +263,21 @@ def test_local_link_cannot_traverse_bundle(bundle, value):
 
 def test_visual_review_cannot_be_reused_after_asset_only_change(bundle):
     first = export(bundle)
-    old = json.loads((first.parent / "manifest.json").read_text())
+    old = json.loads((first.parent / "manifest.json").read_text(encoding="utf-8"))
     asset = bundle[0] / "assets/picture.svg"
-    asset.write_text(asset.read_text().replace('width="10"', 'width="20"'))
+    asset.write_text(asset.read_text(encoding="utf-8").replace('width="10"', 'width="20"'), encoding="utf-8", newline="")
     from supertranslator.reader import export_reader
     second = export_reader(bundle[0], bundle[1], first.parent.with_name("changed-asset"))
-    new = json.loads((second.parent / "manifest.json").read_text())
+    new = json.loads((second.parent / "manifest.json").read_text(encoding="utf-8"))
     assert old["html_sha256"] == new["html_sha256"]
     assert old["render_input_sha256"] != new["render_input_sha256"]
 
 
 def test_malformed_editorial_review_is_cli_contract_failure(bundle):
     source, review, output = bundle
-    data = json.loads(review.read_text())
+    data = json.loads(review.read_text(encoding="utf-8"))
     data["heading_levels"] = None
-    review.write_text(json.dumps(data))
+    review.write_text(json.dumps(data), encoding="utf-8", newline="")
     assert main(["export-reader", "--input-dir", str(source), "--review", str(review), "--output-dir", str(output)]) == 4
     assert not output.exists()
 
