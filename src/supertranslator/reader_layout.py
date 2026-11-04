@@ -90,7 +90,7 @@ def apply_presentation(article: Tag, review: dict, groups: dict[str, list[Tag]])
         return
     headings = [h for h in article.find_all(list(_HEADINGS))
                 if "st-document-title" not in h.get("class", []) and not any(
-                    parent.name == "details" and set(parent.get("class", [])) & {"st-source-notes", "st-document-info", "st-toc"}
+                    parent.name == "details" and set(parent.get_attribute_list("class")) & {"st-source-notes", "st-document-info", "st-toc"}
                     for parent in h.parents
                 )]
     if not headings:

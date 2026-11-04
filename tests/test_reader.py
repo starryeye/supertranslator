@@ -542,3 +542,14 @@ def test_pilcrow_preserves_existing_accessible_name(bundle):
     path=export(bundle)
     link=BeautifulSoup(path.read_bytes(),'lxml').select_one('a.st-permalink')
     assert link['aria-label']=='보안 요구 사항의 문단 링크'
+
+
+def test_archived_heading_never_reappears_in_live_navigation(bundle):
+    review=layout_review(bundle)
+    change_html(bundle,'<nav id="old-toc">','<nav id="old-toc"><h2 id="print-heading">원래 인쇄 목차</h2>')
+    path=export(bundle,lambda r:r.update(presentation=review))
+    article=BeautifulSoup(path.read_bytes(),'lxml').select_one('.st-reader')
+    assert article.find(id='print-heading') is not None
+    assert article.find(id='print-heading').find_parent('details',class_='st-source-notes') is not None
+    assert article.select_one('.st-toc a[href="#print-heading"]') is None
+    assert '원래 인쇄 목차' not in article.select_one('.st-toc').get_text()
