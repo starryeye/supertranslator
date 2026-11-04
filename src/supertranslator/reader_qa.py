@@ -42,6 +42,8 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
     if article is None or str(article) != str(fragment):
         raise ReaderError("standalone and reusable article differ")
     ids = {str(tag["id"]) for tag in article.select("[id]")}
+    if len(ids) != len(article.select("[id]")):
+        raise ReaderError("duplicate reader anchor IDs")
     missing = sorted({unquote(str(a["href"])[1:]) for a in article.select('a[href^="#"]')
                       if len(str(a["href"])) > 1 and unquote(str(a["href"])[1:]) not in ids})
     if missing:
@@ -124,6 +126,7 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
     _replace_file(output / "manifest.json", (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode())
     _replace_file(output / "review-report.md", (
         "# 읽기용 번역본 검토\n\n기존 AI 번역에서 생성한 파생본입니다. 원래 의미 검토는 input-review-report.md에 보존했습니다.\n\n"
+        f"- 원문 대조 AI 문장 교정: {len(manifest.get('text_edits', []))}건; 근거는 reader-review.json에 기록. 교정 외 본문의 새 전면 의미 검토를 뜻하지 않습니다.\n"
         f"- HTML SHA256: `{manifest['html_sha256']}`\n"
         "- 코드·도식·그림·링크·ID: 편집 전후 보존 검사\n"
         "- 원문 페이지 표기: 삭제하지 않고 문서 말미 접힌 영역에 보존\n"

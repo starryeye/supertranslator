@@ -169,6 +169,29 @@ geometry is preserved. Inline SVG requiring external styling or unsupported attr
 is refused rather than silently damaged; the existing source-preserving mode remains
 available for those pages.
 
+Optional `text_edits` in schema 1.0 reviews allow AI-reviewed sentence corrections
+after paragraph joins. Each entry has exactly `selector`, `input_html_sha256`
+(SHA256 of the selected p/li's canonical UTF-8 inner HTML), `replacement_html`,
+`source_text` (the original-language counterpart) and `evidence` (the controller's
+semantic comparison). English nouns, identifiers, numeric atoms, normative tokens,
+and every intact inline subtree must remain. Intact reference/keyword subtrees may
+move to support natural Korean order. Python does not translate, and missing source
+evidence, changed links/code/tokens, stale input or overlapping edits fail closed.
+Corrections are recorded separately from the historical full-document review;
+changed output requires fresh visual approval. English-first terminology remains.
+
+Optional `presentation` has exactly `toc_selectors`, `metadata_selectors`,
+`title_selectors` (arrays of exact source-region selectors), and `navigation` (a
+boolean). Selectors resolve after joins but before source styling is removed.
+Original print TOC entries (dot-leader/page-number paragraphs or a native nav),
+headings and metadata containers are explicitly reviewed: no content is deleted.
+Old TOC elements move to source notes; metadata is available under “문서 정보”.
+Live headings produce a compact, initially collapsed keyboard-operable TOC with
+collision-free anchors. Old IDs and links remain. Standalone document titles stay
+visible; only hosts supplying their own visible title should wrap the identical
+article fragment in `<div class="st-reader-embed">…</div>` to suppress duplicate
+document titles. Pilcrow links remain focusable with a subdued resting appearance.
+
 ### Local, attached, or public PDF
 
 Ask Codex to translate exactly one supported PDF. Local paths containing spaces and

@@ -33,6 +33,21 @@
 .st-reader [id] { scroll-margin-top: 5rem; }
 .st-reader .st-source-notes { margin: 2em 0; border-top: 1px solid rgba(127,127,127,.4); padding-top: 1em; }
 .st-reader .st-attribution { margin-top: 2em; font-size: .85em; }
+.st-reader-embed .st-reader { padding-block-start: .5rem; }
+.st-reader-embed .st-title-block { display: none; }
+.st-reader .st-title-block { margin: 0 0 1em; }
+.st-reader .st-title-block h1 { margin: 0 0 .25em; }
+.st-reader :is(.st-toc,.st-document-info) { margin: 0 0 .75em; border: 1px solid rgba(127,127,127,.3); border-radius: .35rem; padding: .35em .75em; }
+.st-reader :is(.st-toc,.st-document-info) > summary { cursor: pointer; font-size: 1em; line-height: 1.75; }
+.st-reader .st-toc ol { list-style: none; margin: .3em 0; padding-inline-start: 1em; }
+.st-reader .st-toc nav > ol { padding-inline-start: 0; }
+.st-reader .st-toc li { margin: .2em 0; }
+.st-reader .st-toc a { text-decoration: none; }
+.st-reader :is(h1,h2,h3,h4,h5,h6) a { text-decoration: none; }
+.st-reader a.st-permalink { opacity: .15; text-decoration: none; margin-inline-start: .15em; }
+.st-reader a.st-permalink:is(:hover,:focus-visible,:focus) { opacity: 1; text-decoration: underline; }
+.st-reader .st-toc a:is(:hover,:focus-visible), .st-reader :is(h1,h2,h3,h4,h5,h6) a:is(:hover,:focus-visible) { text-decoration: underline; }
+.st-reader :is(a,summary):focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 @media (max-width: 600px) {
   .st-reader { font-size: 16px; padding: 1.25rem 1rem; }
   .st-reader dl { display: block; }

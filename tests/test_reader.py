@@ -342,3 +342,203 @@ def test_export_hashes_match_written_bytes_under_windows_text_defaults(bundle, m
     path = export(bundle)
     manifest = json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["article_sha256"] == hashlib.sha256((path.parent / "article.html").read_bytes()).hexdigest()
+
+
+def reviewed_edit(bundle, replacement=None):
+    original = 'client는 <code>code</code>를 MUST NOT 두 번 이상 사용해서는 안 됩니다.'
+    change_html(bundle, '<h1 id="title">', f'<p id="sentence">{original}</p><h1 id="title">')
+    return {"selector": "#sentence", "input_html_sha256": hashlib.sha256(original.encode()).hexdigest(),
+            "replacement_html": replacement or 'client는 <code>code</code>를 두 번 이상 사용해서는 안 됩니다(MUST NOT).',
+            "source_text": "The client MUST NOT use the code more than once.",
+            "evidence": "Source-compared AI correction: retains client, code, the prohibition and the single-use condition."}
+
+
+def test_bound_ai_edit_repairs_sentence_without_translating_english_nouns(bundle):
+    edit = reviewed_edit(bundle)
+    path = export(bundle, lambda r: r.update(text_edits=[edit]))
+    sentence = BeautifulSoup(path.read_bytes(), "lxml").find(id="sentence")
+    assert sentence.get_text() == "client는 code를 두 번 이상 사용해서는 안 됩니다(MUST NOT)."
+    assert str(sentence.code) == "<code>code</code>"
+    manifest = json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["text_edits"][0]["source_text"] == "The client MUST NOT use the code more than once."
+
+
+def test_ai_edit_can_move_intact_inline_reference_after_predicate(bundle):
+    original = '값에 의무가 적용됩니다(<span>MUST</span>): <a href="#section-1">기준</a>을 따라야 합니다.'
+    change_html(bundle, '<h1 id="title">', f'<p id="sentence">{original}</p><h1 id="title">')
+    edit = {"selector": "#sentence", "input_html_sha256": hashlib.sha256(original.encode()).hexdigest(),
+            "replacement_html": '<a href="#section-1">기준</a>을 따라야 합니다(<span>MUST</span>).',
+            "source_text": "The value MUST follow the standard.", "evidence": "Same obligation and reference, natural Korean order."}
+    path = export(bundle, lambda r: r.update(text_edits=[edit]))
+    sentence = BeautifulSoup(path.read_bytes(), "lxml").find(id="sentence")
+    assert sentence.get_text() == "기준을 따라야 합니다(MUST)."
+    assert sentence.a["href"] == "#section-1"
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda e: e.update(input_html_sha256="0" * 64),
+    lambda e: e.update(evidence=""),
+    lambda e: e.update(source_text=""),
+    lambda e: e.update(replacement_html='client는 <code>code</code>를 사용해도 됩니다(MAY).'),
+    lambda e: e.update(replacement_html='client는 <code>other</code>를 사용해서는 안 됩니다(MUST NOT).'),
+    lambda e: e.update(replacement_html='클라이언트는 <code>code</code>를 사용해서는 안 됩니다(MUST NOT).'),
+    lambda e: e.update(replacement_html='client는 <code>code</code>를 2번 사용해서는 안 됩니다(MUST NOT).'),
+    lambda e: e.update(replacement_html='client는 <code>code</code>를 사용해서는 안 됩니다(MUST NOT).<script>alert(1)</script>'),
+    lambda e: e.update(selector="#code"),
+])
+def test_ai_edit_rejects_stale_or_unreviewed_or_protected_content_changes(bundle, mutation):
+    edit = reviewed_edit(bundle)
+    mutation(edit)
+    with pytest.raises(ValueError):
+        export(bundle, lambda r: r.update(text_edits=[edit]))
+    assert not bundle[2].exists()
+
+
+def test_duplicate_ai_edits_cannot_overwrite_an_already_edited_sentence(bundle):
+    edit = reviewed_edit(bundle)
+    with pytest.raises(ValueError):
+        export(bundle, lambda r: r.update(text_edits=[edit, edit]))
+    assert not bundle[2].exists()
+
+
+def layout_review(bundle):
+    change_html(bundle, '<h1 id="title">', '<div id="metadata"><dl><dt>발행</dt><dd>2024</dd></dl></div><nav id="old-toc"><a href="#section-1">기존 목차</a></nav><span id="st-heading-0001"></span><h1 id="title">')
+    change_html(bundle, '<p id="left">', '<h3>1.1. 세부 항목</h3><h2>2. 다음 절</h2><p id="left">')
+    return {"toc_selectors": ["#old-toc"], "metadata_selectors": ["#metadata"],
+            "title_selectors": ["#title"], "navigation": True}
+
+
+def test_presentation_builds_collision_safe_hierarchical_navigation_and_retains_source(bundle):
+    review = layout_review(bundle)
+    path = export(bundle, lambda r: r.update(presentation=review))
+    article = BeautifulSoup(path.read_bytes(), "lxml").select_one('.st-reader')
+    toc = article.select_one('details.st-toc')
+    assert toc is not None and not toc.has_attr('open')
+    assert toc.summary.get_text() == '목차'
+    assert [a.get_text() for a in toc.select('a')] == ['1. 소개', '1.1. 세부 항목', '2. 다음 절']
+    for a in toc.select('a'):
+        assert article.find(id=a['href'][1:]).name in {'h2', 'h3'}
+    assert toc.select_one('ol ol a').get_text() == '1.1. 세부 항목'
+    ids = [t['id'] for t in article.select('[id]')]
+    assert len(ids) == len(set(ids))
+    assert article.find(id='old-toc').find_parent('details', class_='st-source-notes') is not None
+    assert article.find(id='metadata').find_parent('details', class_='st-document-info') is not None
+    assert article.find(id='metadata').get_text() == '발행2024'
+    assert article.find(id='title').get_text() == '테스트 문서'
+    assert article.find(id='code').get_text().startswith('GET /?a=1&b=2 HTTP/1.1')
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda r: r.update(toc_selectors=['#left']),
+    lambda r: r.update(toc_selectors=['#doc']),
+    lambda r: r.update(metadata_selectors=['#left']),
+    lambda r: r.update(title_selectors=['#code']),
+    lambda r: r.update(toc_selectors=['#title']),
+    lambda r: r.update(navigation='yes'),
+    lambda r: r.update(metadata_selectors=None),
+])
+def test_presentation_rejects_unsafe_or_overlapping_selections(bundle, mutation):
+    review = layout_review(bundle)
+    mutation(review)
+    with pytest.raises(ValueError):
+        export(bundle, lambda r: r.update(presentation=review))
+    assert not bundle[2].exists()
+
+
+def test_metadata_container_cannot_archive_unrelated_body_prose(bundle):
+    review = layout_review(bundle)
+    change_html(bundle, '</dd></dl></div>', '</dd></dl><p>이 본문은 숨기면 안 됩니다.</p></div>')
+    with pytest.raises(ValueError):
+        export(bundle, lambda r: r.update(presentation=review))
+
+
+def test_presentation_selectors_resolve_original_classes_and_data_markers(bundle):
+    review = layout_review(bundle)
+    change_html(bundle, '<div id="metadata">', '<div id="metadata" class="publication-info">')
+    change_html(bundle, '<nav id="old-toc">', '<nav id="old-toc" data-print-toc="yes">')
+    review['metadata_selectors'] = ['.publication-info']
+    review['toc_selectors'] = ['[data-print-toc]']
+    path = export(bundle, lambda r: r.update(presentation=review))
+    article = BeautifulSoup(path.read_bytes(), 'lxml').select_one('.st-reader')
+    assert article.find(id='metadata').find_parent('details', class_='st-document-info') is not None
+    assert article.find(id='old-toc').find_parent('details', class_='st-source-notes') is not None
+
+
+def test_embedded_presentation_is_compact_but_standalone_title_stays_visible(bundle):
+    from playwright.sync_api import sync_playwright
+    review = layout_review(bundle)
+    change_html(bundle, '<p id="right">', '<p id="right"><a href="#right">¶</a>')
+    path = export(bundle, lambda r: r.update(presentation=review))
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            for width in [1440, 390]:
+                page = browser.new_page(viewport={'width': width, 'height': 900})
+                page.goto(path.as_uri())
+                assert page.locator('#title').is_visible()
+                assert page.locator('details.st-toc').bounding_box()['height'] < 70
+                assert not page.locator('#metadata').is_visible()
+                page.locator('.st-reader').evaluate('''el => {let host=document.createElement('div');host.className='st-reader-embed';el.replaceWith(host);host.append(el);}''')
+                assert not page.locator('#title').is_visible()
+                assert page.locator('#left').evaluate('e => parseFloat(getComputedStyle(e).fontSize)') == (16 if width == 390 else 18)
+                permalink = page.locator('a.st-permalink')
+                assert float(permalink.evaluate('e => getComputedStyle(e).opacity')) < .4
+                permalink.focus()
+                assert float(permalink.evaluate('e => getComputedStyle(e).opacity')) == 1
+                assert permalink.get_attribute('href') == '#right'
+                page.locator('details.st-toc > summary').focus()
+                page.keyboard.press('Enter')
+                assert page.locator('details.st-toc').get_attribute('open') is not None
+                page.close()
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('container,group', [
+    ('<div id="selected"><nav>원래 목차</nav><h2>보안</h2><div>숨기면 안 되는 본문</div></div>', 'toc_selectors'),
+    ('<div id="selected"><dl><dt>발행</dt><dd>2024</dd></dl><section>숨기면 안 되는 본문</section></div>', 'metadata_selectors'),
+])
+def test_presentation_cannot_fold_body_text_in_nonparagraph_containers(bundle, container, group):
+    review = layout_review(bundle)
+    change_html(bundle, '<h1 id="title">', container+'<h1 id="title">')
+    review[group] = ['#selected']
+    with pytest.raises(ValueError):
+        export(bundle, lambda r: r.update(presentation=review))
+    assert not bundle[2].exists()
+
+
+@pytest.mark.parametrize('replacement', ['+10', '10'])
+def test_ai_edit_cannot_change_or_delete_numeric_sign(bundle, replacement):
+    original = '온도는 -10°C 이상이어야 합니다(MUST).'
+    change_html(bundle, '<h1 id="title">', f'<p id="signed">{original}</p><h1 id="title">')
+    edit = {'selector':'#signed','input_html_sha256':hashlib.sha256(original.encode()).hexdigest(),
+            'replacement_html':f'온도는 {replacement}°C 이상이어야 합니다(MUST).',
+            'source_text':'The temperature MUST be at least -10°C.','evidence':'Purported review cannot override the numeric preservation contract.'}
+    with pytest.raises(ValueError):
+        export(bundle,lambda r:r.update(text_edits=[edit]))
+
+
+def test_navigation_percent_encodes_existing_id_without_renaming_it(bundle):
+    from urllib.parse import unquote
+    review=layout_review(bundle)
+    change_html(bundle, '<p id="left">', '<h2 id="a%20b">특수 ID</h2><p id="left">')
+    path=export(bundle,lambda r:r.update(presentation=review))
+    article=BeautifulSoup(path.read_bytes(),'lxml').select_one('.st-reader')
+    link=next(a for a in article.select('.st-toc a') if a.get_text()=='특수 ID')
+    assert link['href']=='#a%2520b'
+    assert article.find(id=unquote(link['href'][1:])) is not None
+
+
+def test_navigation_includes_source_authored_details_headings_but_not_archived_toc(bundle):
+    review=layout_review(bundle)
+    change_html(bundle,'<p id="left">','<details id="appendix"><summary>부록</summary><h2 id="deep">중요한 추가 규칙</h2><p>접어 둔 본문도 탐색할 수 있어야 합니다.</p></details><p id="left">')
+    path=export(bundle,lambda r:r.update(presentation=review))
+    article=BeautifulSoup(path.read_bytes(),'lxml').select_one('.st-reader')
+    assert article.select_one('.st-toc a[href="#deep"]') is not None
+
+
+def test_pilcrow_preserves_existing_accessible_name(bundle):
+    change_html(bundle, '<p id="right">', '<p id="right"><a href="#right" aria-label="보안 요구 사항의 문단 링크">¶</a>')
+    path=export(bundle)
+    link=BeautifulSoup(path.read_bytes(),'lxml').select_one('a.st-permalink')
+    assert link['aria-label']=='보안 요구 사항의 문단 링크'

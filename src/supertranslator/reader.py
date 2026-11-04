@@ -196,6 +196,7 @@ def _sanitize(article: Tag, source_url: str) -> None:
             raise ReaderError(f"interactive/embedded content is not a supported reading region: {tag.name}")
         is_list = tag.get("data-reader-list") == "true" or tag.get("role") == "listitem"
         is_notes = tag.name == "details" and "st-source-notes" in tag.get("class", [])
+        is_permalink = tag.name == "a" and tag.get_text().strip() == "¶" and str(tag.get("href", "")).startswith("#")
         in_svg = tag.name == "svg" or tag.find_parent("svg") is not None
         if in_svg and any(name not in _SVG_ATTRS for name in tag.attrs):
             raise ReaderError("inline SVG with styling/unsupported attributes needs a captured static image")
@@ -206,6 +207,10 @@ def _sanitize(article: Tag, source_url: str) -> None:
             tag["class"] = "st-list-item"
         if is_notes:
             tag["class"] = "st-source-notes"
+        if is_permalink:
+            tag["class"] = "st-permalink"
+            if not tag.has_attr("aria-label"):
+                tag["aria-label"] = "문단 링크"
         for name in ("href", "src"):
             if name not in tag.attrs:
                 continue
@@ -238,7 +243,7 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     review_bytes = _read(review_path)
     review = json.loads(review_bytes)
     manifest = json.loads(manifest_bytes)
-    if not isinstance(review, dict) or set(review) != _FIELDS or review["schema_version"] != "1.0":
+    if not isinstance(review, dict) or not _FIELDS <= set(review) or set(review) - _FIELDS - {"text_edits", "presentation"} or review["schema_version"] != "1.0":
         raise ReaderError("invalid reader review schema")
     if not isinstance(manifest, dict) or not isinstance(review["title"], str) or not review["title"].strip() or not isinstance(review["removals"], list) or not isinstance(review["joins"], list) or not isinstance(review["heading_levels"], dict) or not isinstance(review["list_items"], list):
         raise ReaderError("invalid reader review field types")
@@ -253,9 +258,21 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     article = _transform(soup, review)
     if _preserved(article, source_url) != original_facts:
         raise ReaderError("reader transformation lost IDs, links, images or literal text")
+    from supertranslator.reader_editing import apply_text_edits
+    apply_text_edits(article, review.get("text_edits", []))
+    if _preserved(article, source_url) != original_facts:
+        raise ReaderError("reader text edit changed protected document structure")
+    groups = None
+    if "presentation" in review:
+        from supertranslator.reader_layout import apply_presentation, resolve_presentation
+        groups = resolve_presentation(article, review["presentation"])
     _sanitize(article, source_url)
     if _preserved(article, source_url) != original_facts:
         raise ReaderError("reader sanitization changed content structure")
+    if "presentation" in review:
+        apply_presentation(article, review["presentation"], groups)
+        if any(value - _preserved(article, source_url)[key] for key, value in original_facts.items()):
+            raise ReaderError("reader presentation lost protected source content")
     footer = soup.new_tag("footer", attrs={"class": "st-attribution"})
     footer.append("비공식 AI 한국어 번역 · ")
     link = soup.new_tag("a", href=source_url)
@@ -297,6 +314,8 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
             "article_sha256": _digest(fragment.encode()), "stylesheet_sha256": _digest(css),
             "asset_sha256": asset_digests,
             "transformations": {key: review[key] for key in ("removals", "joins", "heading_levels", "list_items")},
+            "text_edits": review.get("text_edits", []),
+            "presentation": review.get("presentation"),
         }
         output_manifest["render_input_sha256"] = rendering_digest(output_manifest)
         (staging / "manifest.json").write_text(json.dumps(output_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")

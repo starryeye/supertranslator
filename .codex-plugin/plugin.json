@@ -1,6 +1,6 @@
 {
   "name": "supertranslator",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Translate one public static HTML page or one local or public text-selectable PDF into reviewed Korean output.",
   "author": {
     "name": "starryeye"
