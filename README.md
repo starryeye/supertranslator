@@ -137,6 +137,10 @@ IDs and text. Inspect the full English/Korean paragraph before approving a join;
 unrelated paragraphs, lists and parameter definitions remain separate. Rephrasing is
 not automated by this exporter. `heading_levels` maps reviewed heading selectors to
 levels 1..6; `list_items` names source list paragraphs needing hanging indentation.
+Contiguous reviewed list items receive an owning `role="list"` container without
+changing their source text, markers, inline links or anchor IDs. Unreviewed prose,
+headings and literals separate lists. Review selectors and sentence edits resolve
+before grouping, so existing positional selections keep their original meaning.
 
 The output contains standalone `index.html`, reusable `article.html`, a scoped
 `assets/reader.css`, captured assets, `manifest.json`, `review-report.md` and exact

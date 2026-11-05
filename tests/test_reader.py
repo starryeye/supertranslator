@@ -78,6 +78,119 @@ def test_exports_reading_article_without_viewer_and_preserves_exact_literals(bun
     assert manifest["input_html_sha256"] == json.loads(bundle[1].read_text(encoding="utf-8"))["input_html_sha256"]
 
 
+def _replace_reviewed_item(bundle, markup, selectors):
+    source, review_path, _ = bundle
+    soup = BeautifulSoup((source / "index.html").read_bytes(), "lxml")
+    fragment = BeautifulSoup(markup, "html.parser")
+    item = soup.find(id="item")
+    for child in list(fragment.contents):
+        item.insert_before(child.extract())
+    item.decompose()
+    data = str(soup).encode("utf-8")
+    (source / "index.html").write_bytes(data)
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review.update(input_html_sha256=hashlib.sha256(data).hexdigest(), list_items=selectors)
+    review_path.write_text(json.dumps(review), encoding="utf-8", newline="")
+
+
+def test_reviewed_list_item_has_an_owning_list(bundle):
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    item = soup.find(id="item")
+    assert item.parent.get("role") == "list"
+    assert item.name == "p"
+    assert item.get_text() == "   o  목록의 내용이 여러 줄로 표시됩니다."
+
+
+def test_contiguous_reviewed_items_keep_anchor_spacers_and_exact_text(bundle):
+    _replace_reviewed_item(bundle,
+        '<p id="item">o client MUST 검증합니다.</p>\n<span id="boundary"><a id="old-anchor"></a></span>\n'
+        '<div id="second">o <a href="#section-1">server</a>가 응답합니다.</div>',
+        ["#item", "#second"])
+    before = BeautifulSoup((bundle[0] / "index.html").read_bytes(), "lxml")
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    first, second = soup.find(id="item"), soup.find(id="second")
+    assert first.parent is second.parent
+    assert first.parent.get("role") == "list"
+    assert [tag["id"] for tag in first.parent.find_all(id=True)] == ["item", "boundary", "old-anchor", "second"]
+    assert first.parent.get_text() == "o client MUST 검증합니다.\n\no server가 응답합니다."
+    assert soup.find(id="code").get_text() == before.find(id="code").get_text()
+    assert second.a["href"] == "#section-1"
+
+
+@pytest.mark.parametrize("barrier", [
+    '<p id="between">별도 설명</p>', '<h3 id="between">제목</h3>',
+    '<pre id="between">GET / HTTP/1.1</pre>', '<span id="between">주석 내용</span>',
+])
+def test_reviewed_list_groups_never_swallow_unreviewed_content(bundle, barrier):
+    _replace_reviewed_item(bundle, '<p id="item">첫 항목</p>' + barrier + '<p id="second">둘째 항목</p>',
+                           ["#item", "#second"])
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    first, second, middle = (soup.find(id=name) for name in ["item", "second", "between"])
+    assert first.parent.get("role") == second.parent.get("role") == "list"
+    assert first.parent is not second.parent
+    assert middle.find_parent(attrs={"role": "list"}) is None
+
+
+def test_reviewed_item_with_existing_aria_list_parent_is_not_wrapped_again(bundle):
+    _replace_reviewed_item(bundle, '<div id="owner" role="list"><p id="item">목록 항목</p></div>', ["#item"])
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    assert soup.find(id="item").parent is soup.find(id="owner")
+    assert len(soup.select('[role="list"]')) == 1
+
+
+def test_generic_wrappers_do_not_interrupt_existing_list_ownership(bundle):
+    _replace_reviewed_item(bundle,
+        '<div id="owner" role="list"><div><section><p id="item">목록 항목</p></section></div></div>',
+        ["#item"])
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    assert len(soup.select('[role="list"]')) == 1
+    assert soup.find(id="item").find_parent(attrs={"role": "list"}) is soup.find(id="owner")
+
+
+@pytest.mark.parametrize("barrier", [
+    '<h2 id="between" data-reader-list="true">검토하지 않은 제목</h2>',
+    '<p id="between" data-reader-list="true">검토하지 않은 문단</p>',
+])
+def test_source_markers_cannot_impersonate_explicitly_reviewed_items(bundle, barrier):
+    _replace_reviewed_item(bundle, '<p id="item">첫 항목</p>' + barrier + '<p id="second">둘째 항목</p>',
+                           ["#item", "#second"])
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    assert soup.find(id="item").parent is not soup.find(id="second").parent
+    assert soup.find(id="between").find_parent(attrs={"role": "list"}) is None
+    assert soup.find(id="between").get("role") != "listitem"
+
+
+@pytest.mark.parametrize("parent", ['<div role="list">', '<ul>'])
+def test_reviewed_prose_inside_an_existing_item_gets_its_own_list_context(bundle, parent):
+    closing = "</ul>" if parent == "<ul>" else "</div>"
+    _replace_reviewed_item(bundle, parent + '<li><p id="item">목록 항목</p></li>' + closing, ["#item"])
+    # Select an existing ARIA/native item container, with a prose child reviewed
+    # independently. A nested prose item still needs its own owning context.
+    soup = BeautifulSoup(export(bundle).read_bytes(), "lxml")
+    item = soup.find(id="item")
+    assert item.parent.get("role") == "list"
+    assert item.parent.parent.name == "li"
+
+
+def test_positional_text_edit_selectors_resolve_before_list_wrapping(bundle):
+    from supertranslator.reader import _transform
+    _replace_reviewed_item(bundle, '<p id="item">client가 검사합니다(MUST).</p><p id="after">server가 응답합니다.</p>', ["#item"])
+    source, review_path, _ = bundle
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    article = _transform(BeautifulSoup((source / "index.html").read_bytes(), "lxml"), review)
+    target = article.find(id="after")
+    ordinal = [tag for tag in target.parent.children if getattr(tag, "name", None) == "p"].index(target) + 1
+    selector = f"#doc > p:nth-of-type({ordinal})"
+    assert article.select_one(selector) is target
+    edit = {"selector": selector, "input_html_sha256": hashlib.sha256(target.decode_contents().encode()).hexdigest(),
+            "replacement_html": "server가 응답을 보냅니다.", "source_text": "The server responds.",
+            "evidence": "AI comparison retains the responding server and changes Korean wording only."}
+    path = export(bundle, lambda r: r.update(text_edits=[edit]))
+    soup = BeautifulSoup(path.read_bytes(), "lxml")
+    assert soup.find(id="after").get_text() == "server가 응답을 보냅니다."
+    assert soup.find(id="item").parent.get("role") == "list"
+
+
 @pytest.mark.parametrize("mutation", [
     lambda r: r.update(input_html_sha256="0" * 64),
     lambda r: r.update(content_selector="article, nav"),

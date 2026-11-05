@@ -98,6 +98,37 @@ def _anchor_spacer(tag: Tag) -> bool:
     )
 
 
+def _group_reviewed_lists(article: Tag) -> None:
+    """Give reviewed items an owning list without rewriting source blocks."""
+    factory = BeautifulSoup("", "html.parser")
+    for first in list(article.select('[data-reader-list="true"]')):
+        owned = False
+        for ancestor in first.parents:
+            if ancestor is article or ancestor.name == "li" or ancestor.get("role") == "listitem":
+                break
+            if ancestor.name in {"ul", "ol"} or ancestor.get("role") == "list":
+                owned = True
+                break
+        if owned:
+            continue
+        members = [first]
+        spacers = []
+        for following in first.next_siblings:
+            if isinstance(following, Tag) and following.get("data-reader-list") == "true":
+                members.extend(spacers)
+                members.append(following)
+                spacers = []
+            elif (isinstance(following, NavigableString) and not following.strip()
+                  or isinstance(following, Tag) and _anchor_spacer(following)):
+                spacers.append(following)
+            else:
+                break
+        owner = factory.new_tag("div", role="list")
+        first.insert_before(owner)
+        for member in members:
+            owner.append(member.extract())
+
+
 def rendering_digest(manifest: dict) -> str:
     """Bind visual approval to all bytes that determine the rendered edition."""
     value = {name: manifest[name] for name in ("html_sha256", "article_sha256", "stylesheet_sha256", "asset_sha256")}
@@ -124,6 +155,9 @@ def _transform(soup: BeautifulSoup, review: dict) -> Tag:
         raise ReaderError("content selector must identify a document body region")
     article = soup.new_tag("article", attrs={"class": "st-reader", "lang": "ko"})
     article.append(copy.deepcopy(selected))
+    # Internal review markers are not trusted when inherited from source HTML.
+    for tag in article.select('[data-reader-list]'):
+        del tag["data-reader-list"]
     notes = soup.new_tag("details", attrs={"class": "st-source-notes"})
     summary = soup.new_tag("summary")
     summary.string = "원문 페이지 표기"
@@ -266,6 +300,8 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     if "presentation" in review:
         from supertranslator.reader_layout import apply_presentation, resolve_presentation
         groups = resolve_presentation(article, review["presentation"])
+    # All source-bound selectors resolve before wrappers change sibling positions.
+    _group_reviewed_lists(article)
     _sanitize(article, source_url)
     if _preserved(article, source_url) != original_facts:
         raise ReaderError("reader sanitization changed content structure")
