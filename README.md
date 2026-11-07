@@ -142,6 +142,37 @@ changing their source text, markers, inline links or anchor IDs. Unreviewed pros
 headings and literals separate lists. Review selectors and sentence edits resolve
 before grouping, so existing positional selections keep their original meaning.
 
+For source-reviewed definitions, nested list items, or separately grouped records,
+add the optional `structure` field (old review files need no changes):
+
+```json
+{
+  "structure": {
+    "definitions": [
+      {"selector": "#definition", "term_end": 8, "evidence": "Original label verifier precedes its explanation."}
+    ],
+    "lists": [
+      {"items": [{"selector": "#parent", "depth": 0}, {"selector": "#child", "depth": 1}], "evidence": "Original indentation shows a child condition."},
+      {"items": [{"selector": "#record", "depth": 0}], "evidence": "Separate registration record."}
+    ]
+  }
+}
+```
+
+AI must compare the source before recording these decisions; the exporter never
+infers definitions, depth, group boundaries or translations. `term_end` is a
+Python-character offset in the selected element's exact text **after** reviewed
+joins/text edits, without whitespace normalization. Both sides must be nonempty;
+the boundary can split a direct text node but cannot split a link or any other
+inline subtree. Definition labels stack above their descriptions with original
+text and inline content retained. Each `lists` entry is a distinct group, starts
+at depth 0, and can increase at most one level per item. Source markers and order
+are unchanged. Members must be live flat-inline `p`/`div` siblings in document
+order, separated only by whitespace or empty anchor spacers. Do not overlap
+structure selections, old `list_items`, presentation selections, archived notes,
+or existing native/ARIA list owners. Malformed or unsupported selections fail
+without publishing output. All selectors resolve before new layout wrappers.
+
 The output contains standalone `index.html`, reusable `article.html`, a scoped
 `assets/reader.css`, captured assets, `manifest.json`, `review-report.md` and exact
 input/editorial evidence. Prose is 18px desktop / 16px narrow, line-height 1.75, with

@@ -19,6 +19,16 @@
 .st-reader dt { grid-column: 1; font-weight: 600; }
 .st-reader dd { grid-column: 2; margin: 0; }
 .st-reader .st-list-item { padding-inline-start: 1.5em; text-indent: -1.5em; margin-bottom: .75em; }
+.st-reader dl.st-definition { display: block; margin: 0 0 1em; }
+.st-reader .st-definition-term { margin: 0 0 .25em; }
+.st-reader .st-definition-description { margin: 0 0 0 1em; }
+.st-reader .st-structured-list { margin: 0 0 1.25em; }
+.st-reader .st-structured-item { margin: 0 0 .6em; }
+.st-reader .st-structured-item:last-child { margin-bottom: 0; }
+.st-reader .st-structured-item > :is(p,div):not(.st-structured-list) {
+  margin: 0; padding-inline-start: 1.5em; text-indent: -1.5em;
+}
+.st-reader .st-structured-item > .st-structured-list { margin: .5em 0 0; padding-inline-start: 1.5em; }
 .st-reader pre { display: block; max-width: 100%; overflow-x: auto; white-space: pre;
   font-size: 14px; line-height: 1.55; padding: 1em; margin: 1.25em 0;
   background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.3); border-radius: .35rem; }

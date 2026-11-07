@@ -101,6 +101,201 @@ def test_reviewed_list_item_has_an_owning_list(bundle):
     assert item.get_text() == "   o  목록의 내용이 여러 줄로 표시됩니다."
 
 
+def test_reviewed_definition_separates_term_without_changing_text_or_inline_links(bundle):
+    _replace_reviewed_item(bundle, '<p id="item"><a id="term" href="#section-1">verifier</a>\n  두 요청을 연결하는 값입니다.</p>', [])
+    structure = {"definitions": [{"selector": "#item", "term_end": 8, "evidence": "Source term precedes its definition."}], "lists": []}
+    soup = BeautifulSoup(export(bundle, lambda r: r.update(structure=structure)).read_bytes(), "lxml")
+    definition = soup.find(id="item")
+    assert definition.select_one('.st-definition-term').get_text() == "verifier"
+    assert definition.select_one('.st-definition-description').get_text() == "\n  두 요청을 연결하는 값입니다."
+    assert definition.get_text() == "verifier\n  두 요청을 연결하는 값입니다."
+    assert str(definition.find(id="term")) == '<a href="#section-1" id="term">verifier</a>'
+    assert soup.find(id="code").get_text() == "GET /?a=1&b=2 HTTP/1.1\n+------------------------------+\n| Client             Server    |\n+------------------------------+"
+    manifest = json.loads((bundle[2] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest['structure'] == structure
+
+
+def test_reviewed_lists_keep_child_under_parent_and_groups_separate(bundle):
+    _replace_reviewed_item(bundle,
+        '<p id="item">4. 다음 중 하나입니다.</p>\n<span id="gap"><a id="old"></a></span>'
+        '<p id="child">4a. 응답을 관찰합니다.</p><p id="grandchild">세부 조건입니다.</p>'
+        '<p id="sibling">4b. 요청도 관찰합니다.</p><p id="last">5. 마지막 조건입니다.</p>'
+        '<p id="record">o 이름: example</p><p id="owner">o 주체: IESG</p>', [])
+    structure = {"definitions": [], "lists": [
+        {"items": [{"selector": s, "depth": d} for s, d in [("#item", 0), ("#child", 1), ("#grandchild", 2), ("#sibling", 1), ("#last", 0)]], "evidence": "Source shows parent and child indentation."},
+        {"items": [{"selector": "#record", "depth": 0}, {"selector": "#owner", "depth": 0}], "evidence": "Separate source registration record."},
+    ]}
+    soup = BeautifulSoup(export(bundle, lambda r: r.update(structure=structure)).read_bytes(), "lxml")
+    item, child, grandchild, sibling, last, record = [soup.find(id=i) for i in ['item', 'child', 'grandchild', 'sibling', 'last', 'record']]
+    parent_item = item.parent
+    assert parent_item.get('role') == 'listitem'
+    assert child.parent.parent.get('role') == 'list'
+    assert child.parent.parent.parent is parent_item
+    assert grandchild.parent.parent.parent is child.parent
+    assert sibling.parent.parent is child.parent.parent
+    assert last.parent.parent is parent_item.parent
+    assert record.parent.parent is not parent_item.parent
+    assert [t['id'] for t in parent_item.parent.find_all(id=True)] == ['item', 'gap', 'old', 'child', 'grandchild', 'sibling', 'last']
+    assert parent_item.parent.get_text() == '4. 다음 중 하나입니다.\n4a. 응답을 관찰합니다.세부 조건입니다.4b. 요청도 관찰합니다.5. 마지막 조건입니다.'
+
+
+@pytest.mark.parametrize('offset', [None, True, -1, 0, 1.5, 15, 99, '8'])
+def test_invalid_definition_boundary_does_not_publish(bundle, offset):
+    _replace_reviewed_item(bundle, '<p id="item">verifier 설명입니다.</p>', [])
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure={"definitions": [{"selector": "#item", "term_end": offset, "evidence": "Reviewed."}], "lists": []}))
+    assert not bundle[2].exists()
+
+
+def test_definition_boundary_inside_an_inline_subtree_is_rejected(bundle):
+    _replace_reviewed_item(bundle, '<p id="item"><a href="#section-1">verifier 설명</a>입니다.</p>', [])
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure={"definitions": [{"selector": "#item", "term_end": 8, "evidence": "Reviewed."}], "lists": []}))
+    assert not bundle[2].exists()
+
+
+def test_definition_boundary_ignores_comments_removed_by_sanitization(bundle):
+    _replace_reviewed_item(bundle, '<p id="item"><!--x--><a href="#section-1">verifier</a> 설명입니다.</p>', [])
+    structure = {'definitions': [{'selector': '#item', 'term_end': 8, 'evidence': 'Reviewed inline label; comments are not text.'}], 'lists': []}
+    soup = BeautifulSoup(export(bundle, lambda r: r.update(structure=structure)).read_bytes(), 'lxml')
+    assert soup.find(id='item').select_one('.st-definition-term').get_text() == 'verifier'
+    assert soup.find(id='item').select_one('.st-definition-description').get_text() == ' 설명입니다.'
+
+
+def test_existing_projected_item_gets_one_structured_owner(bundle):
+    _replace_reviewed_item(bundle, '<div id="item" role="listitem" data-wt-preformatted-depth="0">1. 항목입니다.</div>', [])
+    structure = {'definitions': [], 'lists': [{'items': [{'selector': '#item', 'depth': 0}], 'evidence': 'Reviewed original list item.'}]}
+    soup = BeautifulSoup(export(bundle, lambda r: r.update(structure=structure)).read_bytes(), 'lxml')
+    assert soup.find(id='item').parent.get('role') == 'listitem'
+    assert soup.find(id='item').get('role') is None
+    assert len(soup.select('[role="listitem"]')) == 1
+
+
+@pytest.mark.parametrize('markup', [
+    '<p id="item">   설명입니다.</p>', '<p id="item">verifier   </p>',
+    '<div id="item">verifier<p>설명입니다.</p></div>',
+    '<ul><li><p id="item">verifier 설명입니다.</p></li></ul>',
+    '<div role="list"><div role="listitem"><p id="item">verifier 설명입니다.</p></div></div>',
+])
+def test_unsafe_definition_targets_are_rejected(bundle, markup):
+    _replace_reviewed_item(bundle, markup, [])
+    offset = 3 if '   설명' in markup else 8
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure={"definitions": [{"selector": "#item", "term_end": offset, "evidence": "Reviewed."}], "lists": []}))
+    assert not bundle[2].exists()
+
+
+@pytest.mark.parametrize('structure', [
+    None, [], {}, {'definitions': [], 'lists': [], 'extra': []},
+    {'definitions': None, 'lists': []}, {'definitions': [], 'lists': {}},
+    {'definitions': [{'selector': '#item', 'term_end': 1}], 'lists': []},
+    {'definitions': [{'selector': '', 'term_end': 1, 'evidence': 'Reviewed.'}], 'lists': []},
+    {'definitions': [{'selector': '#item', 'term_end': 1, 'evidence': ' '}], 'lists': []},
+    {'definitions': [], 'lists': [{'items': [], 'evidence': 'Reviewed.'}]},
+    {'definitions': [], 'lists': [{'items': [{'selector': '#item', 'depth': 0, 'extra': 0}], 'evidence': 'Reviewed.'}]},
+])
+def test_malformed_structure_is_not_ignored(bundle, structure):
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure=structure))
+    assert not bundle[2].exists()
+
+
+@pytest.mark.parametrize('selectors,depths', [
+    (['#item', '#second'], [1, 1]), (['#item', '#second'], [0, 2]),
+    (['#item', '#second'], [0, -1]), (['#item', '#second'], [0, True]),
+    (['#item', '#second'], [0, '1']), (['#item', '#item'], [0, 0]),
+    (['#second', '#item'], [0, 0]), (['#item', '#code'], [0, 0]),
+    (['#item', '#page'], [0, 0]), (['#item', '#doc'], [0, 0]),
+])
+def test_invalid_structured_list_is_rejected(bundle, selectors, depths):
+    _replace_reviewed_item(bundle, '<p id="item">1. 첫 항목</p><p id="second">a. 다음 항목</p>', [])
+    structure = {'definitions': [], 'lists': [{'items': [{'selector': s, 'depth': d} for s, d in zip(selectors, depths)], 'evidence': 'Reviewed.'}]}
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure=structure))
+    assert not bundle[2].exists()
+
+
+@pytest.mark.parametrize('barrier', ['<p>별도 설명</p>', '<h3>제목</h3>', '<pre>literal</pre>', '<span>내용</span>'])
+def test_structured_list_cannot_swallow_unreviewed_content(bundle, barrier):
+    _replace_reviewed_item(bundle, '<p id="item">첫 항목</p>' + barrier + '<p id="second">다음 항목</p>', [])
+    structure = {'definitions': [], 'lists': [{'items': [{'selector': '#item', 'depth': 0}, {'selector': '#second', 'depth': 0}], 'evidence': 'Reviewed.'}]}
+    with pytest.raises(ValueError, match='structure'):
+        export(bundle, lambda r: r.update(structure=structure))
+    assert not bundle[2].exists()
+
+
+@pytest.mark.parametrize('collision', ['old-list', 'definition-list', 'duplicate-definition', 'duplicate-list', 'presentation'])
+def test_conflicting_structure_selections_are_rejected(bundle, collision):
+    _replace_reviewed_item(bundle, '<p id="item">verifier 설명입니다.</p>', ['#item'] if collision == 'old-list' else [])
+    definition = {'selector': '#item', 'term_end': 8, 'evidence': 'Reviewed.'}
+    group = {'items': [{'selector': '#item', 'depth': 0}], 'evidence': 'Reviewed.'}
+    structure = {'definitions': [definition], 'lists': []}
+    if collision == 'definition-list': structure['lists'] = [group]
+    if collision == 'duplicate-definition': structure['definitions'].append(definition)
+    if collision == 'duplicate-list': structure = {'definitions': [], 'lists': [group, group]}
+    def change(review):
+        review['structure'] = structure
+        if collision == 'presentation':
+            review['presentation'] = {'toc_selectors': ['#item'], 'metadata_selectors': [], 'title_selectors': [], 'navigation': False}
+    with pytest.raises(ValueError):
+        export(bundle, change)
+    assert not bundle[2].exists()
+
+
+def test_positional_edits_and_structure_resolve_before_wrapping(bundle):
+    _replace_reviewed_item(bundle,
+        '<p id="item">先頭 説明</p><p id="second">client가 검사합니다.</p><p id="third">server가 응답합니다.</p>', [])
+    def change(review):
+        review['structure'] = {'definitions': [{'selector': '#doc > p:nth-of-type(2)', 'term_end': 2, 'evidence': 'Reviewed Japanese label, not an English heuristic.'}],
+            'lists': [{'items': [{'selector': '#doc > p:nth-of-type(3)', 'depth': 0}, {'selector': '#doc > p:nth-of-type(4)', 'depth': 1}], 'evidence': 'Reviewed.'}]}
+        review['text_edits'] = [{'selector': '#doc > p:nth-of-type(4)', 'input_html_sha256': hashlib.sha256('server가 응답합니다.'.encode()).hexdigest(),
+            'replacement_html': 'server가 응답을 보냅니다.', 'source_text': 'The server responds.', 'evidence': 'AI comparison retains the actor and response.'}]
+    soup = BeautifulSoup(export(bundle, change).read_bytes(), 'lxml')
+    assert soup.find(id='item').select_one('.st-definition-term').get_text() == '先頭'
+    assert soup.find(id='third').get_text() == 'server가 응답을 보냅니다.'
+    assert soup.find(id='third').parent.parent.parent is soup.find(id='second').parent
+
+
+def test_unreviewed_structure_markers_cannot_authorize_layout(bundle):
+    _replace_reviewed_item(bundle, '<p id="item" class="st-definition st-definition-term" data-reader-structure="definition">본문은 그대로입니다.</p>', [])
+    soup = BeautifulSoup(export(bundle, lambda r: r.update(structure={'definitions': [], 'lists': []})).read_bytes(), 'lxml')
+    assert not soup.select('.st-definition,.st-definition-term')
+    assert soup.find(id='item').get_text() == '본문은 그대로입니다.'
+
+
+@pytest.mark.parametrize('width', [1440, 768, 390])
+def test_reviewed_structure_renders_separated_readable_groups(bundle, width):
+    from playwright.sync_api import sync_playwright
+    _replace_reviewed_item(bundle,
+        '<p id="item">VeryLongTechnicalParameterNameWithNoSpaces\n설명과 조건을 읽을 수 있어야 합니다.</p>'
+        '<p id="parent">4. 다음 조건</p><p id="child">4a. 하위 조건</p>'
+        '<p id="record">o 다음 등록 자료</p>', [])
+    structure = {'definitions': [{'selector': '#item', 'term_end': 42, 'evidence': 'Reviewed name boundary.'}],
+        'lists': [{'items': [{'selector': '#parent', 'depth': 0}, {'selector': '#child', 'depth': 1}], 'evidence': 'Reviewed hierarchy.'},
+                  {'items': [{'selector': '#record', 'depth': 0}], 'evidence': 'Separate record.'}]}
+    # The literal is a hand-counted label, not derived by the production splitter.
+    assert len('VeryLongTechnicalParameterNameWithNoSpaces') == 42
+    path = export(bundle, lambda r: r.update(structure=structure))
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 900})
+            page.goto(path.as_uri())
+            term = page.locator('#item .st-definition-term').bounding_box()
+            description = page.locator('#item .st-definition-description').bounding_box()
+            assert description['y'] >= term['y'] + term['height']
+            assert description['width'] >= min(width - 80, 300)
+            parent = page.locator('#parent').bounding_box()
+            child = page.locator('#child').bounding_box()
+            record = page.locator('#record').bounding_box()
+            assert child['x'] > parent['x']
+            assert record['y'] - child['y'] - child['height'] >= 16
+            assert page.locator('#child').evaluate('(el) => parseFloat(getComputedStyle(el).fontSize)') >= 16
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        finally:
+            browser.close()
+
+
 def test_contiguous_reviewed_items_keep_anchor_spacers_and_exact_text(bundle):
     _replace_reviewed_item(bundle,
         '<p id="item">o client MUST 검증합니다.</p>\n<span id="boundary"><a id="old-anchor"></a></span>\n'

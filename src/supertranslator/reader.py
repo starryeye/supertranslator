@@ -277,7 +277,7 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     review_bytes = _read(review_path)
     review = json.loads(review_bytes)
     manifest = json.loads(manifest_bytes)
-    if not isinstance(review, dict) or not _FIELDS <= set(review) or set(review) - _FIELDS - {"text_edits", "presentation"} or review["schema_version"] != "1.0":
+    if not isinstance(review, dict) or not _FIELDS <= set(review) or set(review) - _FIELDS - {"text_edits", "presentation", "structure"} or review["schema_version"] != "1.0":
         raise ReaderError("invalid reader review schema")
     if not isinstance(manifest, dict) or not isinstance(review["title"], str) or not review["title"].strip() or not isinstance(review["removals"], list) or not isinstance(review["joins"], list) or not isinstance(review["heading_levels"], dict) or not isinstance(review["list_items"], list):
         raise ReaderError("invalid reader review field types")
@@ -300,9 +300,12 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     if "presentation" in review:
         from supertranslator.reader_layout import apply_presentation, resolve_presentation
         groups = resolve_presentation(article, review["presentation"])
+    from supertranslator.reader_structure import apply_structure, resolve_structure
+    structure = resolve_structure(article, review)
     # All source-bound selectors resolve before wrappers change sibling positions.
     _group_reviewed_lists(article)
     _sanitize(article, source_url)
+    apply_structure(article, structure)
     if _preserved(article, source_url) != original_facts:
         raise ReaderError("reader sanitization changed content structure")
     if "presentation" in review:
@@ -353,6 +356,8 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
             "text_edits": review.get("text_edits", []),
             "presentation": review.get("presentation"),
         }
+        if "structure" in review:
+            output_manifest["structure"] = review["structure"]
         output_manifest["render_input_sha256"] = rendering_digest(output_manifest)
         (staging / "manifest.json").write_text(json.dumps(output_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
         (staging / "review-report.md").write_text(
