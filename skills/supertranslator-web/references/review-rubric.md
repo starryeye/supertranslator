@@ -14,6 +14,13 @@ paraphrases the source and translation, and states the correction required.
 | boundary consistency | Compare the zone opening/closing with read-only neighbors for referents, tone, transitions, and term choices. | Identify a cross-zone contradiction, dangling reference, duplicated transition, or terminology drift. |
 | protected content | Confirm exact placeholders, identifiers, URLs, commands, RFC references, and normative keywords. | Identify any changed, missing, duplicated, or newly introduced protected content. |
 
+Qualification example: “unless there is a compelling reason to allow an exception”
+permits an exception on sufficiently persuasive grounds. “불가피한 이유가 있는 경우에만”
+adds an inevitability requirement and needs correction; “예외를 허용할 만한 충분히
+설득력 있는 사유가 있는 경우” retains the source threshold. In the finding, name the
+actual condition and how its strength changed, rather than only counting preserved
+normative tokens. Conversely, do not weaken a source that really requires necessity.
+
 Record findings under the zone ID and preserve findings from all attempts. A zone passes
 only when all six dimensions pass. Any `required-fix` triggers a same-agent retry, then
 deterministic validation before another semantic review. After two retries, leave the
