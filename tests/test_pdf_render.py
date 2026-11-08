@@ -1,6 +1,7 @@
 """Independent rerender preparation over real PDFs; approvals are TEST ONLY."""
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
@@ -195,6 +196,9 @@ def test_prepare_refuses_parent_traversal_after_link(tmp_path, source_run, locat
 def test_prepare_rejects_linked_inputs_and_replacement(tmp_path, source_run, monkeypatch, case):
     source, _ = source_run
     run, output = destination(tmp_path)
+    if case == "replacement":
+        _check_replacement_refusal(source, run, output, monkeypatch)
+        return
     before = inventory(source)
     if case.endswith("ancestor"):
         target = tmp_path / "linked"
@@ -216,21 +220,100 @@ def test_prepare_rejects_linked_inputs_and_replacement(tmp_path, source_run, mon
             nonlocal changed
             if not changed:
                 changed = True
-                if case == "review-content":
-                    path = source / "review.json"
-                    path.write_bytes(path.read_bytes() + b" ")
-                else:
-                    run.rename(run.with_name("held-original"))
-                    run.mkdir()
-                    (run / "sentinel").write_bytes(b"foreign")
+                path = source / "review.json"
+                path.write_bytes(path.read_bytes() + b" ")
             return original(*args)
         monkeypatch.setattr(anchored, "_publish_new_file", replace_during_publication)
     with pytest.raises(api().PdfRenderError):
         api().prepare_pdf_render(source, run, output)
-    if case == "replacement":
-        assert (run / "sentinel").read_bytes() == b"foreign"
-        assert not (run / "review.json").exists()
     if case not in {"input-child", "review-content"}: assert inventory(source) == before
+
+
+def _check_replacement_refusal(source, run, output, monkeypatch, *, windows=None):
+    """Exercise publication with a real directory replacement attempt."""
+    import supertranslator.pdf_assemble as anchored
+    windows = os.name == "nt" if windows is None else windows
+    before = inventory(source)
+    initial = run.stat()
+    identity = (initial.st_dev, initial.st_ino)
+    held = run.with_name("held-original")
+    original = anchored._publish_new_file
+    attempted = replaced = False
+    rename_error = None
+    def replace_during_publication(*args):
+        nonlocal attempted, replaced, rename_error
+        if not attempted:
+            attempted = True
+            try:
+                run.rename(held)
+            except OSError as error:
+                rename_error = error
+                raise
+            run.mkdir()
+            (run / "sentinel").write_bytes(b"foreign")
+            replaced = True
+        return original(*args)
+    monkeypatch.setattr(anchored, "_publish_new_file", replace_during_publication)
+    with pytest.raises(api().PdfRenderError) as caught:
+        api().prepare_pdf_render(source, run, output)
+    assert attempted, "replacement attempt was not reached"
+    if rename_error is not None:
+        # Do not treat an arbitrary refusal as attack protection. Windows may
+        # refuse this directory rename while its descendants have open handles;
+        # require the exact native access-denied exception from that syscall.
+        assert windows, repr(rename_error)
+        assert isinstance(rename_error, PermissionError), repr(rename_error)
+        assert rename_error.errno == errno.EACCES, repr(rename_error)
+        assert rename_error.winerror == 5, repr(rename_error)
+        assert rename_error.filename == str(run), repr(rename_error)
+        assert rename_error.filename2 == str(held), repr(rename_error)
+        cause = caught.value
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        assert cause is rename_error
+        assert str(caught.value) == f"cannot prepare approved PDF render inputs: {rename_error}"
+        assert not replaced
+        current = run.stat()
+        assert (current.st_dev, current.st_ino) == identity
+        assert not held.exists()
+        assert not list(run.iterdir())  # Owned staging/public children rolled back.
+    else:
+        assert replaced, "replacement did not complete"
+        assert (run / "sentinel").read_bytes() == b"foreign"
+        assert {path.name for path in run.iterdir()} == {"sentinel"}
+        original_run = held.stat()
+        assert (original_run.st_dev, original_run.st_ino) == identity
+        assert not list(held.iterdir())
+    assert not (run / "review.json").exists()
+    assert not output.exists()
+    assert inventory(source) == before
+
+
+def test_replacement_refusal_checks_native_denial_rollback(tmp_path, source_run, monkeypatch):
+    """Model only the unavailable Windows rename syscall, not preparation."""
+    source, _ = source_run
+    run, output = destination(tmp_path)
+    original = Path.rename
+    def deny_held_run(path, target):
+        if path == run:
+            error = PermissionError(errno.EACCES, "Access is denied", str(path))
+            error.winerror = 5
+            error.filename2 = str(target)
+            raise error
+        return original(path, target)
+    monkeypatch.setattr(Path, "rename", deny_held_run)
+    _check_replacement_refusal(source, run, output, monkeypatch, windows=True)
+
+
+def test_replacement_refusal_cannot_pass_before_attack(tmp_path, source_run, monkeypatch):
+    """An unrelated early contract error must never count as a blocked attack."""
+    source, _ = source_run
+    run, output = destination(tmp_path)
+    def unrelated_failure(*args):
+        raise api().PdfRenderError("unrelated failure before publication")
+    monkeypatch.setattr(api(), "prepare_pdf_render", unrelated_failure)
+    with pytest.raises(AssertionError, match="replacement attempt was not reached"):
+        _check_replacement_refusal(source, run, output, monkeypatch, windows=True)
 
 
 @pytest.mark.parametrize("phase", ["copy", "publication", "interrupt"])

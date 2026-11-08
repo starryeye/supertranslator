@@ -81,7 +81,7 @@ def test_new_run_allocation_ignores_and_preserves_historical_root(tmp_path, kind
 
 
 @pytest.mark.parametrize("default_encoding", [None, "cp1252"])
-def test_new_package_resources_and_both_skill_reference_graphs_are_readable(monkeypatch, default_encoding):
+def test_new_package_resources_and_all_skill_reference_graphs_are_readable(monkeypatch, default_encoding):
     if default_encoding:
         original_open = Path.open
 
@@ -97,12 +97,25 @@ def test_new_package_resources_and_both_skill_reference_graphs_are_readable(monk
     assert assets.joinpath("font_assets", "NotoSansKR-Regular.ttf").read_bytes()[:4] == b"\x00\x01\x00\x00"
     assert assets.joinpath("font_assets", "NotoSansKR-Bold.ttf").read_bytes()[:4] == b"\x00\x01\x00\x00"
     assert b"[data-wt-preformatted-literal]" in assets.joinpath("web_assets", "preformatted-flow.css").read_bytes()
-    assert {p.name for p in (ROOT / "skills").iterdir() if p.is_dir()} == {"supertranslator-web", "supertranslator-pdf"}
-    for name in ("supertranslator-web", "supertranslator-pdf"):
+    skill_names = {"supertranslator-web", "supertranslator-pdf", "supertranslator-render", "supertranslator-review"}
+    assert {p.name for p in (ROOT / "skills").iterdir() if p.is_dir()} == skill_names
+    visited = set()
+    pending = []
+    for name in sorted(skill_names):
         skill = ROOT / "skills" / name / "SKILL.md"
         text = skill.read_text(encoding="utf-8")
         assert text.startswith(f"---\nname: {name}\n")
         references = re.findall(r"\]\(([^)]+\.md)\)", text)
         assert references
-        for reference in references:
-            assert (skill.parent / reference).read_text(encoding="utf-8").strip()
+        pending.append(skill)
+    while pending:
+        document = pending.pop().resolve()
+        if document in visited:
+            continue
+        assert document.is_relative_to(ROOT / "skills")
+        text = document.read_text(encoding="utf-8")
+        assert text.strip(), document
+        visited.add(document)
+        for reference in re.findall(r"\]\(([^)]+\.md)(?:#[^)]*)?\)", text):
+            pending.append(document.parent / reference)
+    assert visited == {path.resolve() for path in (ROOT / "skills").rglob("*.md")}

@@ -1,6 +1,6 @@
 # supertranslator
 
-`supertranslator` is a cross-platform Codex plugin for Windows and macOS with three clearly
+`supertranslator` is a cross-platform Codex plugin for Windows and macOS with four clearly
 selectable workflows:
 
 - `supertranslator-web` translates one supported public static HTML URL into an offline Korean
@@ -9,6 +9,8 @@ selectable workflows:
   or public HTTP(S) PDF URL into a reviewed Korean PDF.
 - `supertranslator-render` edits supported layout or rerenders an existing reviewed HTML
   bundle or native PDF run without retranslating it.
+- `supertranslator-review` independently compares an original and actual final HTML/PDF
+  translation for complete semantic and visual review, writing separate evidence.
 
 The translation workflows use the same Python package, immutable semantic zones, translation
 contract, glossary, validation, and master-review rubric. Format-specific commands handle
@@ -138,10 +140,31 @@ Initial translation, rerendering, existing output QA, and full comparison are se
 | “Translate this source into Korean” | `supertranslator-web` or `supertranslator-pdf` |
 | “Rerender this approved translation” | `supertranslator-render`; preserve wording and old output |
 | “Run output QA” | Existing `qa-reader` or `pdf-qa` integrity/rendering gates plus required visual evidence |
-| “Compare the entire original and actual final translation” | Separately requested full semantic and visual review, not implied by rendering or automated QA |
+| “Compare the entire original and actual final translation” | `supertranslator-review`; separately requested full semantic and visual review |
 
 Normal rendering does not invoke or depend on `supertranslator-review`. Full-comparison
 review and public publication are not automatic rendering side effects.
+
+### Independent original-to-final review
+
+Ask for a complete comparison explicitly, with or without the skill name:
+
+```text
+Compare this entire original document with the actual final Korean HTML translation,
+including meaning, all sections/appendices, and desktop/tablet/mobile layout.
+Original: /absolute/path/to/original.html
+Final: /absolute/path/to/translated/index.html
+Write a separate review report and evidence. Do not modify or publish either input.
+```
+
+The same request accepts an original/final selectable PDF pair, following logical
+content across different page counts and inspecting every page. A supplied pair
+does not need private translation-run metadata. Exact source provenance is required
+for full comparison; missing inputs or incomplete inspection are reported as gaps.
+HTML inspection covers 1440/768/390 widths and relevant opened content. Reports
+identify actual coverage, located differences, recommendations and limitations.
+Review reports do not trigger fixes, retranslation, release, publication approval,
+or deployment. Translation and rerendering do not automatically invoke this skill.
 
 ### Reading editions and blog publication
 
