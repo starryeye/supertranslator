@@ -1,14 +1,16 @@
 # supertranslator
 
-`supertranslator` is a cross-platform Codex plugin for Windows and macOS with two clearly
+`supertranslator` is a cross-platform Codex plugin for Windows and macOS with three clearly
 selectable workflows:
 
 - `supertranslator-web` translates one supported public static HTML URL into an offline Korean
   bundle while preserving its DOM, links, styles, and captured assets.
 - `supertranslator-pdf` translates one local text-selectable PDF, attached text-selectable PDF,
   or public HTTP(S) PDF URL into a reviewed Korean PDF.
+- `supertranslator-render` edits supported layout or rerenders an existing reviewed HTML
+  bundle or native PDF run without retranslating it.
 
-Both workflows use the same Python package, immutable semantic zones, translation
+The translation workflows use the same Python package, immutable semantic zones, translation
 contract, glossary, validation, and master-review rubric. Format-specific commands handle
 HTML or PDF acquisition, extraction, assembly, and QA.
 
@@ -99,6 +101,47 @@ paths and reports optional asset warnings.
 Allocation keeps absolute lexical paths and requires the run and reserved output to be
 exact children of the held `.supertranslator/runs` and `translated-pages` roots. A symlink
 or reparse ancestor, dangling link, or replacement race fails closed.
+
+### Rerendering without retranslation
+
+Ask for rendering when the translation is already approved, for example:
+
+```text
+Use supertranslator-render to add a collapsed TOC to this existing reading edition.
+Keep the approved translation and historical sentence corrections unchanged, and
+write a new output revision. The original bundle and reader review are available here: …
+```
+
+```text
+Use supertranslator-render to regenerate this reviewed PDF run with the current
+renderer, without translating again: /absolute/path/to/.supertranslator/runs/approved-run
+```
+
+HTML rendering traces a reader back to its original bound QA-passed bundle and
+reuses existing reviewed text edits exactly once. PDF rendering validates and copies
+the exact approved native input into a newly allocated run with `prepare-pdf-render`,
+then uses `pdf-assemble`, `pdf-qa prepare`, fresh all-page visual inspection, and
+`pdf-qa finalize`. Neither path overwrites the old run/output or starts translation.
+A final HTML/PDF alone may lack the private evidence required for reuse; missing or
+stale evidence is reported instead of being reconstructed by a new translation.
+
+Supported HTML changes use the reader's reviewed presentation/structure fields below.
+Typography is renderer-controlled; PDF has no arbitrary font/margin/page-size settings
+API. Unsupported requests or wording changes are reported as limitations. Each new
+output needs fresh visual inspection, even if its bytes match an earlier render.
+Browser/image-tool failure leaves QA incomplete, not approved.
+
+Initial translation, rerendering, existing output QA, and full comparison are separate:
+
+| Request | Entry point / scope |
+| --- | --- |
+| “Translate this source into Korean” | `supertranslator-web` or `supertranslator-pdf` |
+| “Rerender this approved translation” | `supertranslator-render`; preserve wording and old output |
+| “Run output QA” | Existing `qa-reader` or `pdf-qa` integrity/rendering gates plus required visual evidence |
+| “Compare the entire original and actual final translation” | Separately requested full semantic and visual review, not implied by rendering or automated QA |
+
+Normal rendering does not invoke or depend on `supertranslator-review`. Full-comparison
+review and public publication are not automatic rendering side effects.
 
 ### Reading editions and blog publication
 

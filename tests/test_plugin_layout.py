@@ -15,7 +15,7 @@ from supertranslator.cli import main
 ROOT = Path(__file__).parents[1]
 
 
-def test_manifest_discovers_both_translator_skills() -> None:
+def test_manifest_discovers_translation_and_render_skills() -> None:
     manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text("utf-8"))
     assert manifest["name"] == "supertranslator"
     assert manifest["version"] == __version__
@@ -23,9 +23,12 @@ def test_manifest_discovers_both_translator_skills() -> None:
     assert manifest["interface"]["displayName"] == "supertranslator"
     assert (ROOT / "skills/supertranslator-web").is_dir()
     assert (ROOT / "skills/supertranslator-pdf").is_dir()
+    assert (ROOT / "skills/supertranslator-render/SKILL.md").is_file()
+    for format_name in ("html", "pdf"):
+        assert (ROOT / f"skills/supertranslator-render/references/{format_name}.md").is_file()
     assert {
         path.name for path in (ROOT / "skills").iterdir() if path.is_dir()
-    } == {"supertranslator-web", "supertranslator-pdf"}
+    } == {"supertranslator-web", "supertranslator-pdf", "supertranslator-render"}
 
     searchable_metadata = " ".join(
         (
