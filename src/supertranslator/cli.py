@@ -48,6 +48,7 @@ from supertranslator.pdf_extract_transaction import extract_pdf_transaction
 from supertranslator.pdf_figure_review import PdfFigureReviewError, write_pdf_figure_review_input
 from supertranslator.pdf_models import PdfContractError, PdfSourceRecord
 from supertranslator.pdf_qa import PdfQAFailure, finalize_pdf_output, prepare_pdf_qa
+from supertranslator.pdf_render import PdfRenderError, prepare_pdf_render
 from supertranslator.pdf_review import (
     PdfSemanticReviewError,
     build_pdf_semantic_review_input,
@@ -210,7 +211,7 @@ def _hold_command_run_contract(args: argparse.Namespace) -> Iterator[object]:
 
 def _command_output_root(args: argparse.Namespace, run_dir: Path) -> str:
     command = str(args.command)
-    if command in {"pdf-acquire", "pdf-extract", "pdf-review-input", "pdf-figure-review-input", "pdf-assemble", "pdf-qa"}:
+    if command in {"pdf-acquire", "pdf-extract", "pdf-review-input", "pdf-figure-review-input", "pdf-assemble", "pdf-qa", "prepare-pdf-render"}:
         return "translated-pdfs"
     if command in {"capture", "prepare-preformatted", "materialize-preformatted", "extract", "assemble", "qa"}:
         return "translated-pages"
@@ -340,6 +341,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_run_dir(pdf_assemble)
     _add_output_dir(pdf_assemble)
     pdf_assemble.set_defaults(handler=_pdf_assemble_command)
+
+    pdf_render = subparsers.add_parser(
+        "prepare-pdf-render", help="Prepare approved PDF inputs in a fresh allocated run."
+    )
+    pdf_render.add_argument("--input-run-dir", type=Path, required=True)
+    _add_run_dir(pdf_render)
+    _add_output_dir(pdf_render)
+    pdf_render.set_defaults(handler=_prepare_pdf_render_command)
 
     pdf_qa = subparsers.add_parser(
         "pdf-qa", help="Prepare or finalize rendered PDF QA evidence."
@@ -734,6 +743,13 @@ def _assemble_selected_command(args: argparse.Namespace, source) -> None:
                 output.verify()
         except (ValueError, PdfAssemblyError, OSError) as error:
             raise AssemblyError(str(error)) from error
+
+
+def _prepare_pdf_render_command(args: argparse.Namespace) -> None:
+    try:
+        prepare_pdf_render(args.input_run_dir, args.run_dir, args.output_dir)
+    except PdfRenderError as error:
+        raise CLIContractError(str(error)) from error
 
 
 def _pdf_assemble_command(args: argparse.Namespace) -> None:
