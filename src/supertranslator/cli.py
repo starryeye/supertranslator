@@ -170,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (QAFailure, PdfQAFailure) as error:
         return _fail(command, EXIT_QA_FAILURE, error)
 
-    _emit_status(command, "ok", 0)
+    _emit_status(command, "ok", 0, review_input=getattr(namespace, "_web_review_input", None))
     return 0
 
 
@@ -213,7 +213,7 @@ def _command_output_root(args: argparse.Namespace, run_dir: Path) -> str:
     command = str(args.command)
     if command in {"pdf-acquire", "pdf-extract", "pdf-review-input", "pdf-figure-review-input", "pdf-assemble", "pdf-qa", "prepare-pdf-render"}:
         return "translated-pdfs"
-    if command in {"capture", "prepare-preformatted", "materialize-preformatted", "extract", "assemble", "qa"}:
+    if command in {"capture", "prepare-preformatted", "materialize-preformatted", "extract", "assemble", "qa", "web-review-input"}:
         return "translated-pages"
     # Shared stages run only after acquisition/capture. The exact source marker is
     # checked again by the stage while the run root remains held.
@@ -301,6 +301,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_run_dir(pdf_review_input)
     pdf_review_input.set_defaults(handler=_pdf_review_input_command)
 
+    web_review_input = subparsers.add_parser(
+        "web-review-input", help="Inventory exact web semantic-review inputs without writing files."
+    )
+    _add_run_dir(web_review_input)
+    web_review_input.set_defaults(handler=_web_review_input_command)
+
     figure_review_input = subparsers.add_parser(
         "pdf-figure-review-input", help="Inventory exact source glyphs for artwork label review."
     )
@@ -374,6 +380,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _add_run_dir(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", required=True, type=Path)
+
+
+def _web_review_input_command(args: argparse.Namespace) -> None:
+    from supertranslator.web_review import WebReviewError, hold_web_semantic_inputs
+    try:
+        with hold_web_semantic_inputs(args.run_dir) as snapshot:
+            args._web_review_input = snapshot.review_input.to_dict()
+            snapshot.verify()
+    except WebReviewError as error:
+        raise CLIContractError(str(error)) from error
 
 
 def _add_output_dir(parser: argparse.ArgumentParser) -> None:
@@ -993,29 +1009,41 @@ def _read_zones(run_dir: Path, unit_inputs: Any = None) -> list[Zone]:
                     raise ValueError("zone must be an object")
             except (ValueError, UnicodeError) as error:
                 raise CLIContractError(f"invalid held PDF zone: {error}") from error
-        try:
-            zone = Zone(
-                id=_string(data, "id", path),
-                heading_path=_string_list(data, "heading_path", path),
-                target_ids=_string_list(data, "target_ids", path),
-                context_before_ids=_string_list(data, "context_before_ids", path),
-                context_after_ids=_string_list(data, "context_after_ids", path),
-                attempt=_integer(data, "attempt", path),
-                expected_tokens=_string_sequence_mapping(data, "expected_tokens", path),
-            )
-        except ZoneContractError as error:
-            raise CLIContractError(f"invalid zone file {path}: {error}") from error
-        if path.stem != zone.id:
-            raise CLIContractError(
-                f"zone filename {path.name} does not match embedded ID {zone.id}"
-            )
-        zones.append(zone)
+        zones.append(_zone_from_value(data, path))
     return zones
+
+
+def _zone_from_value(data: Mapping[str, Any], path: Path) -> Zone:
+    """Parse an existing zone record, including held-byte consumers."""
+    try:
+        zone = Zone(
+            id=_string(data, "id", path),
+            heading_path=_string_list(data, "heading_path", path),
+            target_ids=_string_list(data, "target_ids", path),
+            context_before_ids=_string_list(data, "context_before_ids", path),
+            context_after_ids=_string_list(data, "context_after_ids", path),
+            attempt=_integer(data, "attempt", path),
+            expected_tokens=_string_sequence_mapping(data, "expected_tokens", path),
+        )
+    except ZoneContractError as error:
+        raise CLIContractError(f"invalid zone file {path}: {error}") from error
+    if path.stem != zone.id:
+        raise CLIContractError(
+            f"zone filename {path.name} does not match embedded ID {zone.id}"
+        )
+    return zone
 
 
 def _read_capture(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "capture.json"
     data = _read_json_object(path)
+    return _capture_from_value(data, path)
+
+
+def _capture_from_value(
+    data: Mapping[str, Any], path: Path, *, payloads: Mapping[str, bytes] | None = None
+) -> dict[str, Any]:
+    """Validate capture metadata against path bytes or a caller's held byte set."""
     if set(data) != _CAPTURE_FIELDS:
         raise CLIContractError(f"capture metadata fields must be exactly {sorted(_CAPTURE_FIELDS)}: {path}")
     captured_at = _string(data, "captured_at", path)
@@ -1053,9 +1081,13 @@ def _read_capture(run_dir: Path) -> dict[str, Any]:
     if any(_SHA256_PATTERN.fullmatch(value) is None for value in fingerprints.values()):
         raise CLIContractError(f"capture fingerprints must be lowercase SHA-256 values: {path}")
     for relative_path, expected_digest in fingerprints.items():
-        captured = run_dir / relative_path
-        _require_safe_file(captured)
-        if _sha256_file(captured) != expected_digest:
+        if payloads is None:
+            captured = path.parent / relative_path
+            _require_safe_file(captured)
+            actual_digest = _sha256_file(captured)
+        else:
+            actual_digest = hashlib.sha256(payloads[relative_path]).hexdigest()
+        if actual_digest != expected_digest:
             raise CLIContractError(
                 f"capture fingerprint does not match file bytes: {relative_path}"
             )
@@ -1838,10 +1870,16 @@ def _fail(command: str, exit_code: int, error: Exception) -> int:
     return exit_code
 
 
-def _emit_status(command: str, status: str, exit_code: int) -> None:
+def _emit_status(
+    command: str, status: str, exit_code: int, *,
+    review_input: Mapping[str, object] | None = None,
+) -> None:
+    payload: dict[str, object] = {"command": command, "exit_code": exit_code, "status": status}
+    if review_input is not None:
+        payload["review_input"] = dict(review_input)
     print(
         json.dumps(
-            {"command": command, "exit_code": exit_code, "status": status},
+            payload,
             ensure_ascii=False,
             sort_keys=True,
         )

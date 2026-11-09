@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+import io
 import json
 from pathlib import Path
 import re
+from typing import TextIO
 
 from supertranslator.models import Segment, Translation
 from supertranslator.zones import Zone
+from supertranslator.preformatted_contract import canonical_loads
 
 
 _TOKEN_PATTERN = re.compile(r"⟦WT:\d{6}⟧")
@@ -75,6 +78,29 @@ def merge_translations(
     result_dir: Path,
 ) -> dict[str, Translation]:
     """Load one JSONL file per zone and return targets in source order."""
+    return _merge_translations(
+        segments, zones,
+        lambda zone: _read_zone_records(Path(result_dir) / f"{zone.id}.jsonl"),
+    )
+
+
+def merge_translation_payloads(
+    segments: Sequence[Segment], zones: Sequence[Zone], payloads: Mapping[str, bytes]
+) -> dict[str, Translation]:
+    """Validate held exact zone bytes without reopening their filesystem names."""
+    return _merge_translations(
+        segments, zones,
+        lambda zone: _parse_zone_records(
+            io.StringIO(payloads[f"translations/{zone.id}.jsonl"].decode("utf-8")),
+            f"{zone.id}.jsonl", strict=True,
+        ),
+    )
+
+
+def _merge_translations(
+    segments: Sequence[Segment], zones: Sequence[Zone],
+    load_records: Callable[[Zone], list[Translation]],
+) -> dict[str, Translation]:
     ordered_segments = list(segments)
     target_segments = [item for item in ordered_segments if item.target]
     target_ids = _validated_string_ids(
@@ -104,11 +130,9 @@ def merge_translations(
         item.id: tuple(token.token for token in item.protected)
         for item in target_segments
     }
-    result_dir = Path(result_dir)
     merged: dict[str, Translation] = {}
     for zone in zones:
-        path = result_dir / f"{zone.id}.jsonl"
-        records = _read_zone_records(path)
+        records = load_records(zone)
         validation_zone = replace(
             zone,
             expected_tokens={
@@ -141,32 +165,31 @@ def _read_zone_records(path: Path) -> list[Translation]:
     if not path.is_file():
         raise TranslationContractError(f"missing zone result file: {path}")
 
-    records: list[Translation] = []
     try:
         with path.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise TranslationContractError(
-                        f"{path.name} line {line_number}: invalid JSON"
-                    ) from error
-                if not isinstance(data, Mapping):
-                    raise TranslationContractError(
-                        f"{path.name} line {line_number}: record must be an object"
-                    )
-                try:
-                    records.append(Translation.from_dict(data))
-                except ValueError as error:
-                    raise TranslationContractError(
-                        f"{path.name} line {line_number}: {error}"
-                    ) from error
+            return _parse_zone_records(stream, path.name)
     except OSError as error:
         raise TranslationContractError(
             f"cannot read zone result file {path}: {error}"
         ) from error
+
+
+def _parse_zone_records(stream: TextIO, label: str, *, strict: bool = False) -> list[Translation]:
+    records: list[Translation] = []
+    for line_number, line in enumerate(stream, start=1):
+        if not line.strip():
+            continue
+        try:
+            data = canonical_loads(line) if strict else json.loads(line)
+        except ValueError as error:
+            detail = str(error) if strict else "invalid JSON"
+            raise TranslationContractError(f"{label} line {line_number}: {detail}") from error
+        if not isinstance(data, Mapping):
+            raise TranslationContractError(f"{label} line {line_number}: record must be an object")
+        try:
+            records.append(Translation.from_dict(data))
+        except ValueError as error:
+            raise TranslationContractError(f"{label} line {line_number}: {error}") from error
     return records
 
 

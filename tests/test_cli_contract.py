@@ -34,6 +34,14 @@ from supertranslator.zones import Zone
 from tests.pdf_fixtures import make_image_only_pdf, make_text_pdf
 
 
+@pytest.mark.parametrize("native_argument", ["/tmp/검토 with spaces", r"C:\workspace\검토 with spaces"])
+def test_web_review_input_parser_routes_explicitly_to_web_root(tmp_path, native_argument):
+    args = cli_module._build_parser().parse_args(["web-review-input", "--run-dir", native_argument])
+    assert args.run_dir == Path(native_argument)
+    (tmp_path / "source.json").write_text("{}")
+    assert cli_module._command_output_root(args, tmp_path) == "translated-pages"
+
+
 def test_pdf_figure_input_command_routes_native_unicode_paths_to_pdf_root(tmp_path, capsys):
     from tests.pdf_figure_review_fixtures import make_figure_review_run
     run, output = make_figure_review_run(tmp_path)
