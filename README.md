@@ -177,6 +177,11 @@ review, without modifying the source capture or historical output:
 <PYTHON> -m supertranslator qa-reader --output-dir <new-reader-directory>
 ```
 
+New reader exports require the source bundle's `web_integrity.html_sha256` to match
+its exact `index.html` bytes, in addition to passing QA and the reader review.
+`web_integrity` contains exactly `schema_version: "1.0"`, `semantic_input_sha256`,
+`approval_sha256`, and `html_sha256` (lowercase SHA-256 digests).
+
 `reader-review.json` has exactly these fields:
 
 ```json
@@ -349,6 +354,20 @@ PDF allocation applies the same held-root contract with `translated-pdfs`. The w
 accepts a standalone uncaptioned figure and preserves it once, while orphan or ambiguous
 captions fail. An unreconstructed visible link is only a warning when its
 visible label and destination remain in both final artifacts; missing visible text fails.
+
+For web runs, once translations and glossary are final, run the read-only
+`web-review-input --run-dir <run>` command. The existing master AI reviews those exact
+inventoried inputs and writes `web-review.json` with exactly `semantic_input_sha256`,
+`unresolved_required`, `retries`, and `section_findings`; all six review dimensions remain
+required. Assembly and QA require resolved approval for that same digest. Successful QA
+binds the exact final HTML in `web_integrity`. A rejected re-QA keeps recoverable prior
+evidence private, not as a current public PASS.
+
+Legacy web `review.json` and completed artifacts are preserved unchanged. Existing
+translations may be reused, but an unbound approval cannot be automatically upgraded:
+fresh AI review of the existing exact private inputs and QA are required for new
+assembly, QA or reader export. Missing private inputs are diagnosed, not recreated.
+Already reviewed reader artifacts keep their existing QA/hash contracts.
 
 After translations and glossary content are final, `pdf-review-input` creates canonical
 semantic-review evidence. PDF `review.json` carries its `semantic_input_sha256`, binding

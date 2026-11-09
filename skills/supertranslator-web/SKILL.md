@@ -156,7 +156,16 @@ preserving spaces and non-ASCII characters.
    Merge glossary observations into the canonical glossary only after master judgment.
    Normalize first-use glossary placement document-wide: retain each English technical
    term everywhere and allow its Korean gloss only at the earliest eligible occurrence.
-   Write `review.json` with `retries` exactly covering every planned zone and mapping to
+   After those inputs are final, prepare their read-only exact-byte inventory:
+
+   ```text
+   <python> -m supertranslator web-review-input --run-dir <work-dir>
+   ```
+
+   Inspect the returned `review_input` file inventory and review those exact source,
+   assignment, translation, glossary and applicable normalization inputs in the existing
+   master AI review. Write `web-review.json`, copying its `semantic_input_sha256`, with
+   `retries` exactly covering every planned zone and mapping to
    integers from 0 through 2. section_findings must exactly cover every planned zone.
    Each value is an array of six objects with exactly `dimension`, `verdict`, and
    non-empty `evidence`; use each canonical dimension exactly once. A verdict is only
@@ -165,6 +174,7 @@ preserving spaces and non-ASCII characters.
 
    ```json
    {
+     "semantic_input_sha256": "<review_input.semantic_input_sha256>",
      "unresolved_required": [],
      "retries": {"zone-001": 1},
      "section_findings": {
@@ -179,6 +189,12 @@ preserving spaces and non-ASCII characters.
      }
    }
    ```
+
+   If inputs change after review, prepare a new inventory and perform the AI review
+   again; copying a new digest into old decisions is not approval. Legacy `review.json`
+   stays untouched. Reuse its translations, but obtain a fresh bound AI review and QA
+   before new assembly/export. Preserve old completed artifacts; diagnose missing
+   private inputs without implicit extraction or translation.
 
 8. Only when deterministic validation passes and every rubric verdict is `pass`, run:
 

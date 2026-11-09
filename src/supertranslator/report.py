@@ -93,6 +93,7 @@ def _fallback_provenance(result: QAResult) -> ManifestProvenance:
         else [],
         retries={},
         normalization=result.normalization,
+        web_integrity=result.web_integrity,
     )
 
 

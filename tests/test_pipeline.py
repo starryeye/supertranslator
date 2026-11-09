@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 import shutil
 import threading
+from contextlib import redirect_stdout
+import io
 from urllib.parse import urljoin
 
 import pytest
@@ -23,6 +25,15 @@ import supertranslator.network as network_module
 from supertranslator.capture import CaptureError, capture_page
 from supertranslator.cli import main
 from supertranslator.models import MasterReview, QAResult
+from tests.web_review_fixtures import approve_web_run
+
+
+def _approve_fixture(run_dir):
+    """TEST ONLY: complete exact input assignments before synthetic approval."""
+    (run_dir / "document-summary.txt").write_text("TEST ONLY synthetic fixture source and translation.", encoding="utf-8")
+    with redirect_stdout(io.StringIO()):
+        assert main(["prepare-assignments", "--run-dir", str(run_dir)]) == 0
+    return approve_web_run(run_dir)
 
 
 TRANSLATED_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "translated"
@@ -177,6 +188,7 @@ def copy_reviewed_fixture_translations(run_dir: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    _approve_fixture(run_dir)
 
 
 def test_fixture_pipeline_builds_complete_offline_bundle(
@@ -228,6 +240,7 @@ def test_fixture_pipeline_builds_complete_offline_bundle(
     assert 'Preformatted normalization' not in (output_dir / 'review-report.md').read_text('utf-8')
     assert not (run_dir / 'preformatted').exists()
     assert set(manifest) == {
+        "web_integrity",
         "assets",
         "browser_metrics",
         "capture",
@@ -374,6 +387,7 @@ def test_real_assembly_qa_preserves_link_urls_keywords_and_head_attributes(
         "section_findings": {"zone-001": reviewed_zone_findings()},
     }) + "\n", encoding="utf-8")
     assert main(["validate-translations", "--run-dir", str(run_dir)]) == 0
+    _approve_fixture(run_dir)
     assert main(["assemble", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
     assert source.read_bytes() == source_after_extract
     assert main(["qa", "--run-dir", str(run_dir), "--output-dir", str(output_dir)]) == 0
@@ -485,6 +499,7 @@ def write_snapshot_translations_and_review(snapshot_dir: Path, run_dir: Path) ->
     (run_dir / "review.json").write_text(
         json.dumps(review, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    _approve_fixture(run_dir)
 
 
 @pytest.mark.parametrize(
@@ -792,6 +807,8 @@ def write_empty_run_contract(run_dir: Path) -> None:
     (run_dir / "zones").mkdir()
     (run_dir / "translations").mkdir()
     (run_dir / "glossary.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "assignments").mkdir()
+    approve_web_run(run_dir)
 
 
 def write_single_segment_run_contract(run_dir: Path) -> None:
@@ -824,6 +841,8 @@ def write_single_segment_run_contract(run_dir: Path) -> None:
     (run_dir / "translations" / "zone-001.jsonl").write_text(
         '{"segment_id":"seg-000001","text":"OAuth"}\n', encoding="utf-8"
     )
+    # Also used before assignment-generation failure tests; leave them fresh.
+    (run_dir / "assignments").rmdir()
 
 
 def test_zone_filename_must_match_embedded_zone_id(
@@ -1103,8 +1122,9 @@ def test_qa_rejects_review_that_does_not_cover_every_zone(
 ) -> None:
     run_dir, allocated_output_dir = _web_cli_paths(tmp_path)
     write_single_segment_run_contract(run_dir)
-    (run_dir / "review.json").write_text(
-        '{"unresolved_required":[],"retries":{},"section_findings":{}}\n',
+    binding = _approve_fixture(run_dir)["semantic_input_sha256"]
+    (run_dir / "web-review.json").write_text(
+        json.dumps({"semantic_input_sha256": binding, "unresolved_required": [], "retries": {}, "section_findings": {}}),
         encoding="utf-8",
     )
 
@@ -1154,8 +1174,9 @@ def test_qa_rejects_invalid_review_zone_evidence(
 ) -> None:
     run_dir, allocated_output_dir = _web_cli_paths(tmp_path)
     write_single_segment_run_contract(run_dir)
-    (run_dir / "review.json").write_text(
-        json.dumps(review) + "\n", encoding="utf-8"
+    binding = _approve_fixture(run_dir)["semantic_input_sha256"]
+    (run_dir / "web-review.json").write_text(
+        json.dumps({**review, "semantic_input_sha256": binding}) + "\n", encoding="utf-8"
     )
 
     assert (
@@ -1352,7 +1373,7 @@ def test_missing_captured_source_is_a_contract_failure(
     assert_error_status(capsys, command=command, exit_code=4)
 
 
-def test_failed_qa_writes_reports_and_returns_qa_exit_code_and_one_status(
+def test_missing_output_qa_publishes_no_evidence_and_returns_qa_exit_code_and_one_status(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     run_dir, allocated_output_dir = _web_cli_paths(tmp_path)
@@ -1376,10 +1397,8 @@ def test_failed_qa_writes_reports_and_returns_qa_exit_code_and_one_status(
         == 6
     )
     assert_error_status(capsys, command="qa", exit_code=6)
-    assert json.loads((output_dir / "manifest.json").read_text("utf-8"))[
-        "qa_status"
-    ] == "failed"
-    assert (output_dir / "review-report.md").is_file()
+    assert not (output_dir / "manifest.json").exists()
+    assert not (output_dir / "review-report.md").exists()
 
 
 def test_qa_report_io_failure_returns_qa_exit_code_and_one_status(

@@ -4,13 +4,253 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 
 from supertranslator.cli import main
-from tests.web_review_fixtures import make_reviewable_web_run
+from tests.web_review_fixtures import make_reviewable_web_run, approve_web_run
+
+
+@pytest.mark.parametrize("preformatted", [False, True])
+@pytest.mark.parametrize("damage", ["legacy", "digest", "unresolved", "extra", "duplicate"])
+def test_web_assembly_and_qa_refuse_unbound_or_stale_approval(tmp_path, capsys, preformatted, damage):
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted)
+    review = approve_web_run(run)
+    path = run / "web-review.json"
+    if damage == "legacy":
+        path.rename(run / "review.json")
+    elif damage == "digest":
+        review["semantic_input_sha256"] = "0" * 64
+        path.write_text(json.dumps(review), encoding="utf-8")
+    elif damage == "unresolved":
+        review["section_findings"]["zone-001"][0]["verdict"] = "required-fix"
+        review["unresolved_required"] = ["zone-001:semantic_fidelity"]
+        path.write_text(json.dumps(review), encoding="utf-8")
+    elif damage == "extra":
+        review["extra"] = True
+        path.write_text(json.dumps(review), encoding="utf-8")
+    else:
+        path.write_text(path.read_text().replace('{', '{"retries":{},', 1), encoding="utf-8")
+    before = inventory(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    assert main(["assemble", "--run-dir", str(run), "--output-dir", str(output)]) != 0
+    assert not output.exists()
+    assert inventory(run) == before
+    output.mkdir()
+    (output / "index.html").write_bytes(b"<html><body>Old output</body></html>")
+    old = {"manifest.json": b'{"qa_status":"passed"}', "review-report.md": b"**PASS** old"}
+    for name, payload in old.items():
+        (output / name).write_bytes(payload)
+    assert main(["qa", "--run-dir", str(run), "--output-dir", str(output)]) != 0
+    assert not (output / "manifest.json").exists()
+    assert not (output / "review-report.md").exists()
+    for name, payload in old.items():
+        assert any(p.read_bytes() == payload for p in output.glob(f".qa-evidence-*/prior-{name}"))
+    assert {name: value for name, value in inventory(run).items() if not name.startswith("qa-screenshots/")} == before
+
+
+@pytest.mark.parametrize("preformatted", [False, True])
+def test_web_approval_is_held_and_excluded_from_semantic_digest(tmp_path, preformatted):
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted)
+    review = approve_web_run(run)
+    with pytest.raises(api().WebReviewError, match="changed"):
+        with api().hold_web_semantic_inputs(run) as snapshot:
+            assert snapshot.review_input.semantic_input_sha256 == review["semantic_input_sha256"]
+            with api().hold_web_semantic_approval(snapshot) as approval:
+                assert approval.review.unresolved_required == []
+                assert approval.approval_sha256 == hashlib.sha256((run / "web-review.json").read_bytes()).hexdigest()
+                path = run / "web-review.json"
+                path.write_bytes(path.read_bytes() + b" ")
+                approval.verify()
+
+
+@pytest.mark.parametrize("preformatted", [False, True])
+@pytest.mark.parametrize("relative", ["source.html", "translations/zone-001.jsonl", "web-review.json"])
+@pytest.mark.parametrize("stage", ["before-consumption", "after-report", "after-publication"])
+def test_web_snapshot_consumption_rejects_replacement_and_late_mutation(tmp_path, monkeypatch, preformatted, relative, stage):
+    import supertranslator.cli as cli
+    import supertranslator.qa as qa
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted)
+    approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    assert main(["assemble", "--run-dir", str(run), "--output-dir", str(output)]) == 0
+    old = {"manifest.json": b'{"qa_status":"passed"}', "review-report.md": b"**PASS** prior"}
+    for name, payload in old.items():
+        (output / name).write_bytes(payload)
+    foreign = output / "foreign.txt"
+    foreign.write_bytes(b"foreign stays")
+    monkeypatch.setattr(qa, "_run_browser_checks", lambda *args: ([], [], [], {}))
+    path = run / relative
+    def mutate():
+        if relative == "source.html":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(path.read_bytes())
+            os.replace(replacement, path)
+        else:
+            path.write_bytes(path.read_bytes() + b" ")
+    if stage == "before-consumption":
+        real = cli.run_qa
+        def consume(inputs):
+            mutate()
+            return real(inputs)
+        monkeypatch.setattr(cli, "run_qa", consume)
+    elif stage == "after-report":
+        real = cli.render_review_report
+        def report(*args):
+            result = real(*args)
+            mutate()
+            return result
+        monkeypatch.setattr(cli, "render_review_report", report)
+    else:
+        real = cli._publish_qa_evidence
+        def publish(*args, **kwargs):
+            real(*args, **kwargs)
+            mutate()
+        monkeypatch.setattr(cli, "_publish_qa_evidence", publish)
+    assert main(["qa", "--run-dir", str(run), "--output-dir", str(output)]) != 0
+    assert not (output / "manifest.json").exists()
+    assert not (output / "review-report.md").exists()
+    assert foreign.read_bytes() == b"foreign stays"
+    for name, payload in old.items():
+        assert any(p.read_bytes() == payload for p in output.glob(f".qa-evidence-*/prior-{name}"))
+
+
+@pytest.mark.parametrize("preformatted", [False, True])
+def test_production_consumers_parse_held_source_and_bind_exact_html(tmp_path, monkeypatch, preformatted):
+    import supertranslator.cli as cli
+    import supertranslator.qa as qa
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted)
+    review = approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    real_read_text = Path.read_text
+    def no_source_reopen(path, *args, **kwargs):
+        assert path.name not in {"source.html", "preformatted-source.html", "index.html"}, "HTML pathname was reopened"
+        return real_read_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", no_source_reopen)
+    assert main(["assemble", "--run-dir", str(run), "--output-dir", str(output)]) == 0
+    monkeypatch.setattr(qa, "_run_browser_checks", lambda *args: ([], [], [], {}))
+    assert main(["qa", "--run-dir", str(run), "--output-dir", str(output)]) == 0
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert manifest["web_integrity"] == {"schema_version": "1.0", "semantic_input_sha256": review["semantic_input_sha256"],
+        "approval_sha256": hashlib.sha256((run / "web-review.json").read_bytes()).hexdigest(),
+        "html_sha256": hashlib.sha256((output / "index.html").read_bytes()).hexdigest()}
+
+
+@pytest.mark.parametrize("preformatted", [False, True])
+@pytest.mark.parametrize("relative", ["source.html", "translations/zone-001.jsonl", "web-review.json"])
+@pytest.mark.parametrize("stage", ["before-consumption", "during-staging"])
+def test_assembly_revalidates_held_inputs_before_bundle_publication(tmp_path, monkeypatch, preformatted, relative, stage):
+    import supertranslator.cli as cli
+    import supertranslator.assemble as assembly
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted)
+    approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    def mutate():
+        path = run / relative
+        path.write_bytes(path.read_bytes() + b" ")
+    if stage == "before-consumption":
+        real = cli.assemble_page
+        def consume(*args, **kwargs):
+            mutate()
+            return real(*args, **kwargs)
+        monkeypatch.setattr(cli, "assemble_page", consume)
+    else:
+        real = assembly._copy_assets
+        def copy(*args):
+            real(*args)
+            mutate()
+        monkeypatch.setattr(assembly, "_copy_assets", copy)
+    assert main(["assemble", "--run-dir", str(run), "--output-dir", str(output)]) != 0
+    assert not output.exists()
+    assert not list(output.parent.glob(".*.assembling-*"))
+
+
+def test_held_output_retains_safe_utf8_qa_diagnostic(tmp_path, monkeypatch):
+    from supertranslator.qa import run_qa
+    from supertranslator.models import QAInputs, MasterReview
+    source = tmp_path / "source.html"
+    source.write_bytes(b"<html><body></body></html>")
+    output = tmp_path / "index.html"
+    output.write_bytes(b"\xff")
+    result = run_qa(QAInputs(source, output, "https://example.com/", set(), set(), [], [],
+        tmp_path / "screenshots", MasterReview([], {}, {}),
+        source_bytes=source.read_bytes(), output_bytes=output.read_bytes()))
+    assert not result.passed
+    assert "output-html-unreadable" in {finding.code for finding in result.required_findings}
+    assert result.web_integrity is None
+
+
+def test_documented_web_review_recipe_runs_with_bound_synthetic_inputs(tmp_path, capsys):
+    """CLI/API recipe validation only; synthetic approval is not AI quality evidence."""
+    run = make_reviewable_web_run(tmp_path)
+    output = run.parents[2] / "translated-pages" / run.name
+    skill = Path(__file__).parents[1] / "skills/supertranslator-web/SKILL.md"
+    commands = {}
+    values = {"<work-dir>": str(run), "<output-dir>": str(output)}
+    for line in skill.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith("<python> -m supertranslator "):
+            command = [values.get(arg, arg) for arg in shlex.split(line.strip())[3:]]
+            commands[command[0]] = command
+    assert main(commands["web-review-input"]) == 0
+    prepared = json.loads(capsys.readouterr().out)["review_input"]
+    approval = approve_web_run(run)
+    assert approval["semantic_input_sha256"] == prepared["semantic_input_sha256"]
+    assert main(commands["assemble"]) == 0
+    assert main(commands["qa"]) == 0
+    manifest = json.loads((output / "manifest.json").read_bytes())
+    assert manifest["qa_status"] == "passed"
+    assert manifest["web_integrity"]["semantic_input_sha256"] == prepared["semantic_input_sha256"]
+
+
+@pytest.mark.parametrize("failure_point", ["publication-boundary", "report-write", "manifest-publication"])
+def test_ordinary_web_qa_publication_io_failure_keeps_qa_exit_class(tmp_path, monkeypatch, capsys, failure_point):
+    """An output I/O failure must survive the actual nested semantic leases as QA failure."""
+    import supertranslator.cli as cli
+    import supertranslator.qa as qa
+    import supertranslator.pdf_assemble as storage
+    import supertranslator.pdf_extract_transaction as transaction_files
+    run = make_reviewable_web_run(tmp_path)
+    approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    assert main(["assemble", "--run-dir", str(run), "--output-dir", str(output)]) == 0
+    old = {"manifest.json": b'{"qa_status":"passed"}', "review-report.md": b"**PASS** prior"}
+    for name, payload in old.items():
+        (output / name).write_bytes(payload)
+    (output / "foreign.txt").write_bytes(b"foreign stays")
+    monkeypatch.setattr(qa, "_run_browser_checks", lambda *args: ([], [], [], {}))
+    marker = "TEST ONLY output publication I/O failure"
+    if failure_point == "publication-boundary":
+        def fail(*args, **kwargs):
+            raise OSError(marker)
+        monkeypatch.setattr(cli, "_publish_qa_evidence", fail)
+    elif failure_point == "report-write":
+        real = transaction_files._write_private_file
+        def write(directory, name, payload):
+            if name == "new-review-report.md":
+                raise OSError(marker)
+            return real(directory, name, payload)
+        monkeypatch.setattr(transaction_files, "_write_private_file", write)
+    else:
+        real = storage._publish_new_file
+        def publish(source, source_name, destination, destination_name):
+            if destination_name == "manifest.json":
+                raise OSError(marker)
+            return real(source, source_name, destination, destination_name)
+        monkeypatch.setattr(storage, "_publish_new_file", publish)
+    capsys.readouterr()
+    assert main(["qa", "--run-dir", str(run), "--output-dir", str(output)]) == 6
+    status = capsys.readouterr()
+    assert json.loads(status.out) == {"command": "qa", "exit_code": 6, "status": "error"}
+    assert marker in status.err
+    assert "fresh AI semantic review" not in status.err
+    assert not (output / "manifest.json").exists()
+    assert not (output / "review-report.md").exists()
+    assert (output / "foreign.txt").read_bytes() == b"foreign stays"
+    for name, payload in old.items():
+        assert any(p.read_bytes() == payload for p in output.glob(f".qa-evidence-*/prior-{name}"))
 
 
 def api():

@@ -5,6 +5,11 @@
 Work from the original QA-passed translated bundle: `index.html`,
 `manifest.json` (`qa_status: "passed"`, `required_findings: []`, public
 `source_url`), `review-report.md`, and required `assets/`. Keep its bytes unchanged.
+The source manifest must carry strict `web_integrity` evidence (`schema_version: "1.0"`,
+`semantic_input_sha256`, `approval_sha256`, `html_sha256`); its HTML digest must match
+the exact original `index.html` bytes. A legacy missing binding needs fresh AI semantic
+review of the existing exact private inputs, then QA, before a new export. Preserve old
+artifacts and translations; do not manufacture a binding from the old final HTML.
 
 For an existing reading edition, read its `manifest.json`, `reader-review.json`,
 `input-manifest.json`, and `input-review-report.md`. Find the original bundle

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import os
 from pathlib import Path
 import re
@@ -63,6 +63,9 @@ def assemble_page(
     glossary: Mapping[str, str],
     output_dir: Path,
     source_url: str,
+    *,
+    source_bytes: bytes | None = None,
+    revalidate: Callable[[], None] | None = None,
 ) -> Path:
     """Build an offline HTML bundle without mutating the captured source."""
     source_html = Path(source_html)
@@ -78,7 +81,7 @@ def assemble_page(
     except (TypeError, ValueError) as error:
         raise AssemblyError("source URL must be a public HTTP(S) URL") from error
 
-    source_text = _read_source(source_html)
+    source_text = _read_source(source_html, source_bytes)
     soup = BeautifulSoup(source_text, "lxml")
     if soup.html is None or soup.head is None or soup.body is None:
         raise AssemblyError("source HTML must contain html, head, and body elements")
@@ -131,12 +134,12 @@ def assemble_page(
 
     _add_offline_head_metadata(soup)
     _add_attribution(soup, final_source_url)
-    return _publish_bundle(source_html.parent, soup, output_dir)
+    return _publish_bundle(source_html.parent, soup, output_dir, revalidate=revalidate)
 
 
-def _read_source(source_html: Path) -> str:
+def _read_source(source_html: Path, source_bytes: bytes | None = None) -> str:
     try:
-        text = source_html.read_text(encoding="utf-8")
+        text = source_html.read_text(encoding="utf-8") if source_bytes is None else source_bytes.decode("utf-8")
     except (OSError, UnicodeError) as error:
         raise AssemblyError(f"source HTML cannot be read as UTF-8: {error}") from error
     lowered = text.lower()
@@ -378,7 +381,8 @@ def _add_attribution(soup: BeautifulSoup, source_url: str) -> None:
     soup.body.append(attribution)
 
 
-def _publish_bundle(source_root: Path, soup: BeautifulSoup, output_dir: Path) -> Path:
+def _publish_bundle(source_root: Path, soup: BeautifulSoup, output_dir: Path, *,
+                    revalidate: Callable[[], None] | None = None) -> Path:
     output_parent = output_dir.parent
     output_parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.assembling-", dir=output_parent))
@@ -390,11 +394,13 @@ def _publish_bundle(source_root: Path, soup: BeautifulSoup, output_dir: Path) ->
         if charset_offset < 0 or charset_offset >= 1024:
             raise AssemblyError("UTF-8 charset declaration must occur in the first 1024 bytes")
         index.write_bytes(serialized)
+        if revalidate is not None:
+            revalidate()
         try:
             temporary.rename(output_dir)
         except FileExistsError as error:
             raise AssemblyError(f"output directory already exists: {output_dir}") from error
-    except AssemblyError:
+    except (AssemblyError, ValueError):
         shutil.rmtree(temporary, ignore_errors=True)
         raise
     except OSError as error:

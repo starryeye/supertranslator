@@ -59,3 +59,20 @@ def make_reviewable_web_run(root: Path, *, preformatted: bool = False) -> Path:
         (run / "translations" / (path.stem + ".jsonl")).write_text(
             "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records), encoding="utf-8")
     return run
+
+
+def approve_web_run(run: Path) -> dict:
+    """TEST ONLY approval for exact synthetic inputs, never production review."""
+    from supertranslator.web_review import hold_web_semantic_inputs
+    with hold_web_semantic_inputs(run) as snapshot:
+        digest = snapshot.review_input.semantic_input_sha256
+        zone_ids = [zone.id for zone in snapshot.zones]
+    review = {"semantic_input_sha256": digest, "unresolved_required": [],
+              "retries": {zone: 0 for zone in zone_ids},
+              "section_findings": {zone: [{"dimension": dimension, "verdict": "pass",
+                  "evidence": "TEST ONLY synthetic exact-input comparison."}
+                  for dimension in ("semantic_fidelity", "qualification_preservation", "naturalness",
+                                    "terminology", "boundary_consistency", "protected_content")]
+                  for zone in zone_ids}}
+    (run / "web-review.json").write_bytes(canonical_bytes(review))
+    return review

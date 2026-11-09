@@ -11,6 +11,42 @@ import pytest
 from supertranslator.cli import main
 
 
+@pytest.mark.parametrize("evidence", [None, {}, {"schema_version": "1.0", "semantic_input_sha256": "0" * 64,
+    "approval_sha256": "1" * 64, "html_sha256": "2" * 64},
+    {"schema_version": "2.0", "semantic_input_sha256": "0" * 64, "approval_sha256": "1" * 64, "html_sha256": "2" * 64},
+    {"schema_version": "1.0", "semantic_input_sha256": "A" * 64, "approval_sha256": "1" * 64, "html_sha256": "2" * 64},
+    {"schema_version": "1.0", "semantic_input_sha256": "0" * 64, "approval_sha256": 1, "html_sha256": "2" * 64},
+    {"schema_version": "1.0", "semantic_input_sha256": "0" * 64, "approval_sha256": "1" * 64, "html_sha256": "2" * 64, "extra": True}])
+def test_reader_refuses_missing_or_mismatched_web_integrity(bundle, evidence):
+    source, _, output = bundle
+    path = source / "manifest.json"
+    manifest = json.loads(path.read_bytes())
+    if evidence is None:
+        manifest.pop("web_integrity", None)
+    else:
+        manifest["web_integrity"] = evidence
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
+    with pytest.raises(ValueError, match="web.integrity|semantic review"):
+        export(bundle)
+    assert not output.exists()
+    assert {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()} == before
+
+
+def test_reader_refuses_modified_html_even_with_fresh_reader_review(bundle):
+    source, review_path, output = bundle
+    path = source / "index.html"
+    path.write_bytes(path.read_bytes().replace("테스트 문서".encode(), "다른 문서".encode()))
+    review = json.loads(review_path.read_bytes())
+    review["input_html_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="web_integrity HTML digest mismatch"):
+        export(bundle)
+    assert path.read_bytes() == before
+    assert not output.exists()
+
+
 @pytest.fixture
 def bundle(tmp_path):
     source = tmp_path / "input"
@@ -32,6 +68,8 @@ def bundle(tmp_path):
     (source / "index.html").write_text(html, encoding="utf-8", newline="")
     (source / "manifest.json").write_text(json.dumps({
         "qa_status": "passed", "required_findings": [],
+        "web_integrity": {"schema_version": "1.0", "semantic_input_sha256": "0" * 64,
+            "approval_sha256": "1" * 64, "html_sha256": hashlib.sha256(html.encode()).hexdigest()},
         "source_url": "https://example.com/spec", "tool": {"version": "0.8.0"},
     }), encoding="utf-8", newline="")
     (source / "review-report.md").write_text("Input review", encoding="utf-8", newline="")
@@ -88,6 +126,7 @@ def _replace_reviewed_item(bundle, markup, selectors):
     item.decompose()
     data = str(soup).encode("utf-8")
     (source / "index.html").write_bytes(data)
+    _bind_synthetic_html(source, data)
     review = json.loads(review_path.read_text(encoding="utf-8"))
     review.update(input_html_sha256=hashlib.sha256(data).hexdigest(), list_items=selectors)
     review_path.write_text(json.dumps(review), encoding="utf-8", newline="")
@@ -444,6 +483,7 @@ def test_non_preformatted_print_furniture_is_archived_without_losing_anchors(bun
     source, review_path, output = bundle
     html = (source / "index.html").read_text(encoding="utf-8").replace('<pre id="page">', '<table id="page"><tr><td>').replace('Author [Page 2]</pre>', 'Author [Page 2]</td></tr></table>')
     (source / "index.html").write_text(html, encoding="utf-8", newline="")
+    _bind_synthetic_html(source, html.encode())
     data = json.loads(review_path.read_text(encoding="utf-8"))
     data["input_html_sha256"] = hashlib.sha256(html.encode()).hexdigest()
     review_path.write_text(json.dumps(data), encoding="utf-8", newline="")
@@ -526,9 +566,18 @@ def change_html(bundle, old, new):
     source, review, _ = bundle
     raw = (source / "index.html").read_text(encoding="utf-8").replace(old, new)
     (source / "index.html").write_text(raw, encoding="utf-8", newline="")
+    _bind_synthetic_html(source, raw.encode())
     data = json.loads(review.read_text(encoding="utf-8"))
     data["input_html_sha256"] = hashlib.sha256(raw.encode()).hexdigest()
     review.write_text(json.dumps(data), encoding="utf-8", newline="")
+
+
+def _bind_synthetic_html(source, payload):
+    """TEST ONLY evidence for a new authored reader fixture before export."""
+    path = source / "manifest.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["web_integrity"]["html_sha256"] = hashlib.sha256(payload).hexdigest()
+    path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 @pytest.mark.parametrize("name", ["browser-qa.json", "visual-review.json", "review-report.md"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -188,6 +189,34 @@ class QAInputs:
     translated_texts: dict[str, str] = field(default_factory=dict)
     capture_metadata: dict[str, object] = field(default_factory=dict)
     normalization: NormalizationSummary | None = None
+    source_bytes: bytes | None = None
+    output_bytes: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WebIntegrity:
+    """Exact input/approval/output binding for a successful web QA publication."""
+
+    schema_version: str
+    semantic_input_sha256: str
+    approval_sha256: str
+    html_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0" or any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                for value in (self.semantic_input_sha256, self.approval_sha256, self.html_sha256)):
+            raise ValueError("invalid web_integrity schema or SHA-256 digest")
+
+    @classmethod
+    def from_dict(cls, value: object) -> WebIntegrity:
+        fields = {"schema_version", "semantic_input_sha256", "approval_sha256", "html_sha256"}
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("web_integrity must contain exactly schema_version, semantic_input_sha256, approval_sha256, html_sha256")
+        return cls(**value)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"schema_version": self.schema_version, "semantic_input_sha256": self.semantic_input_sha256,
+                "approval_sha256": self.approval_sha256, "html_sha256": self.html_sha256}
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +231,7 @@ class QAResult:
     browser_metrics: dict[str, dict[str, object]] = field(default_factory=dict)
     capture_metadata: dict[str, object] = field(default_factory=dict)
     normalization: NormalizationSummary | None = None
+    web_integrity: WebIntegrity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +272,7 @@ class ManifestProvenance:
     missing_optional_assets: list[str]
     retries: dict[str, int]
     normalization: NormalizationSummary | None = None
+    web_integrity: WebIntegrity | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -274,6 +305,8 @@ class ManifestProvenance:
         }
         if self.normalization is not None:
             payload["normalization"] = self.normalization.to_dict()
+        if self.web_integrity is not None:
+            payload["web_integrity"] = self.web_integrity.to_dict()
         return payload
 
 

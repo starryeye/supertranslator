@@ -8,6 +8,7 @@ import binascii
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -37,6 +38,7 @@ from supertranslator.models import (
     SegmentContractError,
     SemanticReviewFinding,
     Translation,
+    WebIntegrity,
     read_segments,
     read_segments_stream,
 )
@@ -709,9 +711,11 @@ def _assemble_command(args: argparse.Namespace) -> None:
     # Retain the legacy capture-contract diagnostic before the stricter lease.
     _read_capture(args.run_dir)
     try:
-        with hold_processing_source(args.run_dir, phase='assemble') as source:
-            _assemble_selected_command(args, source)
-            source.verify()
+        from supertranslator.web_review import hold_web_semantic_inputs, hold_web_semantic_approval
+        with hold_web_semantic_inputs(args.run_dir) as snapshot:
+            with hold_web_semantic_approval(snapshot) as approval:
+                _assemble_selected_command(args, snapshot)
+                approval.verify()
     except ValueError as error:
         raise CLIContractError(str(error)) from error
 
@@ -733,17 +737,14 @@ def _qa_reader_command(args: argparse.Namespace) -> None:
         raise CLIContractError(str(error)) from error
 
 
-def _assemble_selected_command(args: argparse.Namespace, source) -> None:
+def _assemble_selected_command(args: argparse.Namespace, snapshot) -> None:
     _validate_run_root(args.run_dir)
-    capture = _read_capture(args.run_dir)
-    segments = _read_segments(args.run_dir)
+    source = snapshot.processing_source
+    capture, segments = snapshot.capture, snapshot.segments
     if source.normalization is not None and not any(segment.target for segment in segments):
         raise CLIContractError('preformatted extraction has no translation targets')
-    zones = _read_zones(args.run_dir)
-    result_dir = _validate_translation_files(args.run_dir, zones)
-    translations = merge_translations(segments, zones, result_dir)
-    glossary = _read_glossary(args.run_dir / "glossary.json")
-    source.verify()
+    translations, glossary = snapshot.translations, snapshot.glossary
+    snapshot.verify()
     assemble_page(
         source.path,
         {segment.id: segment for segment in segments if segment.target},
@@ -751,8 +752,10 @@ def _assemble_selected_command(args: argparse.Namespace, source) -> None:
         glossary,
         args.output_dir,
         capture["final_url"],
+        source_bytes=snapshot.payloads[source.path.relative_to(args.run_dir.absolute()).as_posix()],
+        revalidate=snapshot.verify,
     )
-    source.verify()
+    snapshot.verify()
     if source.normalization is not None:
         try:
             with _hold_preformatted_output(source, args.output_dir / 'index.html') as output:
@@ -804,61 +807,51 @@ def _pdf_qa_finalize_command(args: argparse.Namespace) -> None:
 def _qa_command(args: argparse.Namespace) -> None:
     preformatted = _has_preformatted_state(args.run_dir)
     try:
-        if preformatted:
-            with _preformatted_qa_evidence(args.output_dir) as transaction:
-                _prepare_preformatted_screenshots(args.run_dir, args.run_dir / 'qa-screenshots')
-                with hold_processing_source(args.run_dir, phase='qa') as source:
+        from supertranslator.web_review import hold_web_semantic_inputs, hold_web_semantic_approval
+        try:
+            _validate_qa_output_path(args.output_dir)
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+        except (CLIContractError, OSError) as error:
+            raise QAFailure(f'cannot write QA evidence: {error}') from error
+        with _preformatted_qa_evidence(args.output_dir) as transaction:
+            _prepare_preformatted_screenshots(args.run_dir, args.run_dir / 'qa-screenshots')
+            with hold_web_semantic_inputs(args.run_dir, phase='qa') as snapshot:
+                if not preformatted and snapshot.processing_source.normalization is not None:
+                    raise ValueError('preformatted state appeared after QA inventory')
+                with hold_web_semantic_approval(snapshot) as approval:
+                    source = snapshot.processing_source
+                    if not (args.output_dir / 'index.html').is_file():
+                        raise QAFailure('output-html: assembled HTML is missing')
                     with _hold_preformatted_output(source, args.output_dir / 'index.html') as output:
-                        _qa_selected_command(args, source, transaction, output.verify)
+                        _qa_selected_command(args, snapshot, approval, output, transaction)
                         output.verify()
-        else:
-            try:
-                _prepare_preformatted_screenshots(args.run_dir, args.run_dir / 'qa-screenshots')
-            except (ValueError, PdfAssemblyError, OSError) as error:
-                raise QAFailure(f'screenshot-directory-unsafe: {error}') from error
-            with hold_processing_source(args.run_dir, phase='qa') as source:
-                if source.normalization is not None:
-                    # The released inventory is only a routing hint. A new
-                    # normalized source cannot enter legacy publication.
-                    preformatted = True
-                    with _preformatted_qa_evidence(args.output_dir):
-                        raise ValueError('preformatted state appeared after QA inventory')
-                _qa_selected_command(args, source)
-    except (ValueError, PdfAssemblyError, OSError) as error:
+                    approval.verify()
+                snapshot.verify()
+    except (PdfAssemblyError, OSError) as error:
+        raise QAFailure(f'cannot write QA evidence: {error}') from error
+    except ValueError as error:
         failure = error
     else:
         return
-    if not preformatted and _has_preformatted_state(args.run_dir):
-        # New pending/invalid state may fail before the selector can yield.
-        # Quarantine prior evidence too, outside the active exception handler
-        # so recovery creation retains its normal anchored lifecycle.
-        preformatted = True
-        try:
-            with _preformatted_qa_evidence(args.output_dir):
-                raise failure
-        except (ValueError, PdfAssemblyError, OSError) as error:
-            failure = error
     if preformatted:
         code = 'preformatted-literal-integrity' if str(failure).startswith('preformatted-literal-integrity:') else 'preformatted-provenance'
         raise QAFailure(f'{code}: {failure}') from failure
     raise CLIContractError(str(failure)) from failure
 
 
-def _qa_selected_command(args, source, transaction=None, revalidate=None) -> None:
+def _qa_selected_command(args, snapshot, approval, output, transaction) -> None:
     _validate_run_root(args.run_dir)
     _reject_if_link(args.run_dir / "source.html")
     try:
         _validate_qa_output_path(args.output_dir)
     except CLIContractError as error:
         raise QAFailure(str(error)) from error
-    capture = _read_capture(args.run_dir)
-    segments = _read_segments(args.run_dir)
+    source = snapshot.processing_source
+    capture, segments, zones = snapshot.capture, snapshot.segments, snapshot.zones
     if source.normalization is not None and not any(segment.target for segment in segments):
         raise QAFailure('translation-coverage: preformatted extraction has no translation targets')
-    zones = _read_zones(args.run_dir)
-    result_dir = _validate_translation_files(args.run_dir, zones)
-    translations = merge_translations(segments, zones, result_dir)
-    review = _read_review(args.run_dir / "review.json", zones)
+    translations = snapshot.translations
+    review = approval.review
     result = run_qa(
         QAInputs(
             source_html=source.path,
@@ -875,8 +868,15 @@ def _qa_selected_command(args, source, transaction=None, revalidate=None) -> Non
             translated_texts={key: value.text for key, value in translations.items()},
             capture_metadata=dict(capture),
             normalization=source.normalization,
+            source_bytes=snapshot.payloads[source.path.relative_to(args.run_dir.absolute()).as_posix()],
+            output_bytes=output.html_bytes,
         )
     )
+    approval.verify()
+    output.verify()
+    if result.passed:
+        result = replace(result, web_integrity=WebIntegrity("1.0", snapshot.review_input.semantic_input_sha256,
+                         approval.approval_sha256, hashlib.sha256(output.html_bytes).hexdigest()))
     provenance = _build_manifest_provenance(
         result=result,
         capture=capture,
@@ -885,15 +885,17 @@ def _qa_selected_command(args, source, transaction=None, revalidate=None) -> Non
         translated_segment_ids=set(translations),
         review=review,
     )
-    source.verify()
-    if revalidate is not None:
-        revalidate()
-    if transaction is None:
-        _publish_qa_evidence(result, review, args.output_dir, provenance)
-    else:
+    approval.verify()
+    output.verify()
+    try:
         _publish_qa_evidence(result, review, args.output_dir, provenance, _transaction=transaction)
-        revalidate()
-        transaction.verify()
+    except (PdfAssemblyError, OSError) as error:
+        # Classify output-storage failures before semantic leases can translate
+        # caller OSError into an input/approval contract diagnostic.
+        raise QAFailure(f'cannot publish QA evidence: {error}') from error
+    approval.verify()
+    output.verify()
+    transaction.verify()
     if not result.passed:
         codes = ", ".join(finding.code for finding in result.required_findings)
         raise QAFailure(f"required QA checks failed: {codes or 'unknown finding'}")
@@ -1251,6 +1253,7 @@ def _build_manifest_provenance(
         missing_optional_assets=list(missing_optional),
         retries=dict(sorted(review.retries.items())),
         normalization=result.normalization,
+        web_integrity=result.web_integrity,
     )
 
 

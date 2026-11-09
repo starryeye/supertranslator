@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 
-from supertranslator.models import Segment, Translation, read_segments_stream
+from supertranslator.models import MasterReview, Segment, Translation, read_segments_stream
 from supertranslator.preformatted_contract import canonical_bytes, canonical_loads
 from supertranslator.preformatted_runtime import ProcessingSource, hold_processing_source
 from supertranslator.translations import merge_translation_payloads
@@ -64,6 +64,41 @@ class WebSemanticInputSnapshot:
             self.processing_source.verify()
         except (ValueError, OSError) as error:
             raise WebReviewError(str(error)) from error
+
+
+@dataclass(frozen=True, slots=True)
+class WebSemanticApproval:
+    review: MasterReview
+    approval_sha256: str
+    _snapshot: WebSemanticInputSnapshot
+
+    def verify(self) -> None:
+        self._snapshot.verify()
+
+
+@contextmanager
+def hold_web_semantic_approval(snapshot: WebSemanticInputSnapshot) -> Iterator[WebSemanticApproval]:
+    """Consume a resolved AI approval from the same exact-byte input lease."""
+    from supertranslator.cli import _review_from_value
+    try:
+        payload = snapshot.processing_source._held.read("web-review.json")
+        value = _object(payload, "web-review.json")
+        if set(value) != {"semantic_input_sha256", "unresolved_required", "retries", "section_findings"}:
+            raise WebReviewError("web-review.json fields must be exactly semantic_input_sha256, unresolved_required, retries, section_findings")
+        if value["semantic_input_sha256"] != snapshot.review_input.semantic_input_sha256:
+            raise WebReviewError("web semantic review input digest is stale; fresh AI semantic review and QA are required")
+        review = _review_from_value({key: item for key, item in value.items() if key != "semantic_input_sha256"},
+                                    snapshot.processing_source.path.parent / "web-review.json", snapshot.zones)
+        if review.unresolved_required:
+            raise WebReviewError("web semantic review has unresolved required findings: " + ", ".join(review.unresolved_required))
+        approval = WebSemanticApproval(review, hashlib.sha256(payload).hexdigest(), snapshot)
+        approval.verify()
+        yield approval
+        approval.verify()
+    except WebReviewError:
+        raise
+    except (ValueError, OSError, TypeError, KeyError) as error:
+        raise WebReviewError(f"cannot consume web-review.json; fresh AI semantic review and QA are required: {error}") from error
 
 
 def _object(payload: bytes, label: str) -> dict:

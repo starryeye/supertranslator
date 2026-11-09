@@ -285,6 +285,13 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
         raise ReaderError("input HTML digest does not match reader review")
     if manifest.get("qa_status") != "passed" or manifest.get("required_findings") != []:
         raise ReaderError("input translation has not passed QA")
+    from supertranslator.models import WebIntegrity
+    try:
+        integrity = WebIntegrity.from_dict(manifest.get("web_integrity"))
+    except ValueError as error:
+        raise ReaderError(f"missing or malformed web_integrity; fresh AI semantic review and QA are required: {error}") from error
+    if integrity.html_sha256 != _digest(input_bytes):
+        raise ReaderError("web_integrity HTML digest mismatch; fresh AI semantic review and QA are required")
     source_url = str(validate_public_url(manifest["source_url"]))
     soup = BeautifulSoup(input_bytes.decode("utf-8"), "lxml")
     original = _one(soup, review["content_selector"])

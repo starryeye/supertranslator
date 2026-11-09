@@ -232,6 +232,8 @@ def _hold_preformatted_output(source, output_html):
                 raise ValueError('preformatted-provenance: generated critical CSS digest mismatch')
 
         class Snapshot:
+            html_bytes = files[0][3]
+
             def verify(self):
                 source.verify()
                 for directory, name, opened, payload in files:
@@ -258,8 +260,10 @@ def _run_qa(inputs: QAInputs) -> QAResult:
     browser_metrics: dict[str, dict[str, object]] = {}
 
     _check_coverage(inputs, required)
-    source_text = _read_utf8(inputs.source_html, "source-html", required, preserve_newlines=inputs.normalization is not None)
-    output_text = _read_utf8(inputs.output_html, "output-html", required, preserve_newlines=inputs.normalization is not None)
+    source_text = _read_utf8(inputs.source_html, "source-html", required,
+                             preserve_newlines=inputs.normalization is not None, payload=inputs.source_bytes)
+    output_text = _read_utf8(inputs.output_html, "output-html", required,
+                             preserve_newlines=inputs.normalization is not None, payload=inputs.output_bytes)
     if source_text is not None and output_text is not None:
         # lxml normalizes raw CRLF even when byte decoding preserves it. The
         # adapter's parser retains the exact literal/opaque DOM text stream.
@@ -345,10 +349,14 @@ def _check_coverage(inputs: QAInputs, findings: list[Finding]) -> None:
         )
 
 
-def _read_utf8(path: Path, label: str, findings: list[Finding], *, preserve_newlines: bool = False) -> str | None:
+def _read_utf8(path: Path, label: str, findings: list[Finding], *, preserve_newlines: bool = False,
+               payload: bytes | None = None) -> str | None:
     try:
         if _is_link_or_reparse(path) or not path.is_file():
             raise OSError("file is missing or unsafe")
+        if payload is not None:
+            text = payload.decode("utf-8")
+            return text if preserve_newlines else text.replace("\r\n", "\n").replace("\r", "\n")
         return path.read_bytes().decode('utf-8') if preserve_newlines else path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         findings.append(

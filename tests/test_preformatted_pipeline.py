@@ -11,6 +11,7 @@ import pytest
 import supertranslator.cli as cli
 from supertranslator.models import read_segments
 from supertranslator.preformatted_contract import canonical_bytes, canonical_sha256
+from tests.web_review_fixtures import approve_web_run
 
 
 SOURCE = (b'<!doctype html><html><head><meta charset="utf-8"></head><body>'
@@ -94,6 +95,7 @@ def _assembled(tmp_path):
              'evidence': f'Fixture reviewer compared source and Korean {name}.'}
             for name in DIMENSIONS]}}) + '\n', encoding='utf-8')
     assert _command('validate-translations', run) == 0
+    approve_web_run(run)
     assert _command('assemble', run, output) == 0
     return run, output
 
@@ -236,6 +238,7 @@ def test_id_bearing_attribute_targets_complete_reviewed_web_pipeline(tmp_path):
             for name in DIMENSIONS]},
     }), encoding='utf-8')
     assert _command('validate-translations', run) == 0
+    approve_web_run(run)
     assert _command('assemble', run, output) == 0
     assert _command('qa', run, output) == 0
     final = BeautifulSoup((output / 'index.html').read_bytes(), 'html.parser')
@@ -428,6 +431,7 @@ def test_reviewed_code_reaches_real_consumers_without_translating_code(tmp_path,
             {'dimension': name, 'verdict': 'pass', 'evidence': 'Authored fixture review: prose translated, code exact.'}
             for name in DIMENSIONS]}}), encoding='utf-8')
     assert _command('validate-translations', run) == 0
+    approve_web_run(run)
     assert _command('assemble', run, output) == 0
     assert _command('qa', run, output) == 0
     soup = BeautifulSoup((output / 'index.html').read_bytes().decode('utf-8'), 'html.parser')
