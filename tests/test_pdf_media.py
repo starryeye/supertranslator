@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
@@ -306,6 +308,244 @@ def test_render_budget_accepts_exact_limits_and_one_unit_below() -> None:
     )
 
 
+@pytest.fixture
+def poppler_children(monkeypatch: pytest.MonkeyPatch):
+    """Capture real children and reap them even when a regression fails at RED."""
+    real_popen = subprocess.Popen
+    children: list[subprocess.Popen[str]] = []
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", capture_child)
+    try:
+        yield children
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+            assert child.poll() is not None
+
+
+def _sleeping_poppler_command(output_directory: Path) -> list[str]:
+    return [
+        sys.executable, "-c", "import time; time.sleep(60)",
+        "supertranslator-poppler-cleanup-probe", str(output_directory / "page"),
+    ]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt("stop"), SystemExit(37)])
+def test_poppler_interrupt_reaps_child_and_preserves_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poppler_children,
+    interrupt: BaseException,
+) -> None:
+    import supertranslator.pdf_media as media_module
+
+    def interrupt_after_launch() -> float:
+        assert len(poppler_children) == 1
+        assert poppler_children[0].poll() is None
+        raise interrupt
+
+    monkeypatch.setattr(media_module.time, "monotonic", interrupt_after_launch)
+    with pytest.raises(type(interrupt)) as caught:
+        media_module._run_poppler(_sleeping_poppler_command(tmp_path), "render PDF pages")
+
+    assert caught.value is interrupt
+    assert poppler_children[0].poll() is not None
+
+
+def test_poppler_monitor_error_reaps_child(tmp_path: Path, poppler_children) -> None:
+    import supertranslator.pdf_media as media_module
+
+    with pytest.raises(media_module.PdfMediaError, match="cannot monitor Poppler output growth"):
+        media_module._run_poppler(
+            _sleeping_poppler_command(tmp_path / "missing"), "render PDF pages",
+        )
+
+    assert len(poppler_children) == 1
+    assert poppler_children[0].poll() is not None
+
+
+@pytest.mark.parametrize("failure", ["poll", "kill", "reap", "wait", "exited-race", "already-exited"])
+@pytest.mark.parametrize("primary_kind", ["monitor", "interrupt", "os-error"])
+def test_poppler_cleanup_keeps_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    primary_kind: str,
+) -> None:
+    import supertranslator.pdf_media as media_module
+
+    primary = {
+        "monitor": media_module.PdfMediaError("synthetic monitor failure"),
+        "interrupt": KeyboardInterrupt("synthetic interrupt"),
+        "os-error": OSError("synthetic communication failure"),
+    }[primary_kind]
+
+    class CleanupFailureProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.communications = 0
+            self.kill_attempts = 0
+            self.wait_attempts = 0
+            self.cleanup_timeouts = []
+            self.wait_timeouts = []
+
+        def poll(self):
+            if failure == "poll":
+                raise OSError("secondary poll failure")
+            if failure == "already-exited":
+                self.returncode = 0
+                return 0
+            return None
+
+        def kill(self) -> None:
+            self.kill_attempts += 1
+            if failure == "kill":
+                raise OSError("secondary kill failure")
+            if failure == "exited-race":
+                self.returncode = 0
+                raise ProcessLookupError("child exited before kill")
+
+        def communicate(self, timeout=None) -> tuple[str, str]:
+            self.communications += 1
+            if self.communications == 1:
+                raise primary
+            # Cleanup must not block indefinitely if killing was unsuccessful.
+            self.cleanup_timeouts.append(timeout)
+            if failure in {"reap", "wait"}:
+                raise subprocess.TimeoutExpired("synthetic child", timeout)
+            self.returncode = 0
+            return "", ""
+
+        def wait(self, timeout=None) -> int:
+            self.wait_attempts += 1
+            self.wait_timeouts.append(timeout)
+            if failure == "wait":
+                raise OSError("secondary wait failure")
+            self.returncode = -9
+            return -9
+
+    process = CleanupFailureProcess()
+    monkeypatch.setattr(media_module.subprocess, "Popen", lambda *args, **kwargs: process)
+    expected_type = media_module.PdfMediaError if primary_kind == "os-error" else type(primary)
+    with pytest.raises(expected_type) as caught:
+        media_module._run_poppler(["synthetic-poppler", str(tmp_path / "page")], "render PDF pages")
+
+    if primary_kind == "os-error":
+        assert caught.value.__cause__ is primary
+        assert "synthetic communication failure" in str(caught.value)
+    else:
+        assert caught.value is primary
+    assert process.communications == 2
+    assert len(process.cleanup_timeouts) == 1
+    assert 0 < process.cleanup_timeouts[0] <= 1.0
+    assert process.kill_attempts == (0 if failure in {"poll", "already-exited"} else 1)
+    assert process.wait_attempts == (1 if failure in {"reap", "wait"} else 0)
+    if process.wait_timeouts:
+        assert 0 < process.wait_timeouts[0] <= 1.0
+
+
+def test_poppler_cleanup_launch_failure_never_signals_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import supertranslator.pdf_media as media_module
+
+    launch_error = OSError("synthetic launch failure")
+    signal_attempts = []
+
+    def fail_launch(*args, **kwargs):
+        raise launch_error
+
+    def unexpected_signal(*args, **kwargs):
+        signal_attempts.append((args, kwargs))
+        raise AssertionError("a failed launch must not signal any process")
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", fail_launch)
+    monkeypatch.setattr(os, "kill", unexpected_signal)
+    with pytest.raises(media_module.PdfMediaError, match="synthetic launch failure") as caught:
+        media_module._run_poppler(["missing-poppler"], "render PDF pages")
+    assert caught.value.__cause__ is launch_error
+    assert signal_attempts == []
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_poppler_cleanup_does_not_kill_completed_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poppler_children,
+    returncode: int,
+) -> None:
+    import supertranslator.pdf_media as media_module
+
+    real_popen = media_module.subprocess.Popen
+    kill_attempts = []
+
+    def completed_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        child.wait(timeout=5)
+        real_kill = child.kill
+
+        def capture_kill():
+            kill_attempts.append(child.pid)
+            real_kill()
+
+        monkeypatch.setattr(child, "kill", capture_kill)
+        return child
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", completed_child)
+    command = [
+        sys.executable, "-c",
+        f"import sys; print('synthetic detail', file=sys.stderr); sys.exit({returncode})",
+        str(tmp_path / "page"),
+    ]
+    if returncode:
+        with pytest.raises(media_module.PdfMediaError, match="Poppler exited 7: synthetic detail"):
+            media_module._run_poppler(command, "render PDF pages")
+    else:
+        media_module._run_poppler(command, "render PDF pages")
+    assert len(poppler_children) == 1
+    assert poppler_children[0].returncode == returncode
+    assert kill_attempts == []
+
+
+def test_poppler_cleanup_reaps_child_on_output_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poppler_children,
+) -> None:
+    import supertranslator.pdf_media as media_module
+
+    (tmp_path / "page-1.png").write_bytes(b"ab")
+    monkeypatch.setattr(media_module, "MAX_RENDERED_PNG_BYTES_PER_PAGE", 1)
+    with pytest.raises(media_module.PdfMediaError, match="encoded PNG output exceeded render budget"):
+        media_module._run_poppler(_sleeping_poppler_command(tmp_path), "render PDF pages")
+    assert len(poppler_children) == 1
+    assert poppler_children[0].poll() is not None
+
+
+def test_poppler_cleanup_reaps_child_on_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poppler_children,
+) -> None:
+    import supertranslator.pdf_media as media_module
+
+    timestamps = iter((0.0, 601.0))
+    monkeypatch.setattr(media_module.time, "monotonic", lambda: next(timestamps))
+    with pytest.raises(media_module.PdfMediaError, match="600 second timeout"):
+        media_module._run_poppler(_sleeping_poppler_command(tmp_path), "render PDF pages")
+    assert len(poppler_children) == 1
+    assert poppler_children[0].poll() is not None
+
+
 def test_poppler_render_timeout_allows_ten_minutes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -321,9 +561,13 @@ def test_poppler_render_timeout_allows_ten_minutes(
             self.killed = False
 
         def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-            if timeout is None:
+            if self.killed:
+                self.returncode = -9
                 return "", ""
             raise subprocess.TimeoutExpired("pdftoppm", timeout)
+
+        def poll(self):
+            return self.returncode
 
         def kill(self) -> None:
             self.killed = True

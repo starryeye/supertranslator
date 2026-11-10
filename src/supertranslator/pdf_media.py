@@ -774,8 +774,6 @@ def _run_poppler(command: list[str], action: str) -> None:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                process.kill()
-                process.communicate()
                 raise PdfMediaError(
                     f"cannot {action}: exceeded {_POPPLER_TIMEOUT_SECONDS} second timeout"
                 )
@@ -788,23 +786,42 @@ def _run_poppler(command: list[str], action: str) -> None:
                     any(size > MAX_RENDERED_PNG_BYTES_PER_PAGE for size in sizes)
                     or sum(sizes) > MAX_RENDERED_PNG_BYTES_TOTAL
                 ):
-                    process.kill()
-                    process.communicate()
                     raise PdfMediaError(
                         f"cannot {action}: encoded PNG output exceeded render budget"
                     )
-    except PdfMediaError:
-        raise
     except (OSError, subprocess.SubprocessError) as error:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.communicate()
+        if process is not None:
+            _cleanup_poppler(process)
         raise PdfMediaError(f"cannot {action}: {error}") from error
+    except BaseException:
+        if process is not None:
+            _cleanup_poppler(process)
+        raise
     if process.returncode != 0:
         detail = stderr.strip() or "no error detail"
         raise PdfMediaError(
             f"cannot {action}: Poppler exited {process.returncode}: {detail}"
         )
+
+
+def _cleanup_poppler(process: subprocess.Popen[str]) -> None:
+    """Best-effort cleanup while preserving an already active failure."""
+    try:
+        if process.poll() is None:
+            process.kill()
+    except BaseException:
+        # A child may exit between poll and kill, or killing may fail. Still reap.
+        pass
+    try:
+        # Bound cleanup even if killing failed or inherited pipes remain open.
+        process.communicate(timeout=1.0)
+    except BaseException:
+        try:
+            # Pipe failures must not prevent reaping a child that did exit.
+            process.wait(timeout=1.0)
+        except BaseException:
+            # Never replace the original failure/interrupt with a cleanup failure.
+            pass
 
 
 def _current_render_output_sizes(directory: Path) -> list[int]:
