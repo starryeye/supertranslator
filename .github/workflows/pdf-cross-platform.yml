@@ -45,6 +45,7 @@ jobs:
           tests/test_renamed_identity.py
           tests/test_pdf_utf8_fixtures.py
           tests/test_pdf_render.py
+          tests/test_pdf_media.py
           tests/test_poppler_bootstrap.py
           tests/test_pdf_acquire.py::test_windows_run_anchor_requests_only_directory_list_access
           tests/test_pdf_acquire.py::test_windows_run_anchor_closes_handle_when_path_validation_fails

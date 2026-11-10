@@ -77,6 +77,8 @@ jobs:
             "$tests/test_anchored_creation.py" "$tests/test_cli_contract.py" \
             "$tests/test_qa.py" "$tests/test_pipeline.py" "$tests/test_plugin_layout.py" \
             "$tests/test_renamed_identity.py" "$tests/test_reader.py" \
+            "$tests/test_web_review.py" "$tests/test_web_content.py" \
+            "$tests/test_render_workflow.py" "$tests/test_review_skill_contract.py" "$tests/test_ci_contract.py" \
             --basetemp="$evidence/pytest" --junitxml="$evidence/results.xml" 2>&1 | tee "$evidence/pytest.log"
           test_exit=${PIPESTATUS[0]}
           printf 'pytest_exit=%s\n' "$test_exit" > "$evidence/exit.txt"
@@ -96,7 +98,9 @@ jobs:
           $selectors = @('test_preformatted_analysis.py', 'test_preformatted_projection.py',
             'test_preformatted_runtime.py', 'test_preformatted_pipeline.py',
             'test_anchored_creation.py', 'test_cli_contract.py', 'test_qa.py',
-            'test_pipeline.py', 'test_plugin_layout.py', 'test_renamed_identity.py', 'test_reader.py') | ForEach-Object { Join-Path $tests $_ }
+            'test_pipeline.py', 'test_plugin_layout.py', 'test_renamed_identity.py', 'test_reader.py',
+            'test_web_review.py', 'test_web_content.py', 'test_render_workflow.py',
+            'test_review_skill_contract.py', 'test_ci_contract.py') | ForEach-Object { Join-Path $tests $_ }
           & $python -I -m pytest -c (Join-Path $env:GITHUB_WORKSPACE 'pyproject.toml') -o 'pythonpath=' --import-mode=importlib -q -ra -s @selectors `
             "--basetemp=$evidence/pytest" "--junitxml=$evidence/results.xml" 2>&1 | Tee-Object -FilePath (Join-Path $evidence 'pytest.log')
           $testExit = $LASTEXITCODE

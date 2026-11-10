@@ -22,7 +22,12 @@ def render_commands(format_name: str, values: dict[str, str]) -> dict[str, list[
         for line in reference.read_text("utf-8").splitlines()
         if line.startswith("<python> -m supertranslator ")
     ]
-    return {" ".join(args[:2]) if args[0] == "pdf-qa" else args[0]: args for args in commands}
+    def stage(args: list[str]) -> str:
+        if args[0] == "qa-reader":
+            return "qa-reader finalize" if "--visual-review" in args else "qa-reader prepare"
+        return " ".join(args[:2]) if args[0] == "pdf-qa" else args[0]
+
+    return {stage(args): args for args in commands}
 
 
 def inventory(root: Path) -> dict[str, bytes]:
@@ -30,7 +35,15 @@ def inventory(root: Path) -> dict[str, bytes]:
             for p in root.rglob("*") if p.is_file()}
 
 
-def test_html_render_reuses_bound_bundle_once(bundle, tmp_path):
+def test_html_recipe_preserves_both_qa_stages():
+    commands = render_commands("html", {})
+    assert list(commands) == ["export-reader", "qa-reader prepare", "qa-reader finalize"]
+    assert commands["qa-reader prepare"] == ["qa-reader", "--output-dir", "<new-output>"]
+    assert commands["qa-reader finalize"] == [
+        "qa-reader", "--output-dir", "<new-output>", "--visual-review", "<new-visual-review>"]
+
+
+def test_html_render_reuses_bound_bundle_once(bundle, tmp_path, capsys):
     """Blindly replaying the review on the derivative loses its bound source."""
     source, review_path, first = bundle
     review = json.loads(review_path.read_bytes())
@@ -43,7 +56,7 @@ def test_html_render_reuses_bound_bundle_once(bundle, tmp_path):
         "source_text": "The list content is displayed across multiple lines.",
         "evidence": "TEST ONLY historical reviewed Korean sentence correction.",
     }]
-    review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+    review_path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8", newline="")
     source_before, review_before = inventory(source), review_path.read_bytes()
     values = {"<bound-bundle>": str(source), "<reader-review>": str(review_path),
               "<new-output>": str(first), "<new-visual-review>": str(tmp_path / "fresh-visual.json")}
@@ -71,6 +84,30 @@ def test_html_render_reuses_bound_bundle_once(bundle, tmp_path):
         assert manifest["text_edits"] == review["text_edits"]
         assert manifest["qa_status"] == "pending-visual-review"
     assert (second / "article.html").read_bytes() == (first / "article.html").read_bytes()
+    commands = render_commands("html", values)
+    assert main(commands["qa-reader prepare"]) == 0
+    manifest = json.loads((second / "manifest.json").read_bytes())
+    browser = json.loads((second / "browser-qa.json").read_bytes())
+    assert manifest["qa_status"] == "pending-visual-review"
+    assert browser["visual_status"] == "pending"
+    assert browser["screenshot_tiles"]
+    capsys.readouterr()
+    assert main(commands["qa-reader finalize"]) == 4  # No fresh evidence exists.
+    assert "missing or linked input:" in capsys.readouterr().err
+    visual = Path(values["<new-visual-review>"])
+    visual.write_text(json.dumps({"render_input_sha256": "0" * 64, "verdict": "pass",
+        "evidence": "TEST ONLY stale evidence for unrelated reader bytes."}), encoding="utf-8", newline="")
+    assert main(commands["qa-reader finalize"]) == 4
+    assert "visual review must approve these exact reader bytes" in capsys.readouterr().err
+    assert json.loads((second / "manifest.json").read_bytes())["qa_status"] == "pending-visual-review"
+    # Synthetic acceptance exercises the recipe, not an independent visual review.
+    visual.write_text(json.dumps({"render_input_sha256": manifest["render_input_sha256"],
+        "verdict": "pass", "evidence": "TEST ONLY newly bound synthetic full-document visual record."}),
+        encoding="utf-8", newline="")
+    assert main(commands["qa-reader finalize"]) == 0
+    assert json.loads((second / "manifest.json").read_bytes())["qa_status"] == "passed"
+    assert json.loads((second / "browser-qa.json").read_bytes())["visual_status"] == "passed"
+    assert (second / "visual-review.json").read_bytes() == visual.read_bytes()
     assert inventory(source) == source_before
     assert review_path.read_bytes() == review_before
     assert inventory(first) == first_before
