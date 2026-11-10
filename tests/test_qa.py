@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
@@ -13,15 +14,30 @@ from supertranslator.models import (
     Finding,
     MasterReview,
     ProtectedToken,
+    ApprovedWebContent,
+    Segment,
+    Translation,
     QAInputs,
     QAResult,
 )
 from supertranslator.qa import _check_external_dependencies, run_qa
 from supertranslator.protection import protect_fragment
 from supertranslator.report import write_manifest, write_review_report
+from supertranslator.web_content import prepare_approved_web_content
+from supertranslator.assemble import AssemblyError, _CSP
 
 
 TOKEN = "⟦WT:000000⟧"
+
+
+def _authored_prose(text):
+    """Fixed synthetic prose vocabulary; never inspect the final output."""
+    return (text.replace("See ", "참조 ").replace(" and ", " 및 ")
+            .replace(" then continue.", " 계속.").replace(" after.", " 이후."))
+
+
+def _offline_csp():
+    return f'<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="{_CSP}">'
 
 
 def _producer_url_boundary_result(tmp_path, source_fragment, translation, output_fragment,
@@ -33,14 +49,15 @@ def _producer_url_boundary_result(tmp_path, source_fragment, translation, output
                              t.value) for t in raw_tokens]
     if in_title:
         source_body = f'<main><p data-wt-segment="a" title="{source_fragment}">Hello</p></main>'
-        output_body = f'<main><p title="{output_fragment}">안녕</p></main>'
+        # This fixture translates the title only, not its unowned body text.
+        output_body = f'<main><p title="{output_fragment}">Hello</p></main>'
         translation = "⟦WT:000000⟧" + translation.replace("⟦WT:000000⟧", "⟦WT:000001⟧")
     else:
         source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
         output_body = f'<main><p>{output_fragment}</p></main>'
     source, output = _write_pages(tmp_path, source_body=source_body, output_body=output_body)
     return run_qa(_inputs(source, output, protected_tokens={"a": tokens},
-                          translated_texts={"a": translation}))
+                          translated_texts={"a": translation}, html_authored_attributes=in_title))
 
 
 @pytest.mark.parametrize("in_title", [False, True], ids=["body", "title"])
@@ -278,7 +295,8 @@ def test_source_bound_url_cross_location_next_anchor_fails_closed(tmp_path, tran
         assert result.passed
         assert result.required_findings == []
     else:
-        assert {f.code for f in result.required_findings} == {"protected-token-integrity"}
+        assert {f.code for f in result.required_findings
+                if f.code not in {"approved-content-contract", "approved-content-integrity"}} == {"protected-token-integrity"}
 
 
 @pytest.mark.parametrize("in_title", [False, True], ids=["body", "title"])
@@ -389,17 +407,19 @@ def _write_pages(
     index = output / "index.html"
     source.write_text(
         f"<!doctype html><html><head>{head}</head><body>{source_body}</body></html>",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     index.write_text(
         f"<!doctype html><html><head>{head if output_head is None else output_head}</head><body>{output_body}"
-        '<footer data-wt-attribution="source">source</footer></body></html>',
-        encoding="utf-8",
+        '<footer data-wt-attribution="source">AI 번역본 · '
+        '<a href="https://example.com/docs" rel="noopener noreferrer">원문 보기</a></footer></body></html>',
+        encoding="utf-8", newline="",
     )
     return source, index
 
 
 def _inputs(source: Path, output: Path, **overrides: object) -> QAInputs:
+    html_authored_attributes = overrides.pop("html_authored_attributes", False)
     values: dict[str, object] = {
         "source_html": source,
         "output_html": output,
@@ -412,6 +432,35 @@ def _inputs(source: Path, output: Path, **overrides: object) -> QAInputs:
         "master_review": MasterReview([], {}, {}),
     }
     values.update(overrides)
+    # Expectations come from authored input payloads, never the output HTML.
+    source_text = source.read_text("utf-8")
+    marked = BeautifulSoup(source_text, "html.parser").select("[data-wt-segment]")
+    tokens = values.get("protected_tokens", {})
+    texts = values.get("translated_texts", {"a": "안녕하세요"})
+    target_segments = {}
+    for node in marked:
+        sid = node["data-wt-segment"]
+        protected = tokens.get(sid, [])
+        located = [t.value for t in protected if t.kind == "location"]
+        semantic_type = ("located:paragraph" if "<!--wt-location:content-->" in located
+                         else "located:attributes") if located else "paragraph"
+        target_segments[sid] = Segment(sid, f"[data-wt-segment='{sid}']", semantic_type,
+                                       [], node.decode_contents(), protected, [], True)
+    values.setdefault("target_segments", target_segments)
+    try:
+        approved = prepare_approved_web_content(source_text, target_segments,
+            {sid: Translation(sid, texts.get(sid, "안녕하세요")) for sid in target_segments}, {})
+    except AssemblyError:
+        # Intentionally malformed token/marker fixtures still reach their old
+        # independent token guard; they cannot authorize a passing content gate.
+        approved = {}
+    if html_authored_attributes:
+        # These legacy token probes authored attribute payloads as raw HTML,
+        # unlike extraction's DOM-value attributes. State their expectation
+        # explicitly from the fixed input (including split entity boundaries).
+        approved = {sid: ApprovedWebContent({a: unescape(v) for a, v in p.attributes.items()},
+                                            p.content_html) for sid, p in approved.items()}
+    values.setdefault("approved_contents", approved)
     return QAInputs(**values)  # type: ignore[arg-type]
 
 
@@ -451,7 +500,7 @@ def test_qa_fails_incomplete_translation_and_broken_critical_asset(tmp_path: Pat
     )
 
     assert result.passed is False
-    assert {finding.code for finding in result.required_findings} == {
+    assert {finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}} == {
         "translation-coverage",
         "critical-asset-missing",
     }
@@ -476,7 +525,7 @@ def test_qa_detects_changed_protected_token_multiset_and_leaked_placeholder(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
     assert result.required_findings[0].evidence == {
@@ -613,7 +662,7 @@ def test_location_aware_attribute_rejects_changed_protected_values(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
 
@@ -624,7 +673,7 @@ def test_protected_token_integrity_locates_marked_title_in_document_head(
     source, output = _write_pages(
         tmp_path,
         source_body="<main>Body</main>",
-        output_body="<main>본문</main>",
+        output_body="<main>Body</main>",
         head='<title data-wt-segment="a">OAuth Guide</title>',
         output_head="<title>OAuth 가이드</title>",
     )
@@ -660,7 +709,7 @@ def test_protected_token_integrity_rejects_missing_or_duplicate_source_markers(
     source, output = _write_pages(
         tmp_path,
         source_body="<main>Body</main>",
-        output_body="<main>본문</main>",
+        output_body="<main>Body</main>",
         head=source_head,
         output_head="<title>OAuth 가이드</title>",
     )
@@ -676,7 +725,7 @@ def test_protected_token_integrity_rejects_missing_or_duplicate_source_markers(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
 
@@ -698,7 +747,7 @@ def test_qa_detects_protected_value_changed_after_placeholder_restoration(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
     assert result.required_findings[0].evidence["changed_segments"] == ["a"]
@@ -719,7 +768,7 @@ def test_protected_keyword_must_not_match_inside_a_larger_word(tmp_path: Path) -
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
 
@@ -758,7 +807,7 @@ def test_punctuation_terminated_protected_value_cannot_gain_a_suffix(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
     assert result.required_findings[0].evidence["changed_segments"] == ["a", "b"]
@@ -800,7 +849,7 @@ def test_protected_url_rejects_added_path_and_query_but_allows_sentence_period(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity"
     ]
     assert result.required_findings[0].evidence["changed_segments"] == ["a", "b"]
@@ -833,7 +882,7 @@ def test_protected_url_rejects_an_extra_complete_value_with_a_different_boundary
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity",
         "master-review-unresolved",
     ]
@@ -859,7 +908,7 @@ def test_protected_keyword_rejects_an_extra_complete_value_with_a_different_boun
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "protected-token-integrity",
         "master-review-unresolved",
     ]
@@ -896,6 +945,8 @@ def test_protected_value_shared_by_keyword_and_identifier_counts_once_per_occurr
 
 def test_protected_url_text_and_href_are_distinct_locations(tmp_path: Path) -> None:
     url = "https://example.com/spec"
+    _, tokens = protect_fragment(f'<a href="{url}">Read {url}.</a>')
+    assert [t.value for t in tokens if t.kind == "url"] == [url]
     source, output = _write_pages(
         tmp_path,
         source_body=f'<main><p data-wt-segment="a"><a href="{url}">Read {url}.</a></p></main>',
@@ -903,8 +954,8 @@ def test_protected_url_text_and_href_are_distinct_locations(tmp_path: Path) -> N
     )
     result = run_qa(_inputs(
         source, output,
-        protected_tokens={"a": [ProtectedToken(TOKEN, "url", url)]},
-        translated_texts={"a": f"{TOKEN} 문서."},
+        protected_tokens={"a": tokens},
+        translated_texts={"a": '⟦WT:000000⟧⟦WT:000001⟧ 문서.⟦WT:000002⟧'},
     ))
     assert result.required_findings == []
     assert result.warnings == []
@@ -962,10 +1013,11 @@ def test_producer_entity_url_in_translated_attribute_keeps_exact_value(
     source, output = _write_pages(
         tmp_path,
         source_body='<main><span data-wt-segment="a" title="Read https://example.com/spec?a=1&amp;b=2">Hello</span></main>',
-        output_body=f'<main><span title="{output_title}">안녕</span></main>',
+        output_body=f'<main><span title="{output_title}">Hello</span></main>',
     )
     result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
-                            translated_texts={"a": protected_text}))
+                            translated_texts={"a": protected_text.replace("Read ", "문서 ")},
+                            html_authored_attributes=True))
     if accepted:
         assert result.required_findings == []
         assert result.warnings == []
@@ -1022,7 +1074,7 @@ def test_producer_url_prose_delimiters_preserve_exact_values(
     ]
     if in_title:
         source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
-        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+        output_body = f'<main><span title="{output_fragment}">Hello</span></main>'
     else:
         source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
         output_body = f'<main><p>{output_fragment}</p></main>'
@@ -1031,7 +1083,8 @@ def test_producer_url_prose_delimiters_preserve_exact_values(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
+        html_authored_attributes=in_title,
     ))
     assert result.required_findings == []
     assert result.warnings == []
@@ -1090,7 +1143,7 @@ def test_producer_url_prose_delimiters_reject_extensions_and_duplicates(
     ]
     if in_title:
         source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
-        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+        output_body = f'<main><span title="{output_fragment}">Hello</span></main>'
     else:
         source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
         output_body = f'<main><p>{output_fragment}</p></main>'
@@ -1099,7 +1152,8 @@ def test_producer_url_prose_delimiters_reject_extensions_and_duplicates(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
+        html_authored_attributes=in_title,
     ))
     assert "protected-token-integrity" in {
         finding.code for finding in result.required_findings
@@ -1123,7 +1177,7 @@ def test_producer_adjacent_prefix_url_preserves_exact_value(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
     ))
     assert result.required_findings == []
     assert result.warnings == []
@@ -1153,7 +1207,7 @@ def test_producer_adjacent_prefix_url_rejects_extension_and_duplicate(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
     ))
     assert "protected-token-integrity" in {
         finding.code for finding in result.required_findings
@@ -1209,7 +1263,7 @@ def test_producer_entity_delimiter_url_preserves_exact_value(
     ]
     if in_title:
         source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
-        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+        output_body = f'<main><span title="{output_fragment}">Hello</span></main>'
     else:
         source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
         output_body = f'<main><p>{output_fragment}</p></main>'
@@ -1218,7 +1272,8 @@ def test_producer_entity_delimiter_url_preserves_exact_value(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
+        html_authored_attributes=in_title,
     ))
     assert result.required_findings == []
     assert result.warnings == []
@@ -1258,7 +1313,7 @@ def test_producer_entity_delimiter_url_rejects_extensions_and_duplicates(
     ]
     if in_title:
         source_body = f'<main><span data-wt-segment="a" title="{source_fragment}">Hello</span></main>'
-        output_body = f'<main><span title="{output_fragment}">안녕</span></main>'
+        output_body = f'<main><span title="{output_fragment}">Hello</span></main>'
     else:
         source_body = f'<main><p data-wt-segment="a">{source_fragment}</p></main>'
         output_body = f'<main><p>{output_fragment}</p></main>'
@@ -1267,7 +1322,8 @@ def test_producer_entity_delimiter_url_rejects_extensions_and_duplicates(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
+        html_authored_attributes=in_title,
     ))
     assert "protected-token-integrity" in {
         finding.code for finding in result.required_findings
@@ -1303,7 +1359,7 @@ def test_producer_entity_delimiter_url_keeps_overlapping_values(
     )
     result = run_qa(_inputs(
         source, output, protected_tokens={"a": tokens},
-        translated_texts={"a": protected_text},
+        translated_texts={"a": _authored_prose(protected_text)},
     ))
     if accepted:
         assert result.required_findings == []
@@ -1335,7 +1391,7 @@ def test_producer_inline_tag_boundary_preserves_protected_value_and_suffix_guard
         output_body=f"<main><p>{output_fragment}</p></main>",
     )
     result = run_qa(_inputs(source, output, protected_tokens={"a": tokens},
-                            translated_texts={"a": protected_text}))
+                            translated_texts={"a": _authored_prose(protected_text)}))
     if accepted:
         assert result.required_findings == []
         assert result.warnings == []
@@ -1478,9 +1534,9 @@ def test_head_targets_survive_known_metadata_normalization(
     tmp_path: Path, output_head: str, accepted: bool,
 ) -> None:
     source, output = _write_pages(
-        tmp_path, source_body="<main>Body</main>", output_body="<main>본문</main>",
+        tmp_path, source_body="<main>Body</main>", output_body="<main>Body</main>",
         head='<meta charset="iso-8859-1"><meta http-equiv="content-type" content="text/html; charset=iso-8859-1"><meta charset="utf-8"><link data-wt-segment="a" rel="canonical" href="https://example.com/doc" title="OAuth guide"><title data-wt-segment="b">OAuth guide</title>',
-        output_head=output_head,
+        output_head=output_head.replace("script-src 'none'", _CSP),
     )
     result = run_qa(_inputs(
         source, output, source_segment_ids={"a", "b"}, translated_segment_ids={"a", "b"},
@@ -1503,13 +1559,13 @@ def test_qa_detects_structural_change_and_unresolved_internal_anchor(tmp_path: P
             '<a href="#target">Jump</a><section id="target"></section></main>'
         ),
         output_body=(
-            '<main id="doc"><p class="changed">안녕</p>'
+            '<main id="doc"><p class="changed">안녕하세요</p>'
             '<a href="#missing">이동</a><section id="target"></section></main>'
         ),
     )
     result = run_qa(_inputs(source, output))
 
-    assert {finding.code for finding in result.required_findings} == {
+    assert {finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}} == {
         "structural-signature",
         "internal-anchor-unresolved",
     }
@@ -1525,13 +1581,13 @@ def test_nested_attribution_marker_cannot_hide_a_structural_change(tmp_path: Pat
         tmp_path,
         source_body='<main><p data-wt-segment="a">Hello</p></main>',
         output_body=(
-            '<main><p>안녕</p><aside data-wt-attribution="source">'
+            '<main><p>안녕하세요</p><aside data-wt-attribution="source">'
             "unauthorized nested content</aside></main>"
         ),
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "structural-signature"
     ]
 
@@ -1553,7 +1609,12 @@ def test_structural_signature_allows_only_marked_translatable_attribute_values(
         ),
     )
 
-    result = run_qa(_inputs(source, output))
+    result = run_qa(_inputs(source, output,
+        target_segments={"a": Segment("a", "[data-wt-segment='a']", "located:attributes", [], "", [
+            ProtectedToken(f"⟦WT:{i:06d}⟧", "location", f"<!--wt-location:attribute:{name}-->")
+            for i, name in enumerate(["alt", "aria-label", "aria-description", "title", "placeholder"])], [], True)},
+        approved_contents={"a": ApprovedWebContent({"alt": "OAuth 설정", "aria-label": "설정",
+            "aria-description": "보안 다이어그램", "title": "토큰 교환", "placeholder": "토큰 입력"}, None)}))
 
     assert result.passed is True
     assert result.required_findings == []
@@ -1580,7 +1641,7 @@ def test_structural_signature_still_requires_translatable_attribute_presence_and
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "structural-signature"
     ]
 
@@ -1599,7 +1660,7 @@ def test_structural_signature_rejects_nontranslatable_attribute_value_changes(
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "structural-signature"
     ]
 
@@ -1615,13 +1676,13 @@ def test_same_document_path_anchor_is_resolved_and_malformed_href_does_not_crash
             '<a href="http://[malformed">Malformed external link</a></main>'
         ),
         output_body=(
-            '<main><p>안녕</p><a href="index.html#missing">누락</a>'
+            '<main><p>안녕하세요</p><a href="index.html#missing">누락</a>'
             '<a href="http://[malformed">잘못된 외부 링크</a></main>'
         ),
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "internal-anchor-unresolved"
     ]
     assert result.required_findings[0].evidence == {"fragments": ["missing"]}
@@ -1636,14 +1697,14 @@ def test_qa_classifies_external_critical_and_optional_dependencies(tmp_path: Pat
             '<img src="https://cdn.example/optional.png"></main>'
         ),
         output_body=(
-            '<main><p>안녕</p>'
+            '<main><p>안녕하세요</p>'
             '<link rel="stylesheet" href="https://cdn.example/theme.css">'
             '<img src="https://cdn.example/optional.png"></main>'
         ),
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert [finding.code for finding in result.warnings] == [
@@ -1670,7 +1731,7 @@ def test_qa_statically_detects_external_import_hidden_by_offline_csp(
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -1687,7 +1748,7 @@ def test_external_source_script_is_not_an_offline_dependency_when_csp_blocks_scr
         head='<script src="https://cdn.example/app.js"></script>',
         output_head=(
             '<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
-            'content="default-src \'none\'; script-src \'none\'">'
+            f'content="{_CSP}">'
             '<script src="https://cdn.example/app.js"></script>'
         ),
     )
@@ -1708,7 +1769,7 @@ def test_external_script_remains_required_without_the_offline_csp(
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -1725,8 +1786,7 @@ def test_external_script_remains_required_without_the_offline_csp(
 def test_script_preloads_require_effective_prior_blocking_csp(
     tmp_path: Path, link: str,
 ) -> None:
-    csp = ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
-           'content="default-src \'none\'; script-src \'none\'">')
+    csp = _offline_csp()
     source, output = _write_pages(tmp_path, head=link, output_head=csp + link)
     result = run_qa(_inputs(source, output))
     assert result.required_findings == []
@@ -1828,8 +1888,7 @@ def test_script_preloads_require_effective_prior_blocking_csp_negative(
 def test_script_preload_exemption_never_hides_css_or_other_dependencies(
     tmp_path: Path, extra: str, expected: str, warning: bool,
 ) -> None:
-    csp = ('<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
-           'content="default-src \'none\'; script-src \'none\'">')
+    csp = _offline_csp()
     preload = '<link rel="modulepreload" href="https://cdn.example/app.js">'
     source, output = _write_pages(
         tmp_path, head=preload + extra, output_head=csp + preload + extra,
@@ -1852,14 +1911,14 @@ def test_protocol_relative_stylesheet_is_external_but_metadata_link_is_not(
             '<link rel="stylesheet" href="//cdn.example/theme.css">'
         ),
         output_body=(
-            '<main><p>안녕</p></main>'
+            '<main><p>안녕하세요</p></main>'
             '<link rel="canonical" href="https://example.com/docs">'
             '<link rel="stylesheet" href="//cdn.example/theme.css">'
         ),
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -1876,7 +1935,7 @@ def test_external_icon_and_font_preload_are_optional_not_required(tmp_path: Path
             '<link rel="preload" as="font" href="https://cdn.example/font.woff2">'
         ),
         output_body=(
-            '<main><p>안녕</p></main>'
+            '<main><p>안녕하세요</p></main>'
             '<link rel="icon" href="https://cdn.example/icon.png">'
             '<link rel="preload" as="font" href="https://cdn.example/font.woff2">'
         ),
@@ -1906,7 +1965,7 @@ def test_external_base_makes_relative_stylesheet_a_critical_dependency(
     source, output = _write_pages(tmp_path, head=head)
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -1924,7 +1983,7 @@ def test_malformed_critical_dependency_url_is_a_stable_required_finding(
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "invalid-critical-dependency-url"
     ]
     assert result.required_findings[0].evidence == {
@@ -1952,7 +2011,7 @@ def test_qa_fails_closed_for_every_unsupported_critical_stylesheet_scheme(
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "unsupported-critical-dependency-scheme"
     ]
     assert result.required_findings[0].evidence == {"urls": [reference]}
@@ -1973,7 +2032,7 @@ def test_qa_fails_closed_for_unsupported_critical_css_import_scheme(
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "unsupported-critical-dependency-scheme"
     ]
     assert result.required_findings[0].evidence == {"urls": [reference]}
@@ -1993,7 +2052,7 @@ def test_qa_rejects_asset_path_escape_and_records_optional_missing_asset(
         )
     )
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "critical-asset-unsafe"
     ]
     assert [finding.code for finding in result.warnings] == [
@@ -2027,7 +2086,7 @@ def test_master_unresolved_required_item_is_a_required_gate(tmp_path: Path) -> N
     )
 
     assert result.passed is False
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "master-review-unresolved"
     ]
     assert result.screenshots == []
@@ -2051,6 +2110,7 @@ def test_browser_qa_uses_two_viewports_and_writes_screenshots_under_work_dir(
             output,
             source_segment_ids={"a", "b"},
             translated_segment_ids={"a", "b"},
+            translated_texts={"a": "안녕", "b": "세상"},
         )
     )
 
@@ -2095,7 +2155,7 @@ def test_browser_qa_requires_each_critical_stylesheet_to_load_and_be_accessible(
     )
 
     assert result.passed is False
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "critical-stylesheet-unavailable"
     ]
     assert set(result.required_findings[0].evidence["viewports"]) == {
@@ -2115,7 +2175,7 @@ def test_browser_qa_requires_local_stylesheet_imports_to_load(
     result = run_qa(_inputs(source, output))
 
     assert result.passed is False
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "critical-stylesheet-unavailable"
     ]
 
@@ -2128,7 +2188,7 @@ def test_browser_setup_failure_is_recorded_instead_of_escaping(tmp_path: Path) -
     result = run_qa(_inputs(source, output, screenshot_dir=screenshot_path))
 
     assert result.passed is False
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "browser-qa-failed"
     ]
 
@@ -2141,11 +2201,11 @@ def test_browser_blocks_localhost_different_port_and_websocket(tmp_path: Path) -
     source, output = _write_pages(
         tmp_path,
         source_body=f'<main><p data-wt-segment="a">Hello</p>{script}</main>',
-        output_body=f"<main><p>안녕</p>{script}</main>",
+        output_body=f"<main><p>안녕하세요</p>{script}</main>",
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -2180,7 +2240,7 @@ def test_browser_context_blocks_popup_navigation_to_other_loopback_server(
         source, output = _write_pages(
             tmp_path,
             source_body=f'<main><p data-wt-segment="a">Hello</p>{script}</main>',
-            output_body=f"<main><p>안녕</p>{script}</main>",
+            output_body=f"<main><p>안녕하세요</p>{script}</main>",
         )
         result = run_qa(_inputs(source, output))
     finally:
@@ -2189,7 +2249,7 @@ def test_browser_context_blocks_popup_navigation_to_other_loopback_server(
         thread.join(timeout=5)
 
     assert hits == []
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {"urls": [escape_url]}
@@ -2205,11 +2265,11 @@ def test_same_url_requested_as_image_and_fetch_is_always_required(tmp_path: Path
             f'<main><p data-wt-segment="a">Hello</p>{script}'
             f'<img src="{url}"></main>'
         ),
-        output_body=f'<main><p>안녕</p>{script}<img src="{url}"></main>',
+        output_body=f'<main><p>안녕하세요</p>{script}<img src="{url}"></main>',
     )
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
 
@@ -2222,7 +2282,7 @@ def test_loopback_server_does_not_follow_nested_asset_symlink(tmp_path: Path) ->
             '<img src="assets/escape/secret.svg"></main>'
         ),
         output_body=(
-            '<main><p>안녕</p><img src="assets/escape/secret.svg"></main>'
+            '<main><p>안녕하세요</p><img src="assets/escape/secret.svg"></main>'
         ),
     )
     outside = tmp_path / "outside"
@@ -2374,12 +2434,12 @@ def test_inline_css_dependencies_resolve_against_external_document_base(
         source_body=(
             '<main><p data-wt-segment="a" style="background:url(avatar.png)">Hello</p></main>'
         ),
-        output_body='<main><p style="background:url(avatar.png)">안녕</p></main>',
+        output_body='<main><p style="background:url(avatar.png)">안녕하세요</p></main>',
     )
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "external-critical-dependency"
     ]
     assert result.required_findings[0].evidence == {
@@ -2411,13 +2471,13 @@ def test_malformed_css_dependencies_have_sorted_stable_findings(tmp_path: Path) 
             'style="background:url(\'http://[optional-a\')">Hello</p></main>'
         ),
         output_body=(
-            '<main><p style="background:url(\'http://[optional-a\')">안녕</p></main>'
+            '<main><p style="background:url(\'http://[optional-a\')">안녕하세요</p></main>'
         ),
     )
 
     result = run_qa(_inputs(source, output))
 
-    assert [finding.code for finding in result.required_findings] == [
+    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
         "invalid-critical-dependency-url"
     ]
     assert result.required_findings[0].evidence == {

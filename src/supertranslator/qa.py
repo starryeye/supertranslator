@@ -28,6 +28,7 @@ from supertranslator.models import Finding, ProtectedToken, QAInputs, QAResult
 from supertranslator.protection import _URL_PATTERN, _trim_url_end
 import supertranslator.pdf_assemble as anchored
 from supertranslator.preformatted_runtime import hold_processing_source, verify_preformatted_output
+from supertranslator.web_content import check_approved_web_content
 
 
 _TOKEN_PATTERN = re.compile(r"⟦WT:\d{6}⟧")
@@ -260,10 +261,13 @@ def _run_qa(inputs: QAInputs) -> QAResult:
     browser_metrics: dict[str, dict[str, object]] = {}
 
     _check_coverage(inputs, required)
+    # The content gate must see the exact held UTF-8 text, including CRLF in
+    # ordinary-mode literals. Individual legacy parsers may normalize their
+    # own DOM projections, but never normalize the shared evidence first.
     source_text = _read_utf8(inputs.source_html, "source-html", required,
-                             preserve_newlines=inputs.normalization is not None, payload=inputs.source_bytes)
+                             preserve_newlines=True, payload=inputs.source_bytes)
     output_text = _read_utf8(inputs.output_html, "output-html", required,
-                             preserve_newlines=inputs.normalization is not None, payload=inputs.output_bytes)
+                             preserve_newlines=True, payload=inputs.output_bytes)
     if source_text is not None and output_text is not None:
         # lxml normalizes raw CRLF even when byte decoding preserves it. The
         # adapter's parser retains the exact literal/opaque DOM text stream.
@@ -277,6 +281,12 @@ def _run_qa(inputs: QAInputs) -> QAResult:
 
     _check_assets(inputs, required, warnings)
     _check_master_review(inputs, required)
+    if source_text is not None and output_text is not None:
+        if (inputs.target_segments is not None
+                and set(inputs.target_segments) != inputs.source_segment_ids):
+            required.append(_required("approved-content-contract", "Approved target coverage is incomplete.", {}))
+        required.extend(check_approved_web_content(
+            source_text, output_text, inputs.target_segments, inputs.approved_contents))
     screenshot_root = _validated_screenshot_dir(inputs, required)
 
     # Browser evidence is meaningful only after deterministic prerequisites pass.

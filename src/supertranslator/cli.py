@@ -25,6 +25,7 @@ from langdetect.lang_detect_exception import LangDetectException
 
 from supertranslator import __version__
 from supertranslator.assemble import AssemblyError, assemble_page
+from supertranslator.web_content import prepare_approved_web_content
 from supertranslator.assets import atomic_write
 from supertranslator.capture import MAX_DATA_CSS_BYTES, CaptureError, capture_page
 from supertranslator.extract import ExtractionError, extract_segments
@@ -870,6 +871,12 @@ def _qa_selected_command(args, snapshot, approval, output, transaction) -> None:
             normalization=source.normalization,
             source_bytes=snapshot.payloads[source.path.relative_to(args.run_dir.absolute()).as_posix()],
             output_bytes=output.html_bytes,
+            target_segments={segment.id: segment for segment in segments if segment.target},
+            approved_contents=prepare_approved_web_content(
+                snapshot.payloads[source.path.relative_to(args.run_dir.absolute()).as_posix()].decode("utf-8"),
+                {segment.id: segment for segment in segments if segment.target},
+                translations, snapshot.glossary,
+            ),
         )
     )
     approval.verify()

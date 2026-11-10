@@ -15,8 +15,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from supertranslator.extract import TRANSLATABLE_ATTRIBUTES
 from supertranslator.models import Segment, Translation
 from supertranslator.paths import validate_public_url
-from supertranslator.protection import ProtectionError, restore_tokens
-from supertranslator.terminology import TerminologyError, normalize_first_use
+from supertranslator.web_content import prepare_approved_web_content
 
 
 _CSP = (
@@ -88,22 +87,11 @@ def assemble_page(
     _reject_source_meta_policies(soup)
 
     segment_map = _validate_segments(segments)
-    translation_map = _validate_translations(translations, segment_map)
     marked = _validate_markers(soup, segment_map)
     ordered_ids = [str(element["data-wt-segment"]) for element in marked]
-    try:
-        normalized = normalize_first_use(
-            [translation_map[segment_id] for segment_id in ordered_ids],
-            glossary,
-            protected_by_segment={
-                segment_id: segment_map[segment_id].protected
-                for segment_id in ordered_ids
-            },
-        )
-    except TerminologyError as error:
-        raise AssemblyError(f"terminology normalization failed: {error}") from error
+    approved = prepare_approved_web_content(source_text, segment_map, translations, glossary)
 
-    for segment_id, record in zip(ordered_ids, normalized, strict=True):
+    for segment_id in ordered_ids:
         current_matches = soup.find_all(attrs={"data-wt-segment": segment_id})
         if len(current_matches) != 1:
             raise AssemblyError(
@@ -111,22 +99,15 @@ def assemble_page(
             )
         element = current_matches[0]
         segment = segment_map[segment_id]
-        try:
-            restored = restore_tokens(record.text, segment.protected)
-        except ProtectionError as error:
-            raise AssemblyError(f"cannot restore {segment_id}: {error}") from error
-        if segment.semantic_type.startswith("located:"):
-            attributes, content = _parse_location_payload(restored, segment)
-            for attribute, value in attributes.items():
-                if not element.has_attr(attribute):
-                    raise AssemblyError(
-                        f"translated attribute location is missing from {segment_id}: {attribute}"
-                    )
-                element[attribute] = value
-            if content is not None:
-                _replace_element_content(element, content, segment)
-        else:
-            _replace_element_content(element, restored, segment)
+        payload = approved[segment_id]
+        for attribute, value in payload.attributes.items():
+            if not element.has_attr(attribute):
+                raise AssemblyError(
+                    f"translated attribute location is missing from {segment_id}: {attribute}"
+                )
+            element[attribute] = value
+        if payload.content_html is not None:
+            _replace_element_content(element, payload.content_html, segment)
         del element["data-wt-segment"]
 
     if soup.select_one("[data-wt-segment]") is not None:
@@ -227,7 +208,7 @@ def _parse_location_payload(
 
 
 def _replace_element_content(element: Tag, restored: str, segment: Segment) -> None:
-    fragment = BeautifulSoup(restored, "html.parser")
+    fragment = BeautifulSoup(restored, "html.parser", preserve_whitespace_tags={"[document]"})
     _reject_executable_fragment(fragment, segment)
     if _shape(element) != _shape(fragment):
         raise AssemblyError(f"translated fragment shape changed for {segment.id}")

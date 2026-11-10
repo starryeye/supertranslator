@@ -173,6 +173,14 @@ class MasterReview:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovedWebContent:
+    """Restored, normalized approved payload at one source-owned location."""
+
+    attributes: dict[str, str]
+    content_html: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class QAInputs:
     """All deterministic evidence consumed by the QA gate."""
 
@@ -191,6 +199,8 @@ class QAInputs:
     normalization: NormalizationSummary | None = None
     source_bytes: bytes | None = None
     output_bytes: bytes | None = None
+    target_segments: Mapping[str, Segment] | None = None
+    approved_contents: Mapping[str, ApprovedWebContent] | None = None
 
 
 @dataclass(frozen=True, slots=True)
