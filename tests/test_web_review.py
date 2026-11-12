@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 from contextlib import ExitStack
 from pathlib import Path
@@ -137,6 +138,163 @@ def test_production_consumers_parse_held_source_and_bind_exact_html(tmp_path, mo
     assert manifest["web_integrity"] == {"schema_version": "1.0", "semantic_input_sha256": review["semantic_input_sha256"],
         "approval_sha256": hashlib.sha256((run / "web-review.json").read_bytes()).hexdigest(),
         "html_sha256": hashlib.sha256((output / "index.html").read_bytes()).hexdigest()}
+
+
+@pytest.mark.parametrize("preformatted", [False, True], ids=["ordinary", "preformatted"])
+@pytest.mark.parametrize("damage", [
+    "wrong-public-url", "no-charset", "no-csp", "no-footer", "late-csp",
+    "commented-footer-text", "commented-link-label",
+])
+def test_production_qa_rejects_changed_backend_contract(tmp_path, monkeypatch, capsys, preformatted, damage):
+    import supertranslator.qa as qa
+
+    # The final URL deliberately differs from the requested URL and needs URL
+    # normalization and HTML entity encoding before it can become an href.
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted,
+        final_url="https://EXAMPLE.com/원문?q=한 글&mode=%2F#절",
+        source_head="<style>p { color: black; }</style>")
+    approval = approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    command = ["--run-dir", str(run), "--output-dir", str(output)]
+    assert main(["assemble", *command]) == 0
+    index = output / "index.html"
+    html = index.read_bytes()
+    href = b'https://example.com/%EC%9B%90%EB%AC%B8?q=%ED%95%9C%20%EA%B8%80&amp;mode=%2F#%EC%A0%88'
+    assert html.count(href) == 1
+    browser_calls = []
+
+    def browser(*args):
+        browser_calls.append(args)
+        return [], [], [], {}
+
+    monkeypatch.setattr(qa, "_run_browser_checks", browser)
+    assert main(["qa", *command]) == 0  # unaltered ordinary/preformatted control
+    assert len(browser_calls) == 1
+    browser_calls.clear()
+    old = {name: (output / name).read_bytes() for name in ("manifest.json", "review-report.md")}
+    manifest = json.loads(old["manifest.json"])
+    assert manifest["qa_status"] == "passed"
+    assert manifest["web_integrity"]["semantic_input_sha256"] == approval["semantic_input_sha256"]
+    assert manifest["web_integrity"]["html_sha256"] == hashlib.sha256(html).hexdigest()
+
+    if damage == "wrong-public-url":
+        altered = html.replace(href, b"https://unrelated.example/different-document")
+    elif damage == "no-charset":
+        altered, count = re.subn(br'<meta charset="utf-8"\s*/?>', b"", html)
+        assert count == 1
+    elif damage == "no-footer":
+        altered, count = re.subn(br'<footer data-wt-attribution="source">[^\n]*?</footer>', b"", html)
+        assert count == 1
+    elif damage in {"commented-footer-text", "commented-link-label"}:
+        label = ("AI 번역본 · " if damage == "commented-footer-text" else "원문 보기").encode("utf-8")
+        assert html.count(label) == 1
+        altered = html.replace(label, b"<!--" + label + b"-->")
+    else:
+        (csp,) = re.findall(br'<meta [^>]*data-wt-csp="offline"[^>]*>', html)
+        altered = html.replace(csp, b"")
+        if damage == "late-csp":
+            assert altered.count(b"</style>") == 1
+            altered = altered.replace(b"</style>", b"</style>" + csp)
+    assert altered != html
+    index.write_bytes(altered)
+    capsys.readouterr()
+    exit_code = main(["qa", *command])
+    status = capsys.readouterr()
+    manifest_path, report_path = output / "manifest.json", output / "review-report.md"
+    current_qa = json.loads(manifest_path.read_bytes())["qa_status"] if manifest_path.exists() else None
+    assert (exit_code, current_qa, len(browser_calls)) == (6, None, 0)
+    assert json.loads(status.out) == {"command": "qa", "exit_code": 6, "status": "error"}
+    assert "required QA checks failed: approved-content-integrity" in status.err
+    assert not report_path.exists()
+    for name, payload in old.items():
+        assert any(path.read_bytes() == payload for path in output.glob(f".qa-evidence-*/prior-{name}"))
+
+
+def _assemble_backend_boundary(tmp_path, preformatted, **fixture_options):
+    run = make_reviewable_web_run(tmp_path, preformatted=preformatted, **fixture_options)
+    approve_web_run(run)
+    output = run.parents[2] / "translated-pages" / run.name
+    command = ["--run-dir", str(run), "--output-dir", str(output)]
+    assert main(["assemble", *command]) == 0
+    assert main(["qa", *command]) == 0  # unaltered assembly, real Chromium
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    assert manifest["qa_status"] == "passed"
+    assert manifest["web_integrity"]["html_sha256"] == hashlib.sha256((output / "index.html").read_bytes()).hexdigest()
+    return output, command
+
+
+def _assert_backend_boundary_rejected(output, command, capsys):
+    capsys.readouterr()
+    exit_code = main(["qa", *command])
+    status = capsys.readouterr()
+    manifest = output / "manifest.json"
+    current_qa = json.loads(manifest.read_bytes())["qa_status"] if manifest.exists() else None
+    assert (exit_code, current_qa) == (6, None)
+    assert json.loads(status.out) == {"command": "qa", "exit_code": 6, "status": "error"}
+    assert "required QA checks failed: approved-content-integrity" in status.err
+    assert not (output / "review-report.md").exists()
+
+
+@pytest.mark.parametrize("preformatted", [False, True], ids=["ordinary", "preformatted"])
+def test_production_qa_rejects_browser_different_attribution_entity(tmp_path, capsys, preformatted):
+    from playwright.sync_api import sync_playwright
+
+    trusted = "https://example.com/%EC%9B%90%EB%AC%B8?q=%ED%95%9C%20%EA%B8%80&mode=%2F&owner=O'Reilly#%EC%A0%88"
+    canonical = (b'<a href="https://example.com/%EC%9B%90%EB%AC%B8?q=%ED%95%9C%20%EA%B8%80'
+                 b"&amp;mode=%2F&amp;owner=O'Reilly#%EC%A0%88" b'" rel="noopener noreferrer">')
+    output, command = _assemble_backend_boundary(tmp_path, preformatted,
+        final_url="https://EXAMPLE.com/원문?q=한 글&mode=%2F&owner=O'Reilly#절",
+        before_head=f'<!-- Earlier link markup: {canonical.decode("ascii")} -->')
+    index = output / "index.html"
+    html = index.read_bytes()
+    # The genuine formatter keeps the apostrophe; the first exact match is a
+    # comment decoy that must not validate the actual footer link.
+    assert html.count(canonical) == 2
+    before, link, after = html.rpartition(canonical)
+    altered = before + link.replace(b"&amp;mode=", b"&ampmode=") + after
+    assert altered.count(canonical) == 1
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            for markup, href in ((html, trusted), (altered, trusted.replace("&mode=", "&ampmode="))):
+                page.set_content(markup.decode("utf-8"), wait_until="domcontentloaded")
+                assert page.locator("footer[data-wt-attribution] > a").get_attribute("href") == href
+        finally:
+            browser.close()
+    index.write_bytes(altered)
+    _assert_backend_boundary_rejected(output, command, capsys)
+
+
+@pytest.mark.parametrize("preformatted", [False, True], ids=["ordinary", "preformatted"])
+@pytest.mark.parametrize("offset,decoy", [(1023, False), (1024, False), (1024, True)],
+                         ids=["last-valid-byte", "first-invalid-byte", "multibyte-comment-decoy"])
+def test_production_qa_enforces_actual_charset_byte_offset(tmp_path, capsys, preformatted, offset, decoy):
+    charset = b'<meta charset="utf-8"/>'
+    before_head = '<!--앞선 줄\n문자열 <meta charset="utf-8"/> -->' if decoy else ""
+    output, command = _assemble_backend_boundary(tmp_path, preformatted, before_head=before_head)
+    index = output / "index.html"
+    html = index.read_bytes()
+    assert html.count(charset) == (2 if decoy else 1)
+    start = html.rindex(charset)
+    assert start < 1023
+    (csp,) = re.findall(br'<meta [^>]*data-wt-csp="offline"[^>]*>', html)
+    padded = csp.replace(b"<meta ", b"<meta " + b" " * (offset - start), 1)
+    altered = html.replace(csp, padded, 1)
+    assert altered.rindex(charset) == offset
+    if decoy:
+        assert altered.index(charset) < 1024
+        assert altered.decode("utf-8").rindex(charset.decode("ascii")) < 1024
+    index.write_bytes(altered)
+    if offset == 1023:
+        assert main(["qa", *command]) == 0
+        manifest = json.loads((output / "manifest.json").read_bytes())
+        assert manifest["qa_status"] == "passed"
+        assert manifest["web_integrity"]["html_sha256"] == hashlib.sha256(altered).hexdigest()
+    else:
+        _assert_backend_boundary_rejected(output, command, capsys)
 
 
 @pytest.mark.parametrize("preformatted", [False, True])
@@ -389,7 +547,9 @@ def test_linked_inputs_are_rejected(tmp_path, target):
         moved = tmp_path / ("moved-" + target)
         path.rename(moved)
         path.symlink_to(moved, target_is_directory=moved.is_dir())
-    with pytest.raises(api().WebReviewError, match="link|reparse"):
+    message = (r"\Acannot hold web semantic inputs: Windows anchored assembly artifact is not a regular file\Z"
+               if os.name == "nt" and target == "glossary.json" else "link|reparse")
+    with pytest.raises(api().WebReviewError, match=message):
         with api().hold_web_semantic_inputs(run):
             pass
 

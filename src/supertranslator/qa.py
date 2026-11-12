@@ -286,7 +286,8 @@ def _run_qa(inputs: QAInputs) -> QAResult:
                 and set(inputs.target_segments) != inputs.source_segment_ids):
             required.append(_required("approved-content-contract", "Approved target coverage is incomplete.", {}))
         required.extend(check_approved_web_content(
-            source_text, output_text, inputs.target_segments, inputs.approved_contents))
+            source_text, output_text, inputs.target_segments, inputs.approved_contents,
+            source_url=inputs.source_url))
     screenshot_root = _validated_screenshot_dir(inputs, required)
 
     # Browser evidence is meaningful only after deterministic prerequisites pass.

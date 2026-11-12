@@ -11,16 +11,20 @@ from supertranslator.models import read_segments
 from supertranslator.preformatted_contract import canonical_bytes, canonical_sha256
 
 
-def make_reviewable_web_run(root: Path, *, preformatted: bool = False) -> Path:
+def make_reviewable_web_run(
+    root: Path, *, preformatted: bool = False, final_url: str = "https://example.com/", source_head: str = "",
+    before_head: str = "",
+) -> Path:
     run = root / "작업 공간" / ".supertranslator/runs/검토 run"
     run.mkdir(parents=True)
     (run.parents[2] / "translated-pages").mkdir()
     (run / "assets").mkdir()
-    source = (b"<html><head></head><body><pre>Read this manual.\nContinue reading.</pre></body></html>"
-              if preformatted else b"<html><head></head><body><p>Accept the request.</p></body></html>")
-    (run / "source.html").write_bytes(source)
+    body = ("<pre>Read this manual.\nContinue reading.</pre>"
+            if preformatted else "<p>Accept the request.</p>")
+    (run / "source.html").write_bytes(
+        f"<html>{before_head}<head>{source_head}</head><body>{body}</body></html>".encode("utf-8"))
     (run / "assets/theme.css").write_bytes(b"body { color: black; }")
-    capture = {"requested_url": "https://example.com/", "final_url": "https://example.com/",
+    capture = {"requested_url": "https://example.com/", "final_url": final_url,
                "captured_at": "2026-11-09T00:00:00Z", "asset_map": {"https://example.com/theme.css": "assets/theme.css"},
                "critical_assets": ["assets/theme.css"], "optional_assets": [], "missing_optional_assets": [],
                "fingerprints": {name: hashlib.sha256((run / name).read_bytes()).hexdigest()

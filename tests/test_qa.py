@@ -20,7 +20,7 @@ from supertranslator.models import (
     QAInputs,
     QAResult,
 )
-from supertranslator.qa import _check_external_dependencies, run_qa
+from supertranslator.qa import _check_external_dependencies, _run_browser_checks, run_qa
 from supertranslator.protection import protect_fragment
 from supertranslator.report import write_manifest, write_review_report
 from supertranslator.web_content import prepare_approved_web_content
@@ -38,6 +38,10 @@ def _authored_prose(text):
 
 def _offline_csp():
     return f'<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="{_CSP}">'
+
+
+def _offline_head():
+    return _offline_csp() + '<meta charset="utf-8">'
 
 
 def _producer_url_boundary_result(tmp_path, source_fragment, translation, output_fragment,
@@ -352,13 +356,14 @@ def test_source_bound_url_boundaries_survive_normal_extraction_assembly_and_qa(t
     from supertranslator.extract import extract_segments
     from supertranslator.models import Translation
 
+    source_url = "https://example.com/"
     captured = tmp_path / "capture" / "source.html"
     captured.parent.mkdir()
     captured.write_text('<!doctype html><html><head><meta charset="utf-8"></head><body><main>'
                         '<p id="prose" title="Read https://example.com/안내 today.">'
                         'Read https://example.com/doc today.</p>'
                         '<p id="citation">Read &lt;https://example.com/ref&gt;.</p>'
-                        '</main></body></html>', encoding="utf-8")
+                        '</main></body></html>', encoding="utf-8", newline="")
     segments = extract_segments(captured, captured.parent / "segments.jsonl")
     authored = {
         "prose": ("https://example.com/doc에서 확인하세요.", "https://example.com/안내로 이동합니다."),
@@ -375,14 +380,14 @@ def test_source_bound_url_boundaries_survive_normal_extraction_assembly_and_qa(t
             translated = segment.source_text.replace("Read ", "참조 ")
         translations[segment.id] = Translation(segment.id, translated, None, {})
     index = assemble_page(captured, {s.id: s for s in segments}, translations, {},
-                          tmp_path / "output", "https://example.com/")
+                          tmp_path / "output", source_url)
     final = BeautifulSoup(index.read_text(encoding="utf-8"), "html.parser")
     for owner, (body, title) in authored.items():
         assert final.find(id=owner).get_text() == body
         if title is not None:
             assert final.find(id=owner)["title"] == title
     result = run_qa(_inputs(
-        captured, index, source_segment_ids={s.id for s in segments},
+        captured, index, source_url=source_url, source_segment_ids={s.id for s in segments},
         translated_segment_ids=set(translations),
         protected_tokens={s.id: s.protected for s in segments},
         translated_texts={sid: t.text for sid, t in translations.items()},
@@ -409,8 +414,9 @@ def _write_pages(
         f"<!doctype html><html><head>{head}</head><body>{source_body}</body></html>",
         encoding="utf-8", newline="",
     )
+    final_head = _offline_head() + head if output_head is None else output_head
     index.write_text(
-        f"<!doctype html><html><head>{head if output_head is None else output_head}</head><body>{output_body}"
+        f"<!doctype html><html><head>{final_head}</head><body>{output_body}"
         '<footer data-wt-attribution="source">AI 번역본 · '
         '<a href="https://example.com/docs" rel="noopener noreferrer">원문 보기</a></footer></body></html>',
         encoding="utf-8", newline="",
@@ -675,7 +681,7 @@ def test_protected_token_integrity_locates_marked_title_in_document_head(
         source_body="<main>Body</main>",
         output_body="<main>Body</main>",
         head='<title data-wt-segment="a">OAuth Guide</title>',
-        output_head="<title>OAuth 가이드</title>",
+        output_head=_offline_head() + "<title>OAuth 가이드</title>",
     )
 
     result = run_qa(
@@ -711,7 +717,7 @@ def test_protected_token_integrity_rejects_missing_or_duplicate_source_markers(
         source_body="<main>Body</main>",
         output_body="<main>Body</main>",
         head=source_head,
-        output_head="<title>OAuth 가이드</title>",
+        output_head=_offline_head() + "<title>OAuth 가이드</title>",
     )
 
     result = run_qa(
@@ -1746,11 +1752,6 @@ def test_external_source_script_is_not_an_offline_dependency_when_csp_blocks_scr
     source, output = _write_pages(
         tmp_path,
         head='<script src="https://cdn.example/app.js"></script>',
-        output_head=(
-            '<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" '
-            f'content="{_CSP}">'
-            '<script src="https://cdn.example/app.js"></script>'
-        ),
     )
 
     result = run_qa(_inputs(source, output))
@@ -1762,17 +1763,17 @@ def test_external_source_script_is_not_an_offline_dependency_when_csp_blocks_scr
 def test_external_script_remains_required_without_the_offline_csp(
     tmp_path: Path,
 ) -> None:
+    # Production QA stops a missing CSP before Chromium. This deliberately
+    # nonassembled page exercises the independent browser guard itself.
+    script = '<script src="https://cdn.example/app.js"></script>'
     source, output = _write_pages(
-        tmp_path,
-        head='<script src="https://cdn.example/app.js"></script>',
+        tmp_path, head=script, output_head=script,
     )
 
-    result = run_qa(_inputs(source, output))
+    required, _, _, _ = _run_browser_checks(output, source.parent / "QA 스크린샷")
 
-    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
-        "external-critical-dependency"
-    ]
-    assert result.required_findings[0].evidence == {
+    assert [finding.code for finding in required] == ["external-critical-dependency"]
+    assert required[0].evidence == {
         "urls": ["https://cdn.example/app.js"]
     }
 
@@ -1786,8 +1787,7 @@ def test_external_script_remains_required_without_the_offline_csp(
 def test_script_preloads_require_effective_prior_blocking_csp(
     tmp_path: Path, link: str,
 ) -> None:
-    csp = _offline_csp()
-    source, output = _write_pages(tmp_path, head=link, output_head=csp + link)
+    source, output = _write_pages(tmp_path, head=link)
     result = run_qa(_inputs(source, output))
     assert result.required_findings == []
     assert result.warnings == []
@@ -1888,11 +1888,8 @@ def test_script_preloads_require_effective_prior_blocking_csp_negative(
 def test_script_preload_exemption_never_hides_css_or_other_dependencies(
     tmp_path: Path, extra: str, expected: str, warning: bool,
 ) -> None:
-    csp = _offline_csp()
     preload = '<link rel="modulepreload" href="https://cdn.example/app.js">'
-    source, output = _write_pages(
-        tmp_path, head=preload + extra, output_head=csp + preload + extra,
-    )
+    source, output = _write_pages(tmp_path, head=preload + extra)
     result = run_qa(_inputs(source, output))
     codes = {finding.code for finding in result.warnings if warning}
     codes.update(finding.code for finding in result.required_findings)
@@ -2202,13 +2199,12 @@ def test_browser_blocks_localhost_different_port_and_websocket(tmp_path: Path) -
         tmp_path,
         source_body=f'<main><p data-wt-segment="a">Hello</p>{script}</main>',
         output_body=f"<main><p>안녕하세요</p>{script}</main>",
+        output_head="",
     )
-    result = run_qa(_inputs(source, output))
+    required, _, _, _ = _run_browser_checks(output, source.parent / "QA 스크린샷")
 
-    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
-        "external-critical-dependency"
-    ]
-    assert result.required_findings[0].evidence == {
+    assert [finding.code for finding in required] == ["external-critical-dependency"]
+    assert required[0].evidence == {
         "urls": [
             "http://localhost:9/private",
             "ws://localhost:9/socket",
@@ -2241,19 +2237,18 @@ def test_browser_context_blocks_popup_navigation_to_other_loopback_server(
             tmp_path,
             source_body=f'<main><p data-wt-segment="a">Hello</p>{script}</main>',
             output_body=f"<main><p>안녕하세요</p>{script}</main>",
+            output_head="",
         )
-        result = run_qa(_inputs(source, output))
+        required, _, _, metrics = _run_browser_checks(output, source.parent / "QA 스크린샷")
     finally:
         victim.shutdown()
         victim.server_close()
         thread.join(timeout=5)
 
     assert hits == []
-    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
-        "external-critical-dependency"
-    ]
-    assert result.required_findings[0].evidence == {"urls": [escape_url]}
-    assert set(result.browser_metrics) == {"desktop-1440x900", "narrow-390x844"}
+    assert [finding.code for finding in required] == ["external-critical-dependency"]
+    assert required[0].evidence == {"urls": [escape_url]}
+    assert set(metrics) == {"desktop-1440x900", "narrow-390x844"}
 
 
 def test_same_url_requested_as_image_and_fetch_is_always_required(tmp_path: Path) -> None:
@@ -2266,12 +2261,11 @@ def test_same_url_requested_as_image_and_fetch_is_always_required(tmp_path: Path
             f'<img src="{url}"></main>'
         ),
         output_body=f'<main><p>안녕하세요</p>{script}<img src="{url}"></main>',
+        output_head="",
     )
-    result = run_qa(_inputs(source, output))
+    required, _, _, _ = _run_browser_checks(output, source.parent / "QA 스크린샷")
 
-    assert [finding.code for finding in result.required_findings if finding.code not in {"approved-content-contract", "approved-content-integrity"}] == [
-        "external-critical-dependency"
-    ]
+    assert [finding.code for finding in required] == ["external-critical-dependency"]
 
 
 def test_loopback_server_does_not_follow_nested_asset_symlink(tmp_path: Path) -> None:

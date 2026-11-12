@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -208,11 +209,14 @@ def test_find_poppler_returns_absolute_executable_paths() -> None:
     from supertranslator.pdf_media import find_poppler
 
     tools = find_poppler()
+    extension = ".exe" if sys.platform == "win32" else ""
 
     assert tools.pdfinfo.is_absolute()
-    assert tools.pdfinfo.name == "pdfinfo"
+    assert tools.pdfinfo.name == f"pdfinfo{extension}"
+    assert tools.pdfinfo.is_file() and os.access(tools.pdfinfo, os.X_OK)
     assert tools.pdftoppm.is_absolute()
-    assert tools.pdftoppm.name == "pdftoppm"
+    assert tools.pdftoppm.name == f"pdftoppm{extension}"
+    assert tools.pdftoppm.is_file() and os.access(tools.pdftoppm, os.X_OK)
 
 
 def test_find_poppler_reports_both_required_commands_when_missing(

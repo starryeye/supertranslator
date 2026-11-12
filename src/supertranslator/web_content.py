@@ -9,6 +9,7 @@ import re
 import warnings
 
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, NavigableString, Tag
+from bs4.dammit import EntitySubstitution
 
 from supertranslator.extract import TRANSLATABLE_ATTRIBUTES
 from supertranslator.models import ApprovedWebContent, Finding, Segment, Translation
@@ -140,46 +141,78 @@ def _signature(node, owners, expected, path=(), *, inner=False):
     return (node.name, _attrs(node, payload.attributes if payload else ()), children)
 
 
-def _strip_backend(soup, *, output):
-    """Permit only the backend's fixed metadata/attribution, not arbitrary prose."""
+def _tag_start(markup: str, tag: Tag) -> int:
+    """Find this html.parser node's start in the unchanged decoded markup."""
+    line_start = 0
+    # HTMLParser positions count code points and advance lines only at LF.
+    for _ in range(tag.sourceline - 1):
+        line_start = markup.index("\n", line_start) + 1
+    return line_start + tag.sourcepos
+
+
+def _strip_backend(soup, markup, *, output, source_url=None):
+    """Validate the generated page contract before excluding it from DOM comparison."""
     from supertranslator.assemble import _CSP
-    removed_charset = removed_csp = 0
+
+    if output:
+        # Assembly inserts these at the front, before any preserved source
+        # content. A CSP elsewhere in the head may not govern earlier nodes.
+        if soup.head is None or len(soup.head.contents) < 2:
+            raise ValueError("metadata")
+        csp, charset = soup.head.contents[:2]
+        if (not isinstance(csp, Tag) or csp.name != "meta"
+                or csp.attrs != {"data-wt-csp": "offline", "http-equiv": "Content-Security-Policy", "content": _CSP}
+                or not isinstance(charset, Tag) or charset.name != "meta"
+                or charset.attrs != {"charset": "utf-8"}):
+            raise ValueError("metadata")
+        # Assembly requires the declaration to start before byte 1024. Use
+        # the selected tag, not a matching string in an earlier comment, and
+        # count the exact UTF-8 prefix, not its Unicode characters.
+        start = _tag_start(markup, charset)
+        if start >= 1024 or len(markup[:start].encode("utf-8")) >= 1024:
+            raise ValueError("metadata")
+        csp.decompose()
+        charset.decompose()
     for meta in list(soup.find_all("meta")):
-        if meta.has_attr("charset") or str(meta.get("http-equiv", "")).lower() == "content-type":
+        if meta.has_attr("charset") or str(meta.get("http-equiv", "")).strip().lower() == "content-type":
             if output:
-                removed_charset += 1
-                if (removed_charset != 1 or meta.parent is not soup.head
-                        or dict(meta.attrs) != {"charset": "utf-8"}):
-                    raise ValueError("metadata")
-            meta.decompose()
-        elif output and meta.has_attr("data-wt-csp"):
-            removed_csp += 1
-            if (removed_csp != 1 or meta.parent is not soup.head or
-                    dict(meta.attrs) != {"data-wt-csp": "offline", "http-equiv": "Content-Security-Policy", "content": _CSP}):
                 raise ValueError("metadata")
             meta.decompose()
+        elif output and meta.has_attr("data-wt-csp"):
+            raise ValueError("metadata")
     attributions = soup.select("[data-wt-attribution]")
-    if attributions:
-        if not output or len(attributions) != 1:
+    if output:
+        if len(attributions) != 1:
             raise ValueError("attribution")
         footer = attributions[0]
         link = footer.find("a")
+        expected_href = str(validate_public_url(source_url))
         if (footer.name != "footer" or footer.parent is not soup.body
                 or footer.attrs != {"data-wt-attribution": "source"} or link is None
-                or link.attrs != {"href": link.get("href"), "rel": ["noopener", "noreferrer"]}
-                or len(footer.contents) != 2 or str(footer.contents[0]) != "AI 번역본 · "
+                or link.attrs != {"href": expected_href, "rel": ["noopener", "noreferrer"]}
+                or len(footer.contents) != 2 or type(footer.contents[0]) is not NavigableString
+                or footer.contents[0] != "AI 번역본 · "
                 or footer.contents[1] is not link
-                or len(link.contents) != 1 or str(link.contents[0]) != "원문 보기"):
+                or len(link.contents) != 1 or type(link.contents[0]) is not NavigableString
+                or link.contents[0] != "원문 보기"):
             raise ValueError("attribution")
-        validate_public_url(link["href"])
+        # html.parser may decode a semicolonless entity in an attribute that
+        # Chromium leaves literal. Require the assembler's normal attribute
+        # serialization at this exact anchor, not just the same decoded value.
+        quoted_href = EntitySubstitution.substitute_xml(expected_href, make_quoted_attribute=True)
+        if not markup.startswith(f'<a href={quoted_href} rel="noopener noreferrer">', _tag_start(markup, link)):
+            raise ValueError("attribution")
         footer.decompose()
+    elif attributions:
+        raise ValueError("attribution")
 
 
 def check_approved_web_content(
     source_html: str, output_html: str, segments: Mapping[str, Segment] | None,
     expected: Mapping[str, ApprovedWebContent] | None,
+    *, source_url: str | None = None,
 ) -> list[Finding]:
-    """Compare approved owners and untouched source content at real DOM paths."""
+    """Compare an assembled page against approved content and its trusted source URL."""
     contract = "approved-content-contract"
     integrity = "approved-content-integrity"
     if (not isinstance(segments, Mapping) or not isinstance(expected, Mapping)
@@ -204,8 +237,8 @@ def check_approved_web_content(
     if len(ids) != len(set(ids)) or set(ids) != set(segments):
         return [_finding(contract, "source-ownership")]
     try:
-        _strip_backend(source, output=False)
-        _strip_backend(output, output=True)
+        _strip_backend(source, source_html, output=False)
+        _strip_backend(output, output_html, output=True, source_url=source_url)
     except (ValueError, TypeError):
         return [_finding(integrity, "backend-metadata-or-attribution")]
     source_paths, output_paths = _paths(source), _paths(output)

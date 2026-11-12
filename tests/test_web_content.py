@@ -3,8 +3,14 @@ from dataclasses import replace
 
 import pytest
 
+from supertranslator.assemble import _CSP
 from supertranslator.models import MasterReview, QAInputs, Segment, Translation
 from supertranslator.qa import run_qa
+
+
+SOURCE_URL = "https://example.com/"
+CSP_META = f'<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="{_CSP}">'
+SOURCE_LINK = '<a href="https://example.com/" rel="noopener noreferrer">원문 보기</a>'
 
 
 def segment(identifier="a", semantic_type="paragraph", protected=None):
@@ -16,6 +22,11 @@ def page(body):
     return f"<!doctype html><html><head></head><body>{body}</body></html>"
 
 
+def assembled_page(body, source_link=SOURCE_LINK):
+    return (f'<!doctype html><html><head>{CSP_META}<meta charset="utf-8"></head><body>{body}'
+            f'<footer data-wt-attribution="source">AI 번역본 · {source_link}</footer></body></html>')
+
+
 @pytest.mark.parametrize("text,accepted", [("요청을 수락합니다.", True), ("요청을 거부합니다.", False)])
 def test_plain_text_inversion_fails_full_qa(tmp_path, text, accepted):
     # Removing the content gate must make the refusal case fail this test.
@@ -25,8 +36,8 @@ def test_plain_text_inversion_fails_full_qa(tmp_path, text, accepted):
     output.parent.mkdir()
     source_text = page('<main><p data-wt-segment="a">Accept the request.</p></main>')
     source.write_text(source_text, encoding="utf-8", newline="")
-    output.write_text(page(f"<main><p>{text}</p></main>"), encoding="utf-8", newline="")
-    inputs = QAInputs(source, output, "https://example.com/", {"a"}, {"a"}, [], [],
+    output.write_text(assembled_page(f"<main><p>{text}</p></main>"), encoding="utf-8", newline="")
+    inputs = QAInputs(source, output, SOURCE_URL, {"a"}, {"a"}, [], [],
                       source.parent / "screenshots", MasterReview([], {}, {}))
     from supertranslator.models import ApprovedWebContent
     inputs = replace(inputs, target_segments={"a": segment()},
@@ -46,8 +57,8 @@ def test_owned_content_rejects_omission_addition_and_duplication(altered):
     from supertranslator.web_content import check_approved_web_content
     source = page('<main>fixed<p data-wt-segment="a">Accept</p></main>')
     expected = {"a": ApprovedWebContent({}, "수락")}
-    findings = check_approved_web_content(source, page(f"<main>fixed<p>{altered}</p></main>"),
-                                          {"a": segment()}, expected)
+    findings = check_approved_web_content(source, assembled_page(f"<main>fixed<p>{altered}</p></main>"),
+                                          {"a": segment()}, expected, source_url=SOURCE_URL)
     assert {f.code for f in findings} == {"approved-content-integrity"}
 
 
@@ -56,11 +67,11 @@ def test_unowned_prose_and_literal_whitespace_are_exact():
     from supertranslator.web_content import check_approved_web_content
     source = page('<main>fixed<p data-wt-segment="a">Accept</p><pre>x  y\r\nz</pre></main>')
     expected = {"a": ApprovedWebContent({}, "수락 &amp; <em id='keep'>yes  now</em>")}
-    good = page('<main>fixed<p>수락 &amp; <em id="keep">yes  now</em></p><pre>x  y\r\nz</pre></main>')
-    assert check_approved_web_content(source, good, {"a": segment()}, expected) == []
+    good = assembled_page('<main>fixed<p>수락 &amp; <em id="keep">yes  now</em></p><pre>x  y\r\nz</pre></main>')
+    assert check_approved_web_content(source, good, {"a": segment()}, expected, source_url=SOURCE_URL) == []
     for bad in [good.replace("fixed", "fixed extra"), good.replace("yes  now", "yes now"),
                 good.replace("x  y", "x y"), good.replace("\r\n", "\n"), good.replace('id="keep"', 'id="other"')]:
-        assert check_approved_web_content(source, bad, {"a": segment()}, expected)
+        assert check_approved_web_content(source, bad, {"a": segment()}, expected, source_url=SOURCE_URL)
 
 
 def test_expected_content_preserves_normalization_and_literals():
@@ -87,19 +98,20 @@ def test_nested_parent_link_and_located_attributes_are_checked_once():
     ])}
     expected = {"a": ApprovedWebContent({}, '확인 <a data-wt-segment="b" title="Label" href="#parent">Accept</a>.'),
                 "b": ApprovedWebContent({"title": "제목"}, "수락")}
-    good = page('<main><p id="parent">확인 <a title="제목" href="#parent">수락</a>.</p></main>')
-    assert check_approved_web_content(source, good, segments, expected) == []
+    good = assembled_page('<main><p id="parent">확인 <a title="제목" href="#parent">수락</a>.</p></main>')
+    assert check_approved_web_content(source, good, segments, expected, source_url=SOURCE_URL) == []
     for bad in [good.replace("수락", "거부"), good.replace("확인", "삭제"),
                 good.replace('title="제목"', 'title="다름"'), good.replace("수락", "수락수락"),
                 good.replace('<p id="parent">', '<p id="parent" title="제목">')]:
-        assert check_approved_web_content(source, bad, segments, expected)
+        assert check_approved_web_content(source, bad, segments, expected, source_url=SOURCE_URL)
 
 
 @pytest.mark.parametrize("expected", [None, {}])
 def test_missing_or_partial_contract_fails_closed(tmp_path, expected):
     from supertranslator.web_content import check_approved_web_content
     source = page('<p data-wt-segment="a">Accept</p>')
-    findings = check_approved_web_content(source, page('<p>수락</p>'), {"a": segment()}, expected)
+    findings = check_approved_web_content(source, assembled_page('<p>수락</p>'),
+                                          {"a": segment()}, expected, source_url=SOURCE_URL)
     assert {f.code for f in findings} == {"approved-content-contract"}
 
 
@@ -109,23 +121,24 @@ def test_whitespace_only_content_is_not_a_comparison_bypass(original, altered):
     from supertranslator.web_content import check_approved_web_content
     source = page('<p data-wt-segment="a">Accept</p><code>  </code>')
     expected = {"a": ApprovedWebContent({}, original)}
-    good = page(f'<p>{original}</p><code>  </code>')
-    bad = page(f'<p>{altered}</p><code>  </code>')
-    assert check_approved_web_content(source, good, {"a": segment()}, expected) == []
-    assert {f.code for f in check_approved_web_content(source, bad, {"a": segment()}, expected)} == {"approved-content-integrity"}
+    good = assembled_page(f'<p>{original}</p><code>  </code>')
+    bad = assembled_page(f'<p>{altered}</p><code>  </code>')
+    assert check_approved_web_content(source, good, {"a": segment()}, expected, source_url=SOURCE_URL) == []
+    assert {f.code for f in check_approved_web_content(source, bad, {"a": segment()}, expected,
+                                                      source_url=SOURCE_URL)} == {"approved-content-integrity"}
 
 
 def test_backend_metadata_does_not_hide_duplicate_or_body_additions():
-    from supertranslator.assemble import _CSP
     from supertranslator.models import ApprovedWebContent
     from supertranslator.web_content import check_approved_web_content
     source = page('<p data-wt-segment="a">Accept</p>')
-    csp = f'<meta data-wt-csp="offline" http-equiv="Content-Security-Policy" content="{_CSP}">'
     expected = {"a": ApprovedWebContent({}, "수락")}
-    good = page('<p>수락</p>').replace('<head>', '<head>' + csp + '<meta charset="utf-8">')
-    assert check_approved_web_content(source, good, {"a": segment()}, expected) == []
-    for bad in [good.replace(csp, csp + csp), good.replace('<body>', '<body><meta charset="utf-8">')]:
-        assert {f.code for f in check_approved_web_content(source, bad, {"a": segment()}, expected)} == {"approved-content-integrity"}
+    good = assembled_page('<p>수락</p>')
+    assert check_approved_web_content(source, good, {"a": segment()}, expected, source_url=SOURCE_URL) == []
+    for bad in [good.replace(CSP_META, CSP_META + CSP_META),
+                good.replace('<body>', '<body><meta charset="utf-8">')]:
+        assert {f.code for f in check_approved_web_content(source, bad, {"a": segment()}, expected,
+                                                          source_url=SOURCE_URL)} == {"approved-content-integrity"}
 
 
 @pytest.mark.parametrize("wrapped,accepted", [(False, True), (True, False)],
@@ -137,16 +150,14 @@ def test_backend_attribution_requires_exact_direct_children(tmp_path, wrapped, a
     source.parent.mkdir()
     output.parent.mkdir()
     source_text = page('<p data-wt-segment="a">Accept</p>')
-    link = '<a href="https://example.com/" rel="noopener noreferrer">원문 보기</a>'
-    second_child = f'<span>{link} 승인되지 않은 거부 문구</span>' if wrapped else link
-    output_text = page('<p>수락</p><footer data-wt-attribution="source">'
-                       f'AI 번역본 · {second_child}</footer>')
+    second_child = f'<span>{SOURCE_LINK} 승인되지 않은 거부 문구</span>' if wrapped else SOURCE_LINK
+    output_text = assembled_page('<p>수락</p>', source_link=second_child)
     expected = {"a": ApprovedWebContent({}, "수락")}
-    findings = check_approved_web_content(source_text, output_text, {"a": segment()}, expected)
+    findings = check_approved_web_content(source_text, output_text, {"a": segment()}, expected, source_url=SOURCE_URL)
     assert {f.code for f in findings} == (set() if accepted else {"approved-content-integrity"})
     source.write_bytes(source_text.encode("utf-8"))
     output.write_bytes(output_text.encode("utf-8"))
-    result = run_qa(QAInputs(source, output, "https://example.com/", {"a"}, {"a"}, [], [],
+    result = run_qa(QAInputs(source, output, SOURCE_URL, {"a"}, {"a"}, [], [],
                             source.parent / "screenshots", MasterReview([], {}, {}),
                             target_segments={"a": segment()}, approved_contents=expected))
     assert result.passed == accepted
@@ -159,7 +170,8 @@ def test_fragment_comparison_never_truncates_at_a_wrapper_name():
     from supertranslator.web_content import check_approved_web_content
     source = page('<p data-wt-segment="a">Accept</p>')
     expected = {"a": ApprovedWebContent({}, "수락</wt-fragment>거부")}
-    assert check_approved_web_content(source, page('<p>수락</p>'), {"a": segment()}, expected)
+    assert check_approved_web_content(source, assembled_page('<p>수락</p>'), {"a": segment()}, expected,
+                                      source_url=SOURCE_URL)
 
 
 def test_duplicate_attributes_cannot_choose_a_different_browser_value():
@@ -168,8 +180,9 @@ def test_duplicate_attributes_cannot_choose_a_different_browser_value():
     source = page('<input data-wt-segment="a" title="Accept">')
     item = segment("a", "located:attributes", [ProtectedToken("⟦WT:000000⟧", "location", "<!--wt-location:attribute:title-->")])
     expected = {"a": ApprovedWebContent({"title": "수락"}, None)}
-    bad = page('<input title="거부" title="수락">')
-    assert {f.code for f in check_approved_web_content(source, bad, {"a": item}, expected)} == {"approved-content-integrity"}
+    bad = assembled_page('<input title="거부" title="수락">')
+    assert {f.code for f in check_approved_web_content(source, bad, {"a": item}, expected,
+                                                      source_url=SOURCE_URL)} == {"approved-content-integrity"}
 
 
 def test_located_contract_preserves_untranslated_empty_and_literal_attributes():
@@ -178,9 +191,10 @@ def test_located_contract_preserves_untranslated_empty_and_literal_attributes():
     source = page('<img data-wt-segment="a" alt="" title="Open docs" aria-label="https://example.com/">')
     item = segment("a", "located:attributes", [ProtectedToken("⟦WT:000000⟧", "location", "<!--wt-location:attribute:title-->")])
     expected = {"a": ApprovedWebContent({"title": "문서 열기"}, None)}
-    good = page('<img alt="" title="문서 열기" aria-label="https://example.com/">')
-    assert check_approved_web_content(source, good, {"a": item}, expected) == []
-    assert check_approved_web_content(source, good.replace('alt=""', 'alt="추가"'), {"a": item}, expected)
+    good = assembled_page('<img alt="" title="문서 열기" aria-label="https://example.com/">')
+    assert check_approved_web_content(source, good, {"a": item}, expected, source_url=SOURCE_URL) == []
+    assert check_approved_web_content(source, good.replace('alt=""', 'alt="추가"'), {"a": item}, expected,
+                                      source_url=SOURCE_URL)
 
 
 @pytest.mark.parametrize("held_bytes", [False, True])
@@ -190,10 +204,10 @@ def test_full_qa_preserves_literal_newlines(tmp_path, held_bytes):
     source.parent.mkdir()
     output.parent.mkdir()
     source_text = page('<p data-wt-segment="a">Accept</p><pre>x\r\ny</pre>')
-    output_text = page('<p>수락</p><pre>x\ny</pre>')
+    output_text = assembled_page('<p>수락</p><pre>x\ny</pre>')
     source.write_bytes(source_text.encode())
     output.write_bytes(output_text.encode())
-    inputs = QAInputs(source, output, "https://example.com/", {"a"}, {"a"}, [], [],
+    inputs = QAInputs(source, output, SOURCE_URL, {"a"}, {"a"}, [], [],
                       source.parent / "screenshots", MasterReview([], {}, {}),
                       target_segments={"a": segment()}, approved_contents={"a": ApprovedWebContent({}, "수락")},
                       source_bytes=source.read_bytes() if held_bytes else None,
