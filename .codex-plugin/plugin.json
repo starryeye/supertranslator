@@ -1,7 +1,7 @@
 {
   "name": "supertranslator",
-  "version": "0.10.3",
-  "description": "Translate public static HTML or local/public text-selectable PDFs into reviewed Korean output, rerender approved translations, or independently compare originals with final HTML/PDF translations.",
+  "version": "0.11.0",
+  "description": "Translate public static HTML into a Korean reading edition or local/public text-selectable PDFs into reviewed Korean PDFs, rerender approved translations, or independently compare originals and translations.",
   "author": {
     "name": "starryeye"
   },
@@ -10,14 +10,14 @@
   "interface": {
     "displayName": "supertranslator",
     "shortDescription": "Translate, rerender, or independently review HTML/PDF.",
-    "longDescription": "Provides separate translation workflows for public static HTML and local or public text-selectable PDFs, layout-only rendering of existing reviewed HTML bundles and PDF runs, and separately requested full original-to-final semantic and visual comparison.",
+    "longDescription": "Web translation delivers a visually checked Korean reading edition by default and retains a source-layout bundle. PDF translation, layout-only rendering of approved translations, and independent original-to-final review remain separate workflows.",
     "developerName": "starryeye",
     "category": "Productivity",
     "capabilities": [
       "Write"
     ],
     "defaultPrompt": [
-      "Translate this public HTML page or local/public text-selectable PDF into reviewed Korean output, rerender this existing approved translation without retranslating it, or independently compare this original with its final HTML/PDF translation."
+      "Translate this public HTML page into a checked Korean reading edition, translate a text-selectable PDF, rerender an approved translation, or independently compare an original and translation."
     ]
   }
 }
