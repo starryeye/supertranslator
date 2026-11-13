@@ -4,7 +4,7 @@
 selectable workflows:
 
 - `supertranslator-web` translates one supported public static HTML URL into an offline Korean
-  bundle while preserving its DOM, links, styles, and captured assets.
+  reading edition by default, retaining a separately QA-passed source-layout bundle.
 - `supertranslator-pdf` translates one local text-selectable PDF, attached text-selectable PDF,
   or public HTTP(S) PDF URL into a reviewed Korean PDF.
 - `supertranslator-render` edits supported layout or rerenders an existing reviewed HTML
@@ -86,8 +86,10 @@ https://docs.spring.io/spring-ai/reference/concepts.html
 ```
 
 The skill creates a unique work directory under `.supertranslator/runs/`, captures and
-extracts the page, delegates translation zones, performs master review, assembles the
-page, and runs QA. A successful output has this layout:
+extracts the page, delegates translation zones, performs master review, and assembles
+and verifies a source-layout bundle. It then reuses the approved text to export a
+separate reading edition and runs fresh visual QA. A successful default run has
+both directories:
 
 ```text
 translated-pages/<host>-<path>-<UTC timestamp>/
@@ -95,10 +97,19 @@ translated-pages/<host>-<path>-<UTC timestamp>/
 |-- assets/ (when captured)
 |-- manifest.json
 `-- review-report.md
+translated-pages/<host>-<path>-<UTC timestamp>-reader/
+|-- index.html
+|-- article.html
+|-- assets/
+|-- manifest.json
+`-- review-report.md
 ```
 
-The completion response links to `index.html` and `review-report.md` with absolute local
-paths and reports optional asset warnings.
+The completion response leads with the reading edition and its report, links the
+source-layout bundle separately, and reports optional-asset warnings. To stop
+after source-bundle QA, explicitly request **only** the original layout. If reader
+export or visual QA is blocked, the verified source-layout bundle can be used as
+a fallback; the reading edition remains incomplete.
 
 Allocation keeps absolute lexical paths and requires the run and reserved output to be
 exact children of the held `.supertranslator/runs` and `translated-pages` roots. A symlink
@@ -168,9 +179,10 @@ or deployment. Translation and rerendering do not automatically invoke this skil
 
 ### Reading editions and blog publication
 
-The existing webpage output preserves source layout. When a readable independent
-edition is requested, export an already reviewed bundle using an explicit editorial
-review, without modifying the source capture or historical output:
+The default web workflow uses the same reading-edition exporter described here.
+For an already reviewed source-layout bundle, export or revise a reading edition
+using an explicit editorial review, without modifying the source capture or
+historical output:
 
 ```text
 <PYTHON> -m supertranslator export-reader --input-dir <completed-bundle> --review <reader-review.json> --output-dir <new-reader-directory>

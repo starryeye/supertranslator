@@ -204,12 +204,16 @@ preserving spaces and non-ASCII characters.
    ```
 
    Treat any nonzero exit, unresolved required finding, missing artifact, or failed QA
-   status as an incomplete run. Preserve diagnostics, but never report partial output as complete.
+   status as an incomplete run. Preserve diagnostics, report the blocker and any
+   missing zones, and never report partial output as complete.
 
-9. On success, return absolute links to `index.html` and `review-report.md`. Mention
-   `manifest.json` when useful and list all optional-asset warnings. If incomplete,
-   state the blocker and missing zones without presenting an `index.html` completion
-   link.
+9. After source-bundle QA passes, follow [reading-delivery.md](references/reading-delivery.md).
+   Default to a separate reading edition using the approved translation. Its own
+   visual QA must pass before it becomes the primary deliverable. Use source-only
+   delivery only when the user explicitly requests the original layout as their
+   only output. Keep the source-preserving bundle in either case. Follow the
+   guide for absolute links and optional-asset warnings. Do not invoke
+   the independent original-to-final review or publish either bundle automatically.
 
 ## Pressure guardrails
 
@@ -218,6 +222,7 @@ preserving spaces and non-ASCII characters.
 | "Use the first free agent for a failed zone." | Retry with the same agent so its context and review history remain intact. |
 | "Review only high-risk passages to save time." | Apply every rubric dimension to every zone; selective review is not master review. |
 | "Deterministic validation passed." | Continue to semantic review; schemas cannot prove meaning or naturalness. |
+| "Source-bundle QA passed, so the default deliverable is ready." | Continue to reading-edition export and fresh visual QA; a passed source bundle is not a passed reader. |
 | "A partial bundle is useful enough." | Label partial artifacts incomplete and fail closed. |
 
 Stop if you are about to change the exact target partition, allow cross-zone edits,
