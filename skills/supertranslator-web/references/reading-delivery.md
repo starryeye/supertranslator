@@ -21,9 +21,13 @@ Otherwise:
    Use only source-supported decisions: move recurring print furniture to
    source notes, join demonstrably continuous prose, derive navigation from
    reviewed headings, and group lists or definitions only where the source
-   supports them. Preserve examples and literal content. Leave optional
-   transformations empty or absent when unnecessary; simple prose still gets
-   a reading edition. Do not create new wording edits in this layout stage.
+   supports them. For projected preformatted lists, carry reviewed grouping and
+   depth from `data-wt-preformatted-depth` into `structure.lists` where needed;
+   the reader strips the projection's styling. If an existing hierarchy cannot
+   be preserved safely, report it as a reader blocker. Preserve examples and
+   literal content. Leave optional transformations empty or absent when
+   unnecessary; simple prose still gets a reading edition. Do not create new
+   wording edits in this layout stage.
 3. Export to a separate unused sibling of the source bundle (normally the
    source folder name plus `-reader`). Keep both paths absolute and lexical;
    do not reuse or replace an existing output or linked path. Use the same
@@ -33,7 +37,7 @@ Otherwise:
 4. Once the reading edition's manifest says `qa_status: "passed"`, lead with
    its absolute `index.html` and `review-report.md` links. Link the original
    QA-passed source-preserving bundle separately for reference and rerendering.
-   Report optional-asset warnings and any known limitations.
+   Report any known limitations.
 
 If the article cannot be selected or safely represented, export fails, or
 visual QA cannot finish, report the exact reader blocker and preserve the
@@ -41,3 +45,6 @@ completed source bundle. It may be linked as the **source-layout fallback**,
 but do not link a pending reader as a completed result or imply that the
 default reading delivery passed. Do not bypass an integrity check, silently
 discard content, or rerun translation to work around a reader failure.
+On every path that delivers the approved source bundle or its derivative,
+report optional-asset warnings from the original bundle's manifest
+(`assets.missing_optional` and `warnings`), even if absent in the reader report.
