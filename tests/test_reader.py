@@ -743,6 +743,43 @@ def test_mobile_long_definition_labels_leave_readable_description_width(bundle):
             browser.close()
 
 
+@pytest.mark.parametrize('width', [1440, 768, 390])
+def test_native_definition_list_leaves_readable_description_width(bundle, width):
+    from playwright.sync_api import sync_playwright
+
+    term = 'VeryLongTechnicalParameterNameWithNoSpaces' * 3
+    description = '설명과 조건을 읽을 수 있어야 합니다.'
+    change_html(bundle, '<h1 id="title">',
+        f'<dl id="compact"><dt>API</dt><dd>{description}</dd></dl>'
+        f'<dl id="long"><dt>{term}</dt><dd>{description}</dd></dl><h1 id="title">')
+    path = export(bundle)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 900})
+            page.goto(path.as_uri())
+            term_box = page.locator('#long dt').bounding_box()
+            description_box = page.locator('#long dd').bounding_box()
+            if width == 390:
+                assert description_box['y'] >= term_box['y'] + term_box['height']
+            else:
+                list_width = page.locator('#long').bounding_box()['width']
+                assert description_box['width'] >= list_width / 2
+                assert term_box['width'] <= list_width * .4 + 1
+                assert page.locator('#compact dt').bounding_box()['width'] < term_box['width']
+                assert description_box['x'] >= term_box['x'] + term_box['width']
+                assert description_box['y'] == term_box['y']
+            assert page.locator('#compact :is(dt, dd), #long :is(dt, dd)').evaluate_all('''items => items.every(item => {
+                const range = document.createRange();
+                range.selectNodeContents(item);
+                const box = item.getBoundingClientRect();
+                return [...range.getClientRects()].every(text =>
+                    text.left >= box.left - 1 && text.right <= Math.min(box.right, innerWidth) + 1);
+            })''')
+        finally:
+            browser.close()
+
+
 def test_export_hashes_match_written_bytes_under_windows_text_defaults(bundle, monkeypatch):
     original_write = Path.write_text
     def windows_write(path, data, encoding=None, errors=None, newline=None):
