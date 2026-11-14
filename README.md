@@ -310,6 +310,17 @@ visible; only hosts supplying their own visible title should wrap the identical
 article fragment in `<div class="st-reader-embed">…</div>` to suppress duplicate
 document titles. Pilcrow links remain focusable with a subdued resting appearance.
 
+Optional `citation_details` moves reviewed inline citation details to a native,
+initially hidden popover beside the citation link. Each array entry has exactly
+`selector` (one live anchor with a destination and visible label), `detail_selector`
+(a trailing, contiguous suffix of its direct plain-text `span` children), and
+`detail_sha256` (SHA-256 of the selected spans' exact text concatenated in
+document order and encoded as UTF-8). Detail spans may have source classes but
+no other attributes. Stale, overlapping, hidden, or protected selections are
+refused. The button shows the exact reviewed detail without changing the original
+link, and works in browsers with native Popover API support using the bundled
+reader CSS, without JavaScript. Missing or empty selections leave citations alone.
+
 ### Local, attached, or public PDF
 
 Ask Codex to translate exactly one supported PDF. Local paths containing spaces and

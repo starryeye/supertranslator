@@ -59,6 +59,22 @@
 .st-reader a.st-permalink:is(:hover,:focus-visible,:focus) { opacity: 1; text-decoration: underline; }
 .st-reader .st-toc a:is(:hover,:focus-visible), .st-reader :is(h1,h2,h3,h4,h5,h6) a:is(:hover,:focus-visible) { text-decoration: underline; }
 .st-reader :is(a,summary):focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.st-reader button.st-citation-toggle[popovertarget] {
+  display: inline-grid; place-items: center; vertical-align: baseline;
+  min-inline-size: 24px; min-block-size: 24px; margin: 0; padding: 0;
+  border: 0; border-radius: .25em; background: transparent; color: inherit;
+  font: inherit; font-size: .85em; line-height: 1; text-indent: 0; cursor: pointer;
+}
+.st-reader button.st-citation-toggle[popovertarget]:focus-visible {
+  outline: 2px solid currentColor; outline-offset: 2px;
+}
+.st-reader .st-citation-detail[popover] {
+  box-sizing: border-box; max-inline-size: min(32rem, calc(100vw - 2rem));
+  max-block-size: calc(100vh - 2rem); overflow: auto; padding: .75em 1em;
+  border: 1px solid currentColor; border-radius: .35rem; background: Canvas; color: CanvasText;
+  box-shadow: 0 .25em .9em rgb(0 0 0 / .2); white-space: pre-wrap;
+  text-indent: 0; overflow-wrap: anywhere;
+}
 @media (max-width: 600px) {
   .st-reader { font-size: 16px; padding: 1.25rem 1rem; }
   .st-reader dl { display: block; }

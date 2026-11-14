@@ -32,7 +32,8 @@ old edit's input or author new sentence corrections during rendering.
 The reader review has required fields `schema_version: "1.0"`,
 `input_html_sha256`, `content_selector`, `title`, `removals`, `joins`,
 `heading_levels`, `list_items`; optional fields are `text_edits`, `presentation`,
-and `structure`. Inspect selections against the bound input before changing them.
+`structure`, and `citation_details`. Inspect selections against the bound input
+before changing them.
 
 - `content_selector` matches exactly one complete document region; retain front
   matter, notices, references, figures, and appendices. Preserve `title` wording.
@@ -57,6 +58,13 @@ and `structure`. Inspect selections against the bound input before changing them
   sibling `p`/`div` elements in source order, start at depth 0, and increase at
   most one level per item. Separate groups remain separate; do not overlap
   structure, presentation, archived notes, old `list_items`, or native/ARIA owners.
+- `citation_details` is an optional array; each entry has exactly `selector`,
+  `detail_selector`, and `detail_sha256`. Select one live anchor with a destination
+  and visible label, then a trailing contiguous suffix of its direct plain-text
+  `span` children (optional classes only). Hash their concatenated exact text in
+  document order, including internal whitespace, as UTF-8. Do not select hidden,
+  literal, foreign, inert, archived, or interactive content. The original link
+  remains navigable and the native button reveals the detail without scripting.
 
 The installed renderer fixes typography (18px desktop / 16px narrow prose,
 line-height 1.75, 48rem column), scoped CSS, and local literal scrolling. There

@@ -304,7 +304,7 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
     review_bytes = _read(review_path)
     review = json.loads(review_bytes)
     manifest = json.loads(manifest_bytes)
-    if not isinstance(review, dict) or not _FIELDS <= set(review) or set(review) - _FIELDS - {"text_edits", "presentation", "structure"} or review["schema_version"] != "1.0":
+    if not isinstance(review, dict) or not _FIELDS <= set(review) or set(review) - _FIELDS - {"text_edits", "presentation", "structure", "citation_details"} or review["schema_version"] != "1.0":
         raise ReaderError("invalid reader review schema")
     if not isinstance(manifest, dict) or not isinstance(review["title"], str) or not review["title"].strip() or not isinstance(review["removals"], list) or not isinstance(review["joins"], list) or not isinstance(review["heading_levels"], dict) or not isinstance(review["list_items"], list):
         raise ReaderError("invalid reader review field types")
@@ -335,7 +335,9 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
         from supertranslator.reader_layout import apply_presentation, resolve_presentation
         groups = resolve_presentation(article, review["presentation"])
     from supertranslator.reader_structure import apply_structure, resolve_structure
+    from supertranslator.reader_citations import apply_citation_details, resolve_citation_details
     structure = resolve_structure(article, review)
+    citations = resolve_citation_details(article, review.get("citation_details", []))
     # All source-bound selectors resolve before wrappers change sibling positions.
     _group_reviewed_lists(article)
     _sanitize(article, source_url)
@@ -346,6 +348,7 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
         apply_presentation(article, review["presentation"], groups)
         if any(value - _preserved(article, source_url)[key] for key, value in original_facts.items()):
             raise ReaderError("reader presentation lost protected source content")
+    apply_citation_details(article, citations, source_url)
     footer = soup.new_tag("footer", attrs={"class": "st-attribution"})
     footer.append("비공식 AI 한국어 번역 · ")
     link = soup.new_tag("a", href=source_url)
@@ -392,6 +395,8 @@ def _export_reader(input_dir: Path, review_path: Path, output_dir: Path) -> Path
         }
         if "structure" in review:
             output_manifest["structure"] = review["structure"]
+        if citations:
+            output_manifest["citation_details"] = review["citation_details"]
         output_manifest["render_input_sha256"] = rendering_digest(output_manifest)
         (staging / "manifest.json").write_text(json.dumps(output_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
         (staging / "review-report.md").write_text(

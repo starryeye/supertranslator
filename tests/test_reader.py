@@ -95,6 +95,151 @@ def export(bundle, change=None):
     return reader.export_reader(source, review_path, output)
 
 
+def _citation_fixture(bundle, markup=None):
+    detail = "  출처 · 2020\n원문 설명  "
+    anchor = f'<a id="citation" title="출처 링크" href="#section-1"><em>[RFC]</em><span>{detail[:7]}</span><span class="info">{detail[7:]}</span></a>'
+    if markup is None:
+        markup = (f'<p>{anchor} 이후 <a id="neighbor" href="#section-1">[OTHER]<span>다른 설명</span></a></p>'
+                  '<p id="st-citation-0001"><a name="st-citation-0002"></a></p>')
+    _replace_reviewed_item(bundle, markup, [])
+    change_html(bundle, '<article id="doc" style="font-size:8px">', '<article id="doc">')
+    return {"selector": "#citation", "detail_selector": ":scope > span",
+            "detail_sha256": hashlib.sha256(detail.encode()).hexdigest()}
+
+
+def test_reader_citation_details_preserve_link_and_exact_detail(bundle):
+    entry = _citation_fixture(bundle)
+    path = export(bundle, lambda r: r.update(citation_details=[entry]))
+    article = BeautifulSoup(path.read_bytes(), "html.parser").select_one(".st-reader")
+    fragment = BeautifulSoup((path.parent / "article.html").read_bytes(), "html.parser").select_one(".st-reader")
+    assert str(article) == str(fragment)
+    assert str(article.select_one("#citation")) == '<a href="#section-1" id="citation" title="출처 링크"><em>[RFC]</em></a>'
+    assert article.select_one("#neighbor").get_text() == "[OTHER]다른 설명"
+    button = article.select_one("button")
+    assert button["type"] == "button"
+    assert "[RFC]" in button["aria-label"]
+    assert button["popovertarget"] == "st-citation-0003"
+    detail = article.select_one("#st-citation-0003[popover]").get_text()
+    assert detail == "  출처 · 2020\n원문 설명  "
+    assert article.get_text().count(detail) == 1
+
+
+def test_reader_citation_details_allow_live_table_cells(bundle):
+    entry = _citation_fixture(
+        bundle,
+        '<table><tr><td><a id="citation" href="#section-1">[RFC]'
+        '<span>  출처 · 2020\n원문 설명  </span></a></td></tr></table>',
+    )
+    path = export(bundle, lambda r: r.update(citation_details=[entry]))
+    article = BeautifulSoup(path.read_bytes(), "html.parser").select_one(".st-reader")
+    assert article.select_one("td > #citation + button[popovertarget] + span[popover]").get_text() == (
+        "  출처 · 2020\n원문 설명  "
+    )
+
+
+@pytest.mark.parametrize("invalid", [
+    "hash", "duplicate", "missing", "ambiguous", "unlabeled", "nontrailing",
+    "nested", "destination", "hidden", "literal", "foreign", "inert", "archive", "control", "gap",
+    "datalist", "table", "table-row", "inline-style", "variable",
+])
+def test_reader_citation_details_reject_invalid_source_selection(bundle, invalid):
+    if invalid in {"hash", "duplicate", "missing", "ambiguous", "nontrailing"}:
+        entry = _citation_fixture(bundle)
+    else:
+        detail = "  출처 · 2020\n원문 설명  "
+        span = f"<span>{detail}</span>"
+        if invalid == "nested":
+            span = f"<span><em>{detail}</em></span>"
+        if invalid == "destination":
+            span = f'<span id="destination">{detail}</span>'
+        if invalid == "hidden":
+            span = f'<span hidden>{detail}</span>'
+        if invalid == "gap":
+            span = f'<span>{detail[:7]}</span> <span>{detail[7:]}</span>'
+        label = "" if invalid == "unlabeled" else "[RFC]"
+        if invalid == "control":
+            label = "<button>[RFC]</button>"
+        anchor = f'<a id="citation" href="#section-1">{label}{span}</a>'
+        start, end = {
+                "literal": ("<pre>", "</pre>"), "foreign": ("<math>", "</math>"),
+                "variable": ("<var>", "</var>"),
+            "inert": ("<div inert>", "</div>"),
+            "archive": ('<details class="st-source-notes">', "</details>"),
+            "datalist": ('<datalist id="choices">', "</datalist>"),
+            "table": ("<table>", "</table>"),
+            "table-row": ("<table><tr>", "</tr></table>"),
+            "inline-style": ('<p style="d\\69 splay: none">', "</p>"),
+        }.get(invalid, ("<p>", "</p>"))
+        entry = _citation_fixture(bundle, start + anchor + end)
+    if invalid == "hash":
+        entry["detail_sha256"] = "0" * 64
+    if invalid == "missing":
+        entry["selector"] = "#missing"
+    if invalid == "ambiguous":
+        entry["selector"] = "#citation, #neighbor"
+    if invalid == "nontrailing":
+        entry["detail_selector"] = ":scope > span:first-of-type"
+    with pytest.raises(ValueError, match="citation"):
+        export(bundle, lambda r: r.update(citation_details=[entry] * (2 if invalid == "duplicate" else 1)))
+    assert not bundle[2].exists()
+
+
+def test_reader_citation_popover_works_with_keyboard_and_touch(bundle):
+    from playwright.sync_api import expect, sync_playwright
+
+    entry = _citation_fixture(bundle)
+    path = export(bundle, lambda r: r.update(citation_details=[entry]))
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            keyboard = browser.new_page()
+            keyboard.goto(path.as_uri())
+            assert keyboard.locator('meta[http-equiv="Content-Security-Policy"]').count() == 1
+            assert keyboard.locator("script").count() == 0
+            link = keyboard.locator("#citation")
+            toggle = keyboard.get_by_role("button", name="[RFC] 인용 상세")
+            detail = keyboard.locator(".st-citation-detail")
+            expect(detail).to_be_hidden()
+            link.focus()
+            keyboard.keyboard.press("Tab")
+            expect(toggle).to_be_focused()
+            keyboard.keyboard.press("Enter")
+            expect(detail).to_be_visible()
+            assert keyboard.evaluate("location.hash") == ""
+            keyboard.keyboard.press("Escape")
+            expect(detail).to_be_hidden()
+            expect(toggle).to_be_focused()
+            link.focus()
+            keyboard.keyboard.press("Enter")
+            assert keyboard.evaluate("location.hash") == "#section-1"
+
+            touch = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+            # Serve the actual article fragment in a host document with the same
+            # external stylesheet and CSP as the standalone edition.
+            hosted = BeautifulSoup(path.read_bytes(), "html.parser")
+            embedded = BeautifulSoup((path.parent / "article.html").read_bytes(), "html.parser")
+            hosted.main["class"] = "st-reader-embed"
+            hosted.main.article.replace_with(embedded.article)
+            touch.route("https://reader.test/**", lambda route: route.fulfill(
+                status=200, content_type="text/css", path=path.parent / "assets" / "reader.css",
+            ) if route.request.url.endswith("/assets/reader.css") else route.fulfill(
+                status=200, content_type="text/html", body=str(hosted),
+            ))
+            touch.goto("https://reader.test/")
+            detail = touch.locator(".st-citation-detail")
+            expect(detail).to_be_hidden()
+            touch.get_by_role("button", name="[RFC] 인용 상세").tap()
+            expect(detail).to_be_visible()
+            assert detail.bounding_box()["width"] < 390
+            assert touch.evaluate("location.hash") == ""
+            touch.locator("#title").tap()
+            expect(detail).to_be_hidden()
+            touch.locator("#citation").tap()
+            assert touch.evaluate("location.hash") == "#section-1"
+        finally:
+            browser.close()
+
+
 def test_exports_reading_article_without_viewer_and_preserves_exact_literals(bundle):
     path = export(bundle)
     soup = BeautifulSoup(path.read_text(encoding="utf-8"), "lxml")
