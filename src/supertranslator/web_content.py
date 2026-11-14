@@ -10,12 +10,89 @@ import warnings
 
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, NavigableString, Tag
 from bs4.dammit import EntitySubstitution
+import tinycss2
 
 from supertranslator.extract import TRANSLATABLE_ATTRIBUTES
 from supertranslator.models import ApprovedWebContent, Finding, Segment, Translation
 from supertranslator.paths import validate_public_url
 from supertranslator.protection import ProtectionError, restore_tokens
 from supertranslator.terminology import TerminologyError, normalize_first_use
+
+
+_MOBILE_LAYOUT_ATTR = "data-wt-mobile-layout"
+_MOBILE_LAYOUT_VALUE = "preformatted"
+_DISPLAY_OUTSIDE = {"block", "inline", "run-in"}
+_DISPLAY_INSIDE = {"flow", "flow-root", "table", "flex", "grid", "ruby", "math"}
+_DISPLAY_OTHER = {
+    "none", "contents", "list-item", "inline-block", "inline-table",
+    "inline-flex", "inline-grid", "table-row-group", "table-header-group",
+    "table-footer-group", "table-row", "table-cell", "table-column-group",
+    "table-column", "table-caption", "ruby-base", "ruby-text",
+    "ruby-base-container", "ruby-text-container", "-webkit-box", "-webkit-inline-box",
+}
+_CSS_WIDE = {"initial", "inherit", "unset", "revert", "revert-layer"}
+
+
+def _static_table_wrapper(style: str) -> bool:
+    """Find a literal inline table declaration the stylesheet can override."""
+    display = None
+    important = False
+    for decl in tinycss2.parse_declaration_list(style, skip_comments=True, skip_whitespace=True):
+        if decl.type != "declaration":
+            continue
+        if decl.important and decl.lower_name in {"width", "all", "inline-size"}:
+            return False
+        if decl.lower_name not in {"display", "all"} or (important and not decl.important):
+            continue
+        tokens = [token for token in decl.value if token.type not in {"whitespace", "comment"}]
+        if any(token.type == "function" and token.lower_name in {"var", "env", "attr"} for token in tokens):
+            display, important = None, decl.important
+            continue
+        if not tokens or any(token.type != "ident" for token in tokens):
+            continue
+        names = {token.lower_value for token in tokens}
+        single = len(tokens) == 1
+        table = (single and names == {"table"}) or (len(tokens) == 2 and names == {"block", "table"})
+        valid = (single and bool(names & (_CSS_WIDE if decl.lower_name == "all" else
+                                          _CSS_WIDE | _DISPLAY_OUTSIDE | _DISPLAY_INSIDE | _DISPLAY_OTHER)))
+        if decl.lower_name == "display" and not single and len(names) == len(tokens):
+            outside, inside = names & _DISPLAY_OUTSIDE, names & _DISPLAY_INSIDE
+            valid = ((len(names) == 2 and len(outside) == len(inside) == 1)
+                     or ("list-item" in names and names <= _DISPLAY_OUTSIDE | {"list-item", "flow", "flow-root"}
+                         and len(outside) <= 1 and len(inside) <= 1))
+        if valid:
+            display, important = table, decl.important
+    return display is True and not important
+
+
+def _mobile_layout_css(document: Tag) -> str | None:
+    styles = {
+        str(node["style"]) for node in document.select("body div[style]:has(> [data-wt-preformatted-root])")
+    }
+    selectors = []
+    for style in sorted(styles):
+        if not _static_table_wrapper(style):
+            continue
+        # The CSS lives in HTML raw text. Hex escapes prevent either a CSS
+        # string breakout or a literal closing style tag from source data.
+        browser_value = style.replace("\r\n", "\n").replace("\r", "\n")
+        quoted = "".join(f"\\{ord(char):x} " for char in browser_value)
+        selectors.append(f'body div[style="{quoted}"]:has(> [data-wt-preformatted-root])')
+    if not selectors:
+        return None
+    return (
+        "@media (max-width: 768px) {\n"
+        "  body { overflow-wrap: anywhere; }\n"
+        f"  {', '.join(selectors)} {{ display: block !important; width: auto !important; }}\n"
+        "}"
+    )
+
+
+def _is_mobile_layout_style(node: Tag, head: Tag, expected_css: str | None) -> bool:
+    return (expected_css is not None and node.name == "style" and node.parent is head
+            and bool(head.contents) and head.contents[-1] is node
+            and node.attrs == {_MOBILE_LAYOUT_ATTR: _MOBILE_LAYOUT_VALUE}
+            and node.string == expected_css)
 
 
 def _parse(markup: str) -> BeautifulSoup:
@@ -150,9 +227,16 @@ def _tag_start(markup: str, tag: Tag) -> int:
     return line_start + tag.sourcepos
 
 
-def _strip_backend(soup, markup, *, output, source_url=None):
+def _strip_backend(soup, markup, *, output, source_url=None, mobile_layout_css=None):
     """Validate the generated page contract before excluding it from DOM comparison."""
     from supertranslator.assemble import _CSP
+
+    styles = soup.find_all(attrs={_MOBILE_LAYOUT_ATTR: True})
+    if styles:
+        if (not output or len(styles) != 1 or soup.head is None
+                or not _is_mobile_layout_style(styles[0], soup.head, mobile_layout_css)):
+            raise ValueError("mobile-layout")
+        styles[0].decompose()
 
     if output:
         # Assembly inserts these at the front, before any preserved source
@@ -238,7 +322,8 @@ def check_approved_web_content(
         return [_finding(contract, "source-ownership")]
     try:
         _strip_backend(source, source_html, output=False)
-        _strip_backend(output, output_html, output=True, source_url=source_url)
+        _strip_backend(output, output_html, output=True, source_url=source_url,
+                       mobile_layout_css=_mobile_layout_css(source))
     except (ValueError, TypeError):
         return [_finding(integrity, "backend-metadata-or-attribution")]
     source_paths, output_paths = _paths(source), _paths(output)

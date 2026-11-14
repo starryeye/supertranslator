@@ -70,7 +70,13 @@ def _review_classification(run):
 
 
 def _assembled(tmp_path):
-    run, output = _run(tmp_path)
+    run, output = _approved_run(tmp_path)
+    assert _command('assemble', run, output) == 0
+    return run, output
+
+
+def _approved_run(tmp_path, source=None):
+    run, output = _run(tmp_path) if source is None else _generic_run(tmp_path, source)
     assert _command('prepare-preformatted', run) == 0
     _review_classification(run)
     assert _command('materialize-preformatted', run) == 0
@@ -96,7 +102,6 @@ def _assembled(tmp_path):
             for name in DIMENSIONS]}}) + '\n', encoding='utf-8')
     assert _command('validate-translations', run) == 0
     approve_web_run(run)
-    assert _command('assemble', run, output) == 0
     return run, output
 
 
@@ -595,6 +600,58 @@ def test_preformatted_pipeline_runs_real_commands_and_preserves_capture(tmp_path
     assert all((run / name).read_bytes() == value for name, value in captured.items())
     statuses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert all(s['status'] == 'ok' and s['exit_code'] == 0 for s in statuses)
+
+
+def test_projected_fixed_width_wrapper_passes_mobile_qa(tmp_path, capsys):
+    # The legacy table's intrinsic width is set by its unwrapped grid. A
+    # separate long inline term exercises the page-level wrap fallback.
+    from playwright.sync_api import sync_playwright
+
+    literal = b'+---+\r\n| A |' + b'A' * 96
+    source = (SOURCE.replace(b'<pre id="manual">',
+                             b'<div id="legacy" style="width: 560px;\n\tDISPLAY : table;'
+                             b' --test: &quot;&lt;/style&gt;&quot;"><pre id="manual">')
+              .replace(b'+---+\r\n| A |</pre>', literal + b'</pre></div>')
+              .replace(b'</body>', b'<aside><code>' + b'longidentifier' * 7 + b'</code></aside></body>'))
+    run, output = _approved_run(tmp_path, source)
+    held = {path.relative_to(run): path.read_bytes()
+            for path in [run / 'source.html', run / 'capture.json', run / 'preformatted-source.html',
+                         run / 'preformatted/provenance.json', *(run / 'assets').iterdir()]}
+    assert held[Path('source.html')] == source
+    assert _command('assemble', run, output) == 0
+    capsys.readouterr()
+    status = _command('qa', run, output)
+    result = capsys.readouterr()
+    assert status == 0, result.out + result.err
+
+    final = output / 'index.html'
+    markup = final.read_bytes()
+    assert literal in markup
+    assert literal.replace(b'\r', b'&#13;') in held[Path('preformatted-source.html')]
+    assert all((run / path).read_bytes() == value for path, value in held.items())
+    assert all((output / path).read_bytes() == value
+               for path, value in held.items() if path.parts[0] == 'assets')
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(viewport={'width': 390, 'height': 844})
+            page.goto(final.as_uri())
+            assert page.evaluate('document.documentElement.scrollWidth') == 390
+            assert page.locator('[data-wt-preformatted-literal]').evaluate(
+                "(node) => node.scrollWidth > node.clientWidth && getComputedStyle(node).overflowX === 'auto'"
+            )
+            assert page.locator('#legacy').evaluate('(node) => getComputedStyle(node).display') == 'block'
+
+            page.set_viewport_size({'width': 1440, 'height': 900})
+            assert page.locator('#legacy').evaluate('(node) => getComputedStyle(node).display') == 'table'
+        finally:
+            browser.close()
+    style = BeautifulSoup(markup.decode(), 'html.parser').select_one('style[data-wt-mobile-layout]')
+    assert style is not None
+    final.write_bytes(markup.replace(str(style).encode(), b'', 1))
+    assert _command('qa', run, output) == 6
+    assert 'required QA checks failed: viewport-horizontal-overflow' in capsys.readouterr().err
+    _no_pass(output)
 
 
 @pytest.mark.parametrize('mutation', ['grid', 'code-newline', 'url', 'href', 'id', 'css',

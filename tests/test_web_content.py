@@ -141,6 +141,93 @@ def test_backend_metadata_does_not_hide_duplicate_or_body_additions():
                                                           source_url=SOURCE_URL)} == {"approved-content-integrity"}
 
 
+def test_mobile_layout_style_is_exact_and_source_bound(tmp_path):
+    from bs4 import BeautifulSoup
+
+    from supertranslator.assemble import assemble_page
+    from supertranslator.models import ApprovedWebContent, ProtectedToken
+    from supertranslator.web_content import check_approved_web_content
+
+    body = ('<div style="display: table; width: 560px">'
+            '<div data-wt-preformatted-root="pre-000001"><p>Projected prose.</p></div></div>')
+    title = '<title data-wt-segment="a">OAuth guide</title>'
+    source_text = page(body).replace('<!doctype html>', '<!DOCTYPE html>\n').replace('</head>', title + '</head>')
+    protected = [ProtectedToken('⟦WT:000000⟧', 'identifier', 'OAuth')]
+    segments = {'a': segment(protected=protected)}
+    translations = {'a': Translation('a', '⟦WT:000000⟧ 안내')}
+    expected = {'a': ApprovedWebContent({}, 'OAuth 안내')}
+    source = tmp_path / 'run/source.html'
+    source.parent.mkdir()
+    source.write_text(source_text, encoding='utf-8')
+    final = assemble_page(source, segments, translations, {}, tmp_path / 'out', SOURCE_URL)
+    good = final.read_text(encoding='utf-8')
+    head = BeautifulSoup(good, 'html.parser').head
+    style = head.find('style', attrs={'data-wt-mobile-layout': 'preformatted'}, recursive=False)
+    assert style is not None and head.contents[-1] is style
+    serialized = str(style)
+
+    def findings(original, rendered):
+        return {item.code for item in check_approved_web_content(
+            original, rendered, segments, expected, source_url=SOURCE_URL)}
+
+    assert findings(source_text, good) == set()
+    result = run_qa(QAInputs(source, final, SOURCE_URL, {'a'}, {'a'}, [], [],
+                            source.parent / 'screenshots', MasterReview([], {}, {}),
+                            protected_tokens={'a': protected}, translated_texts={'a': translations['a'].text},
+                            target_segments=segments, approved_contents=expected))
+    assert result.passed, result.required_findings
+
+    absent = good.replace(serialized, '')
+    assert findings(source_text, absent) == set()
+    other_source = source_text.replace('width: 560px', 'width: 561px')
+    assert findings(other_source, good.replace('width: 560px', 'width: 561px')) == {'approved-content-integrity'}
+    for bad in (good.replace('</style>', 'body{color:red}</style>'),
+                good.replace(serialized, serialized * 2),
+                absent.replace('<body>', '<body>' + serialized),
+                absent.replace('<title>', serialized + '<title>')):
+        assert findings(source_text, bad) == {'approved-content-integrity'}
+    for unqualified in (body.replace('display: table;', 'display: table-cell;'),
+                        body.replace('display: table;', 'display: block;'),
+                        body.replace('display: table;', '--display: table;'),
+                        body.replace('<div data-wt-preformatted-root', '<section><div data-wt-preformatted-root')
+                        .replace('</p></div></div>', '</p></div></section></div>'),
+                        body.replace(' data-wt-preformatted-root="pre-000001"', '')):
+        ordinary = source_text.replace(body, unqualified)
+        source.write_text(ordinary, encoding='utf-8')
+        assembled = assemble_page(source, segments, translations, {},
+                                  tmp_path / f'ordinary-{len(unqualified)}', SOURCE_URL)
+        unchanged = assembled.read_text(encoding='utf-8')
+        assert 'data-wt-mobile-layout' not in unchanged
+        assert findings(ordinary, unchanged.replace('</head>', serialized + '</head>')) == {'approved-content-integrity'}
+
+
+@pytest.mark.parametrize(('declaration', 'eligible'), [
+    ('width:560px;  display: table', True),
+    ('display: table; display: flex', False),
+    ('--example: &quot;x;display:table;y&quot;; display: flex', False),
+    ('display: table; display: bogus', True),
+    ('display: flex !important; display: table', False),
+    ('display: flex; display: table !important', False),
+    ('display: table; width:560px !important', False),
+    ('display: block table', True),
+    ('display: table; display: inline table', False),
+    ('display: table; display: block;', False),
+    ('--test: &quot;&lt;/style&gt;&quot;; display: table', True),
+])
+def test_mobile_layout_uses_effective_inline_display(tmp_path, declaration, eligible):
+    from supertranslator.assemble import assemble_page
+    from supertranslator.web_content import check_approved_web_content
+
+    source = tmp_path / 'run/source.html'
+    source.parent.mkdir()
+    body = f'<div style="{declaration}"><div data-wt-preformatted-root="pre-000001"></div></div>'
+    original = page(body).replace('<!doctype html>', '<!DOCTYPE html>\n')
+    source.write_text(original, encoding='utf-8')
+    output = assemble_page(source, {}, {}, {}, tmp_path / 'out', SOURCE_URL).read_text(encoding='utf-8')
+    assert ('data-wt-mobile-layout' in output) is eligible
+    assert check_approved_web_content(original, output, {}, {}, source_url=SOURCE_URL) == []
+
+
 @pytest.mark.parametrize("wrapped,accepted", [(False, True), (True, False)],
                          ids=["genuine-footer", "wrapped-anchor-with-added-prose"])
 def test_backend_attribution_requires_exact_direct_children(tmp_path, wrapped, accepted):

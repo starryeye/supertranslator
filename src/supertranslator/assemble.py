@@ -15,7 +15,10 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from supertranslator.extract import TRANSLATABLE_ATTRIBUTES
 from supertranslator.models import Segment, Translation
 from supertranslator.paths import validate_public_url
-from supertranslator.web_content import prepare_approved_web_content
+from supertranslator.web_content import (
+    _MOBILE_LAYOUT_ATTR, _MOBILE_LAYOUT_VALUE, _mobile_layout_css,
+    prepare_approved_web_content,
+)
 
 
 _CSP = (
@@ -85,6 +88,9 @@ def assemble_page(
     if soup.html is None or soup.head is None or soup.body is None:
         raise AssemblyError("source HTML must contain html, head, and body elements")
     _reject_source_meta_policies(soup)
+    if soup.find(attrs={_MOBILE_LAYOUT_ATTR: True}) is not None:
+        raise AssemblyError("source HTML already contains a plugin mobile layout marker")
+    mobile_layout = _mobile_layout_css(soup)
 
     segment_map = _validate_segments(segments)
     marked = _validate_markers(soup, segment_map)
@@ -114,6 +120,10 @@ def assemble_page(
         raise AssemblyError("not all DOM segment markers were consumed")
 
     _add_offline_head_metadata(soup)
+    if mobile_layout is not None:
+        style = soup.new_tag("style", attrs={_MOBILE_LAYOUT_ATTR: _MOBILE_LAYOUT_VALUE})
+        style.string = mobile_layout
+        soup.head.append(style)
     _add_attribution(soup, final_source_url)
     return _publish_bundle(source_html.parent, soup, output_dir, revalidate=revalidate)
 

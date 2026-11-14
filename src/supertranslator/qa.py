@@ -28,7 +28,9 @@ from supertranslator.models import Finding, ProtectedToken, QAInputs, QAResult
 from supertranslator.protection import _URL_PATTERN, _trim_url_end
 import supertranslator.pdf_assemble as anchored
 from supertranslator.preformatted_runtime import hold_processing_source, verify_preformatted_output
-from supertranslator.web_content import check_approved_web_content
+from supertranslator.web_content import (
+    _is_mobile_layout_style, _mobile_layout_css, check_approved_web_content,
+)
 
 
 _TOKEN_PATTERN = re.compile(r"⟦WT:\d{6}⟧")
@@ -793,6 +795,9 @@ def _corresponding_output_element(
 def _normalized_head_children(source: Tag, output: Tag) -> tuple[list[Tag], list[Tag]] | None:
     original = [child for child in source.children if isinstance(child, Tag)]
     restored = [child for child in output.children if isinstance(child, Tag)]
+    if (restored and restored[-1].has_attr("data-wt-mobile-layout")
+            and _is_mobile_layout_style(restored[-1], output, _mobile_layout_css(source.parent))):
+        restored.pop()
     source_children = [child for child in original if not _is_removed_head_meta(child)]
     if (len(restored) >= 2 and restored[0].name == "meta"
         and restored[0].get("data-wt-csp") == "offline"
