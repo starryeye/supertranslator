@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from supertranslator.assemble import _is_link_or_reparse
-from supertranslator.reader import ReaderError, _digest, _read, _replace_file, _local_asset, rendering_digest
+from supertranslator.reader import ReaderError, _digest, _legacy_anchor_names, _read, _replace_file, _local_asset, rendering_digest
 
 
 def _check_bytes(output: Path, manifest: dict) -> None:
@@ -44,8 +44,9 @@ def qa_reader(output_dir: Path, visual_review: Path | None = None) -> dict:
     ids = {str(tag["id"]) for tag in article.select("[id]")}
     if len(ids) != len(article.select("[id]")):
         raise ReaderError("duplicate reader anchor IDs")
+    destinations = ids.union(_legacy_anchor_names(article))
     missing = sorted({unquote(str(a["href"])[1:]) for a in article.select('a[href^="#"]')
-                      if len(str(a["href"])) > 1 and unquote(str(a["href"])[1:]) not in ids})
+                      if len(str(a["href"])) > 1 and unquote(str(a["href"])[1:]) not in destinations})
     if missing:
         raise ReaderError(f"missing article anchor destinations: {missing}")
     for tag in article.select("[src],a[href]"):

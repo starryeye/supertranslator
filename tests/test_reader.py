@@ -562,6 +562,59 @@ def test_reader_qa_requires_exact_visual_review_for_final_success(bundle, tmp_pa
     assert json.loads((path.parent / "manifest.json").read_text(encoding="utf-8"))["qa_status"] == "passed"
 
 
+@pytest.mark.parametrize("fragment, missing", [
+    ("Legacy", False),
+    ("%20Legacy%20%25%20", False),
+    ("legacy", True),
+    ("absent", True),
+    ("not-an-anchor", True),
+    ("svg-anchor", True),
+    ("math-anchor", True),
+    ("template-anchor", True),
+    ("math-html-anchor", False),
+    ("svg-html-anchor", False),
+])
+def test_reading_edition_resolves_legacy_named_anchors(bundle, fragment, missing):
+    from supertranslator.reader_qa import qa_reader
+
+    change_html(bundle, '<h2 id="section-1">', (
+        '<a name="Legacy"></a><a name="Legacy"></a><a name=" Legacy % "></a>'
+        '<span name="not-an-anchor"></span><svg><a name="svg-anchor"></a></svg>'
+        '<math><a name="math-anchor"></a></math><template><a name="template-anchor"></a></template>'
+        '<math><mtext><a name="math-html-anchor"></a></mtext></math>'
+        '<svg><desc><a name="svg-html-anchor"></a></desc></svg>'
+        f'<p><a href="#{fragment}">절로 이동</a></p><h2 id="section-1">'
+    ))
+    path = export(bundle)
+    if missing:
+        with pytest.raises(ValueError, match="missing article anchor destinations"):
+            qa_reader(path.parent)
+    else:
+        assert qa_reader(path.parent)["automated_status"] == "passed"
+
+
+def test_reader_qa_rejects_duplicate_ids_even_with_named_anchors(bundle):
+    from supertranslator.reader_qa import qa_reader
+
+    change_html(bundle, '<h2 id="section-1">', (
+        '<a name="legacy"></a><p id="section-1"><a href="#legacy">절로 이동</a></p>'
+        '<h2 id="section-1">'
+    ))
+    path = export(bundle)
+    with pytest.raises(ValueError, match="duplicate reader anchor IDs"):
+        qa_reader(path.parent)
+
+
+def test_reader_inventories_exact_named_anchor_counts():
+    from supertranslator.reader import _preserved
+
+    article = BeautifulSoup(
+        '<article><a name=" Root % "></a><a name=" Root % "></a><a name=""></a>'
+        '<span name="other"></span><svg><a name="svg-anchor"></a></svg></article>', "lxml",
+    ).article
+    assert _preserved(article, "https://example.com/spec").get("anchor_names") == {" Root % ": 2}
+
+
 def change_html(bundle, old, new):
     source, review, _ = bundle
     raw = (source / "index.html").read_text(encoding="utf-8").replace(old, new)
@@ -767,6 +820,8 @@ def layout_review(bundle):
 
 def test_presentation_builds_collision_safe_hierarchical_navigation_and_retains_source(bundle):
     review = layout_review(bundle)
+    change_html(bundle, '<span id="st-heading-0001"></span>',
+                '<span id="st-heading-0001"></span><a name="st-heading-0002"></a>')
     path = export(bundle, lambda r: r.update(presentation=review))
     article = BeautifulSoup(path.read_bytes(), "lxml").select_one('.st-reader')
     toc = article.select_one('details.st-toc')
@@ -778,6 +833,8 @@ def test_presentation_builds_collision_safe_hierarchical_navigation_and_retains_
     assert toc.select_one('ol ol a').get_text() == '1.1. 세부 항목'
     ids = [t['id'] for t in article.select('[id]')]
     assert len(ids) == len(set(ids))
+    assert article.select_one('a[name="st-heading-0002"]') is not None
+    assert "st-heading-0002" not in ids
     assert article.find(id='old-toc').find_parent('details', class_='st-source-notes') is not None
     assert article.find(id='metadata').find_parent('details', class_='st-document-info') is not None
     assert article.find(id='metadata').get_text() == '발행2024'

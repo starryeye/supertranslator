@@ -158,7 +158,8 @@ def test_mobile_layout_style_is_exact_and_source_bound(tmp_path):
     expected = {'a': ApprovedWebContent({}, 'OAuth 안내')}
     source = tmp_path / 'run/source.html'
     source.parent.mkdir()
-    source.write_text(source_text, encoding='utf-8')
+    # Synthetic capture bytes must match source_text on Windows as well.
+    source.write_bytes(source_text.encode('utf-8'))
     final = assemble_page(source, segments, translations, {}, tmp_path / 'out', SOURCE_URL)
     good = final.read_text(encoding='utf-8')
     head = BeautifulSoup(good, 'html.parser').head
@@ -193,7 +194,7 @@ def test_mobile_layout_style_is_exact_and_source_bound(tmp_path):
                         .replace('</p></div></div>', '</p></div></section></div>'),
                         body.replace(' data-wt-preformatted-root="pre-000001"', '')):
         ordinary = source_text.replace(body, unqualified)
-        source.write_text(ordinary, encoding='utf-8')
+        source.write_bytes(ordinary.encode('utf-8'))
         assembled = assemble_page(source, segments, translations, {},
                                   tmp_path / f'ordinary-{len(unqualified)}', SOURCE_URL)
         unchanged = assembled.read_text(encoding='utf-8')
@@ -222,7 +223,7 @@ def test_mobile_layout_uses_effective_inline_display(tmp_path, declaration, elig
     source.parent.mkdir()
     body = f'<div style="{declaration}"><div data-wt-preformatted-root="pre-000001"></div></div>'
     original = page(body).replace('<!doctype html>', '<!DOCTYPE html>\n')
-    source.write_text(original, encoding='utf-8')
+    source.write_bytes(original.encode('utf-8'))
     output = assemble_page(source, {}, {}, {}, tmp_path / 'out', SOURCE_URL).read_text(encoding='utf-8')
     assert ('data-wt-mobile-layout' in output) is eligible
     assert check_approved_web_content(original, output, {}, {}, source_url=SOURCE_URL) == []

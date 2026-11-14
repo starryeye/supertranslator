@@ -6,7 +6,7 @@ from urllib.parse import quote
 
 from bs4 import BeautifulSoup, Comment, Tag
 
-from supertranslator.reader import ReaderError, _one
+from supertranslator.reader import ReaderError, _legacy_anchor_names, _one
 
 
 _FIELDS = {"toc_selectors", "metadata_selectors", "title_selectors", "navigation"}
@@ -101,6 +101,7 @@ def apply_presentation(article: Tag, review: dict, groups: dict[str, list[Tag]])
     nav = soup.new_tag("nav", attrs={"aria-label": "문서 목차"})
     root = soup.new_tag("ol"); nav.append(root); details.append(nav)
     used = {str(tag["id"]) for tag in article.select("[id]")}
+    used.update(_legacy_anchor_names(article))
     number = 1
     stack = [(int(headings[0].name[1]), root)]
     for heading in headings:

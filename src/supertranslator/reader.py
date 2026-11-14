@@ -80,9 +80,36 @@ def _canonical_link(value: str, source_url: str) -> str:
     return value if value.startswith("#") else urljoin(source_url, value)
 
 
+def _is_live_html_anchor(tag: Tag) -> bool:
+    if tag.name != "a" or not tag.get("name") or tag.find_parent("template") is not None:
+        return False
+    # lxml's HTML parser does not expose foreign namespaces. Track HTML
+    # integration points within the nearest SVG or MathML ancestor.
+    html_contexts = set()
+    for ancestor in tag.parents:
+        if ancestor.name in {"svg", "math"}:
+            return ancestor.name in html_contexts
+        if ancestor.name in {"desc", "title"}:
+            html_contexts.add("svg")
+        if ancestor.name in {"mi", "mo", "mn", "ms", "mtext"} or (
+            ancestor.name == "annotation-xml"
+            and ancestor.get("encoding", "").lower() in {"text/html", "application/xhtml+xml"}
+        ):
+            html_contexts.add("math")
+    return True
+
+
+def _legacy_anchor_names(root: Tag) -> Counter[str]:
+    return Counter(
+        str(tag["name"]) for tag in [root, *root.select("a[name]")]
+        if _is_live_html_anchor(tag)
+    )
+
+
 def _preserved(root: Tag, source_url: str) -> dict[str, object]:
     return {
         "ids": Counter(str(t["id"]) for t in [root, *root.select("[id]")] if t.has_attr("id")),
+        "anchor_names": _legacy_anchor_names(root),
         "literals": Counter(t.get_text() for t in root.select("pre") if t.get_text().strip()),
         "links": Counter((_canonical_link(str(t.get("href")), source_url), t.get_text()) for t in root.select("a[href]")),
         "images": Counter((str(t.get("src")), str(t.get("alt", ""))) for t in root.select("img")),
