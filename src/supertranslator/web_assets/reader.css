@@ -40,6 +40,10 @@
 .st-reader figcaption { margin-top: .5em; font-size: .9em; }
 .st-reader table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .st-reader :is(th,td) { padding: .5em .75em; border: 1px solid rgba(127,127,127,.4); }
+/* Give reference keys room without forbidding wrapping for long identifiers. */
+.st-reader tr > td:first-child:not(:only-child):has(> a:is([name],[id]):not([href]):only-child) {
+  min-inline-size: calc(10ch + 1.5em);
+}
 .st-reader a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }
 .st-reader [id] { scroll-margin-top: 5rem; }
 .st-reader .st-source-notes { margin: 2em 0; border-top: 1px solid rgba(127,127,127,.4); padding-top: 1em; }
@@ -80,4 +84,9 @@
   .st-reader dl { display: block; }
   .st-reader dt { margin-top: .75em; }
   .st-reader dd { margin-inline-start: 1em; }
+  /* Source width attributes and emergency wrapping can squeeze label columns. */
+  .st-reader .st-document-info table { inline-size: 100%; }
+  .st-reader .st-document-info tr > :is(th,td):first-child:not(:only-child,:has(table)) {
+    min-inline-size: 4.5em;
+  }
 }

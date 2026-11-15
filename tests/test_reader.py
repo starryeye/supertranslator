@@ -681,6 +681,42 @@ def test_browser_keeps_prose_readable_and_literals_scroll_locally(bundle):
             browser.close()
 
 
+@pytest.mark.parametrize("width", [390, 768, 1440])
+def test_reader_keeps_short_labels_on_one_line_in_narrow_tables(bundle, width):
+    from playwright.sync_api import sync_playwright
+
+    change_html(bundle, '<h1 id="title">', '''
+    <table id="publication" width="66%"><tr><td><table width="100%"><tr>
+      <td id="edition">최종판</td><td>문서 작성자 및 발행 기관</td>
+    </tr></table></td></tr></table>
+    <table id="references" width="350"><tr>
+      <td><a name="RFC6749" id="key">[RFC6749]</a></td>
+      <td>OAuth Authorization Framework 참고문헌 및 발행일 안내. 이 글은 호환 구현에 필요한
+      세부 규칙과 여러 가지 예외를 설명하는 참고문헌의 내용을 요약합니다. 문헌 제목과 문단 및
+      관련 내용에 대한 길이가 긴 참고 문구가 들어가는 모바일 표의 실제 가독성을 확인합니다.</td>
+    </tr><tr><td><a name="long-key">[AReallyLongReferenceIdentifierWithoutWordBoundaries]</a></td>
+      <td>매우 긴 참고문헌 키에서도 페이지 전체는 가로로 넘치지 않아야 합니다.</td></tr></table>
+    <h1 id="title">''')
+    path = export(bundle, lambda r: r.update(presentation={
+        "metadata_selectors": ["#publication"], "title_selectors": [],
+        "toc_selectors": [], "navigation": False,
+    }))
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        page.goto(path.as_uri())
+        page.locator(".st-document-info summary").click()
+        rows = page.evaluate('''() => Object.fromEntries(['edition', 'key'].map(id => {
+          const text = document.createRange();
+          text.selectNodeContents(document.getElementById(id));
+          return [id, text.getClientRects().length];
+        }))''')
+        assert rows["key"] == 1
+        if width == 390:
+            assert rows["edition"] == 1
+        assert page.evaluate("document.documentElement.scrollWidth") == width
+
+
 def test_reader_qa_rejects_changed_plain_text_even_if_protected_tokens_match(bundle):
     from supertranslator.reader_qa import qa_reader
     path = export(bundle)
